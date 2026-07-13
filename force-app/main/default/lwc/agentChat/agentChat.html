@@ -20,6 +20,7 @@
                     <div><span class="label">Organization ID</span><code>{orgContext.expectedOrgId}</code></div>
                 </div>
                 <template if:true={isProduction}><div class="production-warning" role="alert">You are reviewing work for a Production Salesforce org. Deployment requires production-specific approval.</div></template>
+                <template if:true={hasDataOperations}><div class="production-warning" role="alert">This plan contains Salesforce record changes. Review every object, record ID, field, and value before granting the separate execution approval.</div></template>
 
                 <template if:true={canSelectOrg}>
                     <section class="action-band">
@@ -54,10 +55,10 @@
                     <template if:true={canImplement}><lightning-button variant="brand" label="Implement Locally" icon-name="utility:code_playground" onclick={handleImplement}></lightning-button></template>
                     <template if:true={canValidate}><lightning-button label="Validate" icon-name="utility:test" onclick={handleValidate}></lightning-button></template>
                     <template if:true={canApproveDeployment}>
-                        <lightning-button variant="brand" label="Approve Deployment" icon-name="utility:approval" onclick={handleApproveDeployment}></lightning-button>
-                        <lightning-button label="Reject Deployment" icon-name="utility:close" onclick={handleRejectDeployment}></lightning-button>
+                        <lightning-button variant="brand" label={approvalActionLabel} icon-name="utility:approval" onclick={handleApproveDeployment}></lightning-button>
+                        <lightning-button label={rejectionActionLabel} icon-name="utility:close" onclick={handleRejectDeployment}></lightning-button>
                     </template>
-                    <template if:true={hasDeploymentApproval}><lightning-button variant="destructive" label="Deploy Approved Package" icon-name="utility:upload" onclick={handleDeploy}></lightning-button></template>
+                    <template if:true={hasDeploymentApproval}><lightning-button variant="destructive" label={executionActionLabel} icon-name="utility:upload" onclick={handleDeploy}></lightning-button></template>
                     <template if:true={canRefreshAnalysis}><lightning-button label="Refresh Analysis" icon-name="utility:refresh" onclick={handleRefreshAnalysis}></lightning-button></template>
                     <template if:true={canCancel}><lightning-button label="Cancel" icon-name="utility:ban" onclick={handleCancel}></lightning-button></template>
                 </div>

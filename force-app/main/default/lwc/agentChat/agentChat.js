@@ -40,6 +40,10 @@ export default class AgentChat extends LightningElement {
     get canImplement() { return this.status === 'IMPLEMENTING' && !this.job?.implementation; }
     get canValidate() { return this.status === 'IMPLEMENTING' || this.status === 'VALIDATION_FAILED'; }
     get canApproveDeployment() { return this.status === 'AWAITING_DEPLOYMENT_APPROVAL'; }
+    get hasDataOperations() { return Boolean(this.plan?.dataOperations?.length); }
+    get approvalActionLabel() { return this.hasDataOperations ? 'Approve Data Execution' : 'Approve Deployment'; }
+    get rejectionActionLabel() { return this.hasDataOperations ? 'Reject Data Execution' : 'Reject Deployment'; }
+    get executionActionLabel() { return this.hasDataOperations ? 'Execute Approved Data Changes' : 'Deploy Approved Package'; }
     get hasDeploymentApproval() { return (this.job?.approvals || []).some((item) => item.approvalType === 'DEPLOYMENT' && item.decision === 'APPROVED' && item.validationId === this.validation?.validationId); }
     get canRefreshAnalysis() { return ['RECEIVED', 'PLAN_REJECTED', 'ORG_VERIFICATION_FAILED'].includes(this.status); }
     get canCancel() { return !['COMPLETED', 'FAILED', 'CANCELLED', 'DEPLOYING'].includes(this.status); }
@@ -98,7 +102,7 @@ export default class AgentChat extends LightningElement {
     async handleRejectPlan() { await this.action('reject-plan', { comments: 'Rejected in Salesforce agent console.' }); }
     async handleImplement() { await this.action('implement', {}); }
     async handleValidate() { await this.action('validate', {}); }
-    async handleApproveDeployment() { await this.action('approve-deployment', { validationId: this.validation.validationId, productionSpecificApproval: this.isProduction, comments: this.isProduction ? 'Production deployment explicitly approved in Salesforce agent console.' : 'Deployment approved in Salesforce agent console.' }); }
+    async handleApproveDeployment() { await this.action('approve-deployment', { validationId: this.validation.validationId, productionSpecificApproval: this.isProduction, comments: this.hasDataOperations ? 'Salesforce data execution explicitly approved in the agent console.' : (this.isProduction ? 'Production deployment explicitly approved in Salesforce agent console.' : 'Deployment approved in Salesforce agent console.') }); }
     async handleRejectDeployment() { await this.action('reject-deployment', { comments: 'Deployment rejected in Salesforce agent console.' }); }
     async handleDeploy() { await this.action('deploy', {}); }
     async handleCancel() { await this.action('cancel', { reason: 'Cancelled in Salesforce agent console.' }); }

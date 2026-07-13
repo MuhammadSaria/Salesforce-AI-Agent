@@ -126,11 +126,14 @@
       "localProjectPath": "workspaces/sapa_devsandbox/project",
       "authenticationStatus": "connected",
       "deploymentPermission": "blocked",
+      "dataMutationPermission": "allowed",
+      "allowedDataObjects": ["Account", "Contact", "Opportunity", "Lead", "Case", "Campaign"],
+      "maximumDataOperations": 10,
       "productionApprovalRequired": false,
       "active": true,
       "allowedMetadataTypes": ["CustomObject", "CustomField", "Flow", "ApexClass", "ApexTrigger", "LightningComponentBundle", "PermissionSet", "ValidationRule", "CustomMetadata", "CustomLabels", "Layout", "FlexiPage", "RecordType"],
       "restrictedMetadataTypes": ["Profile", "ConnectedApp", "AuthProvider"],
-      "allowedOperations": ["read", "retrieve", "validate"]
+      "allowedOperations": ["read", "retrieve", "validate", "data-create", "data-update"]
     },
     {
       "id": "read_canada_production",

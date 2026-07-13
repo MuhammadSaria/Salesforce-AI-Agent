@@ -34,6 +34,27 @@ const COMMANDS = {
       }
     }
   },
+  sobjectDescribe: {
+    operation: 'read',
+    args: ({ objectApiName, targetOrg }) => ['sobject', 'describe', '--sobject', objectApiName, '--target-org', targetOrg, '--json'],
+    validate: ({ objectApiName }) => validateApiName(objectApiName, 'object')
+  },
+  dataCreate: {
+    operation: 'data-create',
+    requiresApproval: true,
+    args: ({ objectApiName, fields, targetOrg }) => ['data', 'create', 'record', '--sobject', objectApiName, '--values', formatFieldValues(fields), '--target-org', targetOrg, '--json'],
+    validate: ({ objectApiName, fields }) => { validateApiName(objectApiName, 'object'); validateDataFields(fields); }
+  },
+  dataUpdate: {
+    operation: 'data-update',
+    requiresApproval: true,
+    args: ({ objectApiName, recordId, fields, targetOrg }) => ['data', 'update', 'record', '--sobject', objectApiName, '--record-id', recordId, '--values', formatFieldValues(fields), '--target-org', targetOrg, '--json'],
+    validate: ({ objectApiName, recordId, fields }) => {
+      validateApiName(objectApiName, 'object');
+      if (!/^[A-Za-z0-9]{15,18}$/.test(String(recordId || ''))) throw new Error('A valid Salesforce record ID is required for update.');
+      validateDataFields(fields);
+    }
+  },
   retrieveManifest: {
     operation: 'retrieve',
     args: ({ manifest, targetOrg, outputDir }) => [
@@ -182,6 +203,24 @@ function validateJobOutputPath(path) {
   const fullPath = resolve(String(path || ''));
   const jobsRoot = resolve(config.workspaceRoot, 'jobs');
   if (relative(jobsRoot, fullPath).startsWith('..')) throw new Error('Output path must stay inside the isolated jobs workspace.');
+}
+
+function validateApiName(value, label) {
+  if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(String(value || ''))) throw new Error(`Invalid Salesforce ${label} API name.`);
+}
+
+function validateDataFields(fields) {
+  if (!fields || Array.isArray(fields) || typeof fields !== 'object' || !Object.keys(fields).length) throw new Error('Explicit Salesforce field values are required.');
+  for (const [field, value] of Object.entries(fields)) {
+    validateApiName(field, 'field');
+    if (/password|token|secret|session/i.test(field)) throw new Error(`Blocked sensitive Salesforce field: ${field}.`);
+    if (value !== null && !['string', 'number', 'boolean'].includes(typeof value)) throw new Error(`Invalid value for Salesforce field ${field}.`);
+  }
+}
+
+function formatFieldValues(fields) {
+  validateDataFields(fields);
+  return Object.entries(fields).map(([field, value]) => `${field}='${String(value ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`).join(' ');
 }
 
 function normalizeMetadataWritePath(path, jobId, localProjectRoot) {

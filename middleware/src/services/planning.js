@@ -116,7 +116,7 @@ export function buildPlan(job, requirement, scope, dependencies) {
     metadataExcluded: scope.excludedMetadata,
     proposedImplementation: 'Implement only the listed task-relevant components after explicit implementation approval.',
     componentsToCreate: [], componentsToModify: scope.primaryMetadata, componentsToDelete: [],
-    filesToCreate: [], filesToModify: [], fileOperations: [],
+    filesToCreate: [], filesToModify: [], fileOperations: [], dataOperations: [],
     testingStrategy: ['Validate the task-specific manifest against the verified org', 'Run relevant Apex tests', 'Run middleware and LWC unit checks when affected'],
     validationStrategy: 'Dry-run the exact approved package against the same verified Salesforce Organization ID.',
     deploymentStrategy: 'Deploy the validated package only after a separate deployment approval.',

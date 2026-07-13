@@ -112,7 +112,7 @@ async function implement(job, actor) {
     await appendCommand(job.jobId, result);
     changedFiles.push(operation.path);
   }
-  const sourceHash = stableHash({ planHash: job.plan.planHash, files: job.plan.fileOperations || [] });
+  const sourceHash = stableHash({ planHash: job.plan.planHash, files: job.plan.fileOperations || [], dataOperations: job.plan.dataOperations || [] });
   let diffResult = { stdout: '', exitCode: 0 };
   let commitHash = baselineResult.stdout.trim();
   if (changedFiles.length) {
@@ -125,7 +125,7 @@ async function implement(job, actor) {
   }
   await writeFile(join(paths.diff, 'implementation.diff'), diffResult.stdout, 'utf8');
   await updateJob(job.jobId, { implementation: { approvalId: approval.approvalId, branch, baselineCommit: baselineResult.stdout.trim(), commitHash, changedFiles, sourceHash, implementedAt: new Date().toISOString() }, diff: diffResult.stdout });
-  await appendLog(job.jobId, 'info', changedFiles.length ? `Implemented ${changedFiles.length} approved file operations locally. No deployment was performed.` : 'The approved plan contained no file operations. No source files were changed and deployment remains blocked.');
+  await appendLog(job.jobId, 'info', changedFiles.length ? `Implemented ${changedFiles.length} approved file operations locally. No deployment or data mutation was performed.` : `Prepared ${(job.plan.dataOperations || []).length} approved data operations. No data mutation was performed.`);
 }
 
 async function validate(job, actor) {
@@ -137,14 +137,25 @@ async function validate(job, actor) {
     const paths = await ensureJobWorkspace(current.jobId, current.orgContext.orgRegistryId);
     await verifySelectedOrg(current.orgContext, auditOptions(current, actor));
     await assertCleanImplementation(paths, current.implementation);
-    const noSourceChanges = !(current.plan.fileOperations || []).length && !(current.implementation?.changedFiles || []).length;
-    if (noSourceChanges) {
+    const dataOperations = current.plan.dataOperations || [];
+    const hasSourceChanges = Boolean((current.plan.fileOperations || []).length || (current.implementation?.changedFiles || []).length);
+    if (hasSourceChanges && dataOperations.length) throw new Error('Metadata and record mutations must be split into separate jobs to prevent partial execution.');
+    const dataValidationCommands = await validatePlannedDataOperations(current, paths, actor);
+    if (!hasSourceChanges && !dataOperations.length) {
       const now = new Date();
       const validation = { validationId: nanoid(), targetOrgId: current.orgContext.expectedOrgId, status: 'PASSED', outcome: 'NO_CHANGES', sourceHash: current.implementation?.sourceHash || stableHash([]), commitHash: current.implementation?.commitHash || '', planHash: current.plan.planHash, metadataScopeHash: current.metadataScope.hash, packageHash: stableHash([]), commands: [], result: 'No source changes were proposed, so Salesforce deployment validation was not required.', warnings: ['No Salesforce source changes to validate or deploy.'], timestamp: now.toISOString(), expiryTimestamp: new Date(now.getTime() + config.validationExpiryMinutes * 60000).toISOString() };
       await writeFile(join(paths.validation, `${validation.validationId}.json`), JSON.stringify(validation, null, 2), 'utf8');
       await updateJob(current.jobId, { validation, deployment: { notRequired: true, reason: 'No source changes were proposed.' } });
       if (current.jiraIssueKey) await addJiraComment(current.jiraIssueKey, noChangeCompletionComment(current, validation));
       await transitionJob(current.jobId, JOB_STATES.COMPLETED, { actor, reason: 'Validation completed with no source changes; deployment was not required.' });
+      return;
+    }
+    if (dataOperations.length) {
+      const now = new Date();
+      const validation = { validationId: nanoid(), targetOrgId: current.orgContext.expectedOrgId, status: 'PASSED', outcome: 'DATA_OPERATIONS_VALIDATED', sourceHash: current.implementation.sourceHash, commitHash: current.implementation.commitHash || '', planHash: current.plan.planHash, metadataScopeHash: current.metadataScope.hash, packageHash: stableHash(dataOperations), commands: dataValidationCommands, result: `${dataOperations.length} structured record operations passed object, field, permission, and target-org validation. No records were changed.`, timestamp: now.toISOString(), expiryTimestamp: new Date(now.getTime() + config.validationExpiryMinutes * 60000).toISOString() };
+      await writeFile(join(paths.validation, `${validation.validationId}.json`), JSON.stringify(validation, null, 2), 'utf8');
+      await updateJob(current.jobId, { validation });
+      await transitionJob(current.jobId, JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL, { actor, reason: 'Data operations validated; separate execution approval required.' });
       return;
     }
     const result = await runSfCommand('deployDryRun', { manifest: current.manifest }, { ...sfOptions(current, current.orgContext, paths, actor, current.metadataScope), cwd: paths.implementationProject });
@@ -168,16 +179,33 @@ async function deploy(job, actor) {
   const paths = await ensureJobWorkspace(job.jobId, job.orgContext.orgRegistryId);
   await verifySelectedOrg(job.orgContext, auditOptions(job, actor));
   await assertCleanImplementation(paths, job.implementation);
-  const result = await runSfCommand('deployManifest', { manifest: job.manifest }, { ...sfOptions(job, job.orgContext, paths, actor, job.metadataScope, true), cwd: paths.implementationProject });
-  await appendCommand(job.jobId, result);
-  if (result.exitCode !== 0) {
-    await transitionJob(job.jobId, JOB_STATES.FAILED, { actor, reason: 'Deployment failed.', error: result.stderr });
-    return;
+  const dataOperations = job.plan.dataOperations || [];
+  let result;
+  const recordResults = [];
+  if (dataOperations.length) {
+    for (const operation of dataOperations) {
+      const command = operation.operation === 'create' ? 'dataCreate' : 'dataUpdate';
+      result = await runSfCommand(command, operation, { ...sfOptions(job, job.orgContext, paths, actor, job.metadataScope, true), cwd: paths.implementationProject });
+      await appendCommand(job.jobId, result);
+      if (result.exitCode !== 0) {
+        await updateJob(job.jobId, { deployment: { status: recordResults.length ? 'PARTIAL_FAILURE' : 'FAILED', targetOrgId: job.orgContext.expectedOrgId, recordResults, error: sfFailureMessage(result), failedAt: new Date().toISOString() } });
+        await transitionJob(job.jobId, JOB_STATES.FAILED, { actor, reason: 'Approved data execution failed.', error: sfFailureMessage(result) });
+        return;
+      }
+      recordResults.push({ operation: operation.operation, objectApiName: operation.objectApiName, recordId: extractRecordId(result.stdout) || operation.recordId });
+    }
+  } else {
+    result = await runSfCommand('deployManifest', { manifest: job.manifest }, { ...sfOptions(job, job.orgContext, paths, actor, job.metadataScope, true), cwd: paths.implementationProject });
+    await appendCommand(job.jobId, result);
+    if (result.exitCode !== 0) {
+      await transitionJob(job.jobId, JOB_STATES.FAILED, { actor, reason: 'Deployment failed.', error: sfFailureMessage(result) });
+      return;
+    }
   }
-  const deployment = { deploymentId: extractDeployId(result.stdout), targetOrgId: job.orgContext.expectedOrgId, sourceHash: job.validation.sourceHash, packageHash: job.validation.packageHash, commitHash: job.validation.commitHash || '', result: result.stdout, deployedAt: new Date().toISOString() };
+  const deployment = { deploymentId: dataOperations.length ? '' : extractDeployId(result.stdout), targetOrgId: job.orgContext.expectedOrgId, sourceHash: job.validation.sourceHash, packageHash: job.validation.packageHash, commitHash: job.validation.commitHash || '', result: dataOperations.length ? JSON.stringify(recordResults) : result.stdout, recordResults, deployedAt: new Date().toISOString() };
   await updateJob(job.jobId, { deployment });
   if (job.jiraIssueKey) await addJiraComment(job.jiraIssueKey, completionComment(job, deployment));
-  await transitionJob(job.jobId, JOB_STATES.COMPLETED, { actor, reason: 'Approved package deployed and Jira updated.', approvalId: approval.approvalId });
+  await transitionJob(job.jobId, JOB_STATES.COMPLETED, { actor, reason: dataOperations.length ? 'Approved record operations executed and Jira updated.' : 'Approved package deployed and Jira updated.', approvalId: approval.approvalId });
 }
 
 function validApproval(job, type) {
@@ -190,8 +218,10 @@ function assertDeploymentGuard(job, approval) {
   const validation = job.validation;
   if (!validation || validation.status !== 'PASSED' || new Date(validation.expiryTimestamp) <= new Date()) throw new Error('A current successful validation is required.');
   if (approval.validationId !== validation.validationId || approval.validatedSourceHash !== validation.sourceHash || approval.deploymentPackageHash !== validation.packageHash) throw new Error('Deployment approval does not match the validated artifacts.');
-  if (job.orgContext.environment === 'production' && (!config.allowProductionDeployment || approval.productionSpecificApproval !== true)) throw new Error('Production deployment is disabled or lacks production-specific approval.');
-  if (job.orgContext.deploymentPermission !== 'allowed' || !job.orgContext.allowedOperations.includes('deploy')) throw new Error('Deployment is not enabled for the selected org registry entry.');
+  if (job.orgContext.environment === 'production' && (!config.allowProductionDeployment || approval.productionSpecificApproval !== true)) throw new Error('Production execution is disabled or lacks production-specific approval.');
+  const hasDataOperations = Boolean(job.plan.dataOperations?.length);
+  if (hasDataOperations && job.orgContext.dataMutationPermission !== 'allowed') throw new Error('Data mutation is not enabled for the selected org registry entry.');
+  if (!hasDataOperations && (job.orgContext.deploymentPermission !== 'allowed' || !job.orgContext.allowedOperations.includes('deploy'))) throw new Error('Deployment is not enabled for the selected org registry entry.');
   if (job.plan.destructiveChanges?.length) throw new Error('Destructive changes are blocked by default.');
 }
 
@@ -201,6 +231,33 @@ function sfOptions(job, orgContext, paths, actor, scope, approved = false) { ret
 async function requiredJob(jobId) { const job = await getJobRecord(jobId); if (!job) throw Object.assign(new Error('Job not found.'), { statusCode: 404 }); return job; }
 async function fileHash(path) { return stableHash(await readFile(path, 'utf8')); }
 function extractDeployId(stdout) { try { const parsed = JSON.parse(stdout); return parsed.result?.id || parsed.result?.deployId || ''; } catch { return ''; } }
+function extractRecordId(stdout) { try { const parsed = JSON.parse(stdout); return parsed.result?.id || parsed.result?.recordId || ''; } catch { return ''; } }
+async function validatePlannedDataOperations(job, paths, actor) {
+  const operations = job.plan.dataOperations || [];
+  if (!operations.length) return [];
+  if (job.orgContext.dataMutationPermission !== 'allowed') throw new Error('Data mutation is blocked for the selected org.');
+  if (operations.length > job.orgContext.maximumDataOperations) throw new Error(`Data operation count exceeds the org limit of ${job.orgContext.maximumDataOperations}.`);
+  const commands = [];
+  for (const operation of operations) {
+    if (!job.orgContext.allowedDataObjects.includes(operation.objectApiName)) throw new Error(`Data operations on ${operation.objectApiName} are not allowed for this org.`);
+    const requiredPermission = operation.operation === 'create' ? 'data-create' : 'data-update';
+    if (!job.orgContext.allowedOperations.includes(requiredPermission)) throw new Error(`${requiredPermission} is not allowed for this org.`);
+    const describe = await runSfCommand('sobjectDescribe', { objectApiName: operation.objectApiName }, sfOptions(job, job.orgContext, paths, actor, job.metadataScope));
+    await appendCommand(job.jobId, describe); commands.push(describe.command);
+    if (describe.exitCode !== 0) throw new Error(sfFailureMessage(describe));
+    const fields = JSON.parse(describe.stdout)?.result?.fields || [];
+    for (const fieldName of Object.keys(operation.fields)) {
+      const field = fields.find((item) => item.name === fieldName);
+      if (!field || (operation.operation === 'create' ? field.createable === false : field.updateable === false)) throw new Error(`Field ${operation.objectApiName}.${fieldName} is not ${operation.operation}able.`);
+    }
+    if (operation.operation === 'update') {
+      const query = await runSfCommand('dataQuery', { query: `SELECT Id FROM ${operation.objectApiName} WHERE Id = '${operation.recordId}' LIMIT 1` }, sfOptions(job, job.orgContext, paths, actor, job.metadataScope));
+      await appendCommand(job.jobId, query); commands.push(query.command);
+      if (query.exitCode !== 0 || Number(JSON.parse(query.stdout)?.result?.totalSize || 0) !== 1) throw new Error('The approved update record does not exist in the verified target org.');
+    }
+  }
+  return commands;
+}
 async function assertCleanImplementation(paths, implementation) {
   if (!implementation) throw new Error('A completed local implementation record is required.');
   const status = await runGit('status', { cwd: paths.implementationProject });
@@ -208,7 +265,13 @@ async function assertCleanImplementation(paths, implementation) {
   if (status.exitCode !== 0 || status.stdout.trim()) throw new Error('Implementation worktree contains unapproved or uncommitted changes.');
   if (head.stdout.trim() !== implementation.commitHash) throw new Error('Implementation Git commit no longer matches the approved source.');
 }
-function completionComment(job, deployment) { return [`AI agent job ${job.jobId} completed.`, `Salesforce org: ${job.orgContext.displayName} (${job.orgContext.expectedOrgId})`, `Environment: ${job.orgContext.environment}`, `Validation: ${job.validation.status} (${job.validation.validationId})`, `Deployment ID: ${deployment.deploymentId || 'not returned'}`, `Rollback: ${job.plan.rollbackPlan}`].join('\n'); }
+function completionComment(job, deployment) {
+  const recordResults = deployment.recordResults || [];
+  const executionResult = recordResults.length
+    ? `Record execution: ${recordResults.map((item) => `${item.operation} ${item.objectApiName} ${item.recordId}`).join(', ')}`
+    : `Deployment ID: ${deployment.deploymentId || 'not returned'}`;
+  return [`AI agent job ${job.jobId} completed.`, `Salesforce org: ${job.orgContext.displayName} (${job.orgContext.expectedOrgId})`, `Environment: ${job.orgContext.environment}`, `Validation: ${job.validation.status} (${job.validation.validationId})`, executionResult, `Rollback: ${job.plan.rollbackPlan}`].join('\n');
+}
 function planReviewComment(job, plan, orgContext) { return [`AI agent plan ready for review.`, `Job: ${job.jobId}`, `Target org: ${orgContext.displayName} (${orgContext.expectedOrgId})`, `Environment: ${orgContext.environment}`, `Requirement: ${plan.requirementSummary || 'See issue details.'}`, `Risk: ${plan.estimatedRiskLevel}`, `Plan version: ${plan.planVersion}`, plan.notice || 'No changes have been made yet.', `Review and approve implementation in the Salesforce AI Agent console.`].join('\n'); }
 function noChangeCompletionComment(job, validation) { return [`AI agent job ${job.jobId} completed without deployment.`, `Salesforce org: ${job.orgContext.displayName} (${job.orgContext.expectedOrgId})`, `Validation: ${validation.status} (${validation.validationId})`, `Result: No Salesforce source changes were proposed, so deployment was not required.`].join('\n'); }
 function sfFailureMessage(result) {

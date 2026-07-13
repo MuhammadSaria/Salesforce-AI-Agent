@@ -108,6 +108,9 @@ export function buildOrgContext(selection, job) {
     displayName: selection.org.displayName,
     customerName: selection.org.customerName,
     deploymentPermission: selection.org.deploymentPermission,
+    dataMutationPermission: selection.org.dataMutationPermission,
+    allowedDataObjects: selection.org.allowedDataObjects,
+    maximumDataOperations: selection.org.maximumDataOperations,
     productionApprovalRequired: selection.org.productionApprovalRequired,
     allowedOperations: selection.org.allowedOperations,
     allowedMetadataTypes: selection.org.allowedMetadataTypes,
@@ -127,6 +130,7 @@ export function publicOrgOption(org) {
     expectedOrgId: org.expectedOrgId,
     instanceUrl: org.instanceUrl,
     deploymentPermission: org.deploymentPermission,
+    dataMutationPermission: org.dataMutationPermission,
     productionApprovalRequired: org.productionApprovalRequired,
     authenticationStatus: org.authenticationStatus
   };
@@ -179,6 +183,9 @@ function normalizeOrg(org) {
     localProjectPath: String(org.localProjectPath || ''),
     authenticationStatus: String(org.authenticationStatus || 'unknown'),
     deploymentPermission: String(org.deploymentPermission || 'blocked'),
+    dataMutationPermission: String(org.dataMutationPermission || 'blocked'),
+    allowedDataObjects: normalizeArray(org.allowedDataObjects),
+    maximumDataOperations: Math.max(1, Math.min(Number(org.maximumDataOperations || 10), 25)),
     productionApprovalRequired: org.productionApprovalRequired === true || environment === 'production',
     active: org.active !== false,
     allowedOperations: normalizeArray(org.allowedOperations),

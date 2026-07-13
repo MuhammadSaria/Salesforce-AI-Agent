@@ -2,6 +2,7 @@
 <Package xmlns="http://soap.sforce.com/2006/04/metadata">
     <types>
         <members>AI_Agent_User</members>
+        <members>AI_Agent_Executor</members>
         <name>PermissionSet</name>
     </types>
     <version>67.0</version>

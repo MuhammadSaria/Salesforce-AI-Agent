@@ -33,7 +33,7 @@ For local testing, set `NGROK_AUTHTOKEN` in the middleware secret store and run 
 
 ## Org Registry
 
-Copy the inactive example in `middleware/config/org-registry.json`. Replace the alias, exact 15/18-character Organization ID, canonical instance URL, project/component mappings, workspace, metadata policies, and deployment policy. Confirm `sf org display --target-org <alias> --json`, then set `active: true`. Never store OAuth tokens or session IDs in this file.
+Copy the inactive example in `middleware/config/org-registry.json`. Replace the alias, exact 15/18-character Organization ID, canonical instance URL, project/component mappings, workspace, metadata policies, and deployment policy. Confirm `sf org display --target-org <alias> --json`, then set `active: true`. Record create/update capability must also set `dataMutationPermission`, `allowedDataObjects`, `maximumDataOperations`, and the exact `data-create`/`data-update` operations. Never store OAuth tokens or session IDs in this file.
 
 For production entries set `environment: production`, `productionApprovalRequired: true`, and enable `ALLOW_PRODUCTION_DEPLOYMENT=true` only after external change controls are ready.
 
@@ -52,7 +52,7 @@ The middleware URL must be HTTPS and reachable from Salesforce. The Apex proxy a
 3. The worker extracts exact metadata names, writes `jobs/<jobId>/manifest/package.xml`, retrieves only that scope, analyzes dependencies, and publishes plan version 1 with “No changes have been made yet.”
 4. A developer clicks **Approve Implementation**, then **Implement Locally**. The worker creates `ai-agent/READUSA-42-<jobId>`, writes only approved files, and records a diff/source hash. It does not deploy.
 5. Validation performs an exact-manifest dry run against the same org. A deployer separately clicks **Approve Deployment** and **Deploy Approved Package**.
-6. The worker reverifies identity and hashes, deploys the exact manifest, records the deployment ID, and comments on Jira.
+6. The worker reverifies identity and hashes, then deploys the exact manifest or executes only the approved structured record operations. It records deployment or record IDs and comments on Jira.
 
 ## Remaining Manual Steps
 

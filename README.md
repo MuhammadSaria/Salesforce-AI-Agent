@@ -1,6 +1,6 @@
 # Salesforce In-Org AI Agent
 
-A supervised, Jira-driven Salesforce development agent. It preserves the existing LWC/Apex/Express/BullMQ/Redis architecture and enforces one verified org, selective metadata retrieval, versioned plans, implementation approval, local-only implementation, validation, a separate deployment approval, exact-org deployment, Jira reporting, and an audit trail.
+A supervised, Jira-driven Salesforce development agent. It preserves the existing LWC/Apex/Express/BullMQ/Redis architecture and enforces one verified org, selective metadata retrieval, versioned plans, implementation approval, local-only implementation, validation, a separate execution approval, exact-org metadata deployment or allowlisted record execution, Jira reporting, and an audit trail.
 
 ## Architecture
 
@@ -38,7 +38,7 @@ docs/                                         API, setup, persistence, security
 
 `RECEIVED -> AWAITING_ORG_SELECTION|VERIFYING_ORG -> ANALYZING_JIRA -> DISCOVERING_METADATA -> RETRIEVING_RELEVANT_METADATA -> ANALYZING_DEPENDENCIES -> AWAITING_PLAN_APPROVAL -> IMPLEMENTING -> VALIDATING -> AWAITING_DEPLOYMENT_APPROVAL -> DEPLOYING -> COMPLETED`
 
-Implementation and deployment approvals are different durable records. Each is bound to the plan hash, metadata-scope hash, registry org, and Salesforce Organization ID. Deployment approval is additionally bound to the validation ID, source hash, and package hash. Any org reselection invalidates all downstream artifacts.
+Implementation and execution approvals are different durable records. Each is bound to the plan hash, metadata-scope hash, registry org, and Salesforce Organization ID. The second approval is additionally bound to the validation ID, source hash, and package hash. Any org reselection invalidates all downstream artifacts. An org may independently allow metadata deployment and structured record create/update operations; SAPA is currently the only registry entry enabled for the latter.
 
 ## Quick Start
 
