@@ -125,12 +125,11 @@ export function createApp() {
 
 async function jiraWebhook(req, res, next) {
   try {
-    verifyJiraWebhook(req.rawBody || Buffer.from(''), req.get('x-agent-webhook-signature'), req.get('x-agent-webhook-token'));
+    verifyJiraWebhook(req.rawBody || Buffer.from(''), req.get('x-hub-signature') || req.get('x-agent-webhook-signature'), req.get('x-agent-webhook-token'));
     const parsed = parseJiraWebhook(req.body);
     const eventId = String(req.get('x-atlassian-webhook-identifier') || `${parsed.event}:${parsed.issue.key}:${req.body?.timestamp || ''}`);
     if (!(await claimWebhookEvent(eventId))) return res.status(200).json({ accepted: true, duplicate: true });
-    const job = await createJobRecord({ jobId: nanoid(), jiraIssueKey: parsed.issue.key, source: 'jira-webhook', prompt: `Analyze Jira issue ${parsed.issue.key}`, userId: 'jira-webhook', context: { jiraProjectKey: parsed.issue.projectKey, jiraComponent: parsed.issue.components[0] }, jira: parsed.issue });
-    await updateJob(job.jobId, { jira: parsed.issue });
+    const job = await createJobRecord({ jobId: nanoid(), jiraIssueKey: parsed.issue.key, source: 'jira-webhook', prompt: `Analyze Jira issue ${parsed.issue.key}`, userId: 'jira-webhook', context: { jiraProjectKey: parsed.issue.projectKey, jiraComponent: parsed.issue.components[0] }, jira: null });
     await enqueueAgentJob({ jobId: job.jobId, action: 'analyze', actor: 'jira-webhook' }, { jobId: `${job.jobId}:analyze:1` });
     res.status(202).json({ accepted: true, jobId: job.jobId });
   } catch (error) { next(error); }

@@ -41,6 +41,12 @@ test('Jira webhook signature and supported event are validated', () => {
   assert.equal(parsed.issue.key, 'READ-42');
 });
 
+test('Jira webhook accepts Atlassian X-Hub-Signature format', () => {
+  const body = Buffer.from('{"webhookEvent":"jira:issue_created"}');
+  const signature = `sha256=${createHmac('sha256', config.jiraWebhookSecret).update(body).digest('hex')}`;
+  assert.doesNotThrow(() => verifyJiraWebhook(body, signature, ''));
+});
+
 test('duplicate Jira webhook event is rejected idempotently', async () => {
   const id = `event-${Date.now()}`;
   assert.equal(await claimWebhookEvent(id), true);

@@ -4,8 +4,8 @@
 
 1. Create a least-privilege Jira service account and record its account ID.
 2. Set `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_AGENT_ACCOUNT_ID`, `JIRA_WEBHOOK_SECRET`, and `JIRA_ALLOWED_PROJECT_KEYS` only in the middleware secret store.
-3. Configure Jira Automation to send `POST /api/webhooks/jira` with a hidden `X-Agent-Webhook-Token` header equal to `JIRA_WEBHOOK_SECRET`. An API gateway can instead send `X-Agent-Webhook-Signature: sha256=<HMAC-SHA256(raw-body)>`.
-4. Subscribe only to issue-created and issue-updated events. The middleware processes only allowed projects and issues assigned to the configured agent.
+3. Register a Jira admin webhook for `jira:issue_created` and `jira:issue_updated`, filtered to the allowed project, and set its URL to `POST /api/webhooks/jira`. Set the webhook `secret` to `JIRA_WEBHOOK_SECRET`; Jira sends the resulting HMAC in `X-Hub-Signature`.
+4. The middleware verifies the raw-body HMAC, allowed project, and configured assignee before accepting an event. Jira Automation remains an optional fallback using a hidden `X-Agent-Webhook-Token` header.
 5. Jira transition automation is intentionally disabled by default; successful deployment adds a comment but does not close the issue.
 
 For local testing, set `NGROK_AUTHTOKEN` in the middleware secret store and run `npm run tunnel`. The launcher relies on ngrok's environment-based authentication so the token is not exposed in process arguments.
