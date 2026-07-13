@@ -8,6 +8,8 @@
 4. Subscribe only to issue-created and issue-updated events. The middleware processes only allowed projects and issues assigned to the configured agent.
 5. Jira transition automation is intentionally disabled by default; successful deployment adds a comment but does not close the issue.
 
+For local testing, set `NGROK_AUTHTOKEN` in the middleware secret store and run `npm run tunnel`. The launcher relies on ngrok's environment-based authentication so the token is not exposed in process arguments.
+
 ## Org Registry
 
 Copy the inactive example in `middleware/config/org-registry.json`. Replace the alias, exact 15/18-character Organization ID, canonical instance URL, project/component mappings, workspace, metadata policies, and deployment policy. Confirm `sf org display --target-org <alias> --json`, then set `active: true`. Never store OAuth tokens or session IDs in this file.

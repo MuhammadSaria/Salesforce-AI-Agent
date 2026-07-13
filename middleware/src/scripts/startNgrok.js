@@ -6,10 +6,6 @@ const port = Number(process.env.PORT || 3000);
 const ngrokPath = process.env.NGROK_BIN || 'node_modules/ngrok/bin/ngrok.exe';
 const args = ['http', String(port), '--log=stdout'];
 
-if (process.env.NGROK_AUTHTOKEN) {
-  args.push('--authtoken', process.env.NGROK_AUTHTOKEN);
-}
-
 const child = spawn(ngrokPath, args, {
   shell: false,
   windowsHide: true,
