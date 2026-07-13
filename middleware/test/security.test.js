@@ -6,6 +6,7 @@ import { buildMetadataScope, extractRequirement } from '../src/services/planning
 import { claimWebhookEvent, parseJiraWebhook, verifyJiraWebhook } from '../src/services/jira.js';
 import { redactSecrets } from '../src/utils/sanitize.js';
 import { stableHash } from '../src/utils/hash.js';
+import { runSfCommand } from '../src/services/sfExecutor.js';
 
 test('secret masking removes authorization, API keys, and token fields', () => {
   const value = 'Authorization: Bearer abc.def.ghi sk-example access_token=super-secret';
@@ -51,4 +52,23 @@ test('duplicate Jira webhook event is rejected idempotently', async () => {
   const id = `event-${Date.now()}`;
   assert.equal(await claimWebhookEvent(id), true);
   assert.equal(await claimWebhookEvent(id), false);
+});
+
+test('Jira select-list custom fields are normalized for trusted org routing', () => {
+  config.jiraAgentAccountId = '';
+  config.jiraAllowedProjectKeys = ['SAPA'];
+  const parsed = parseJiraWebhook({
+    webhookEvent: 'jira:issue_created',
+    issue: { key: 'SAPA-42', fields: { summary: 'Task', components: [], customfield_10001: { value: 'DEV' } } }
+  });
+  assert.equal(parsed.issue.customFields.customfield_10001, 'DEV');
+});
+
+test('Salesforce operations are blocked when the org registry does not allow them', async () => {
+  await assert.rejects(
+    runSfCommand('deployPreview', { manifest: 'ignored.xml' }, {
+      orgContext: { salesforceAlias: 'sapa', expectedOrgId: '00DTEST', allowedOperations: ['read'] }
+    }),
+    /Operation validate is not allowed/
+  );
 });

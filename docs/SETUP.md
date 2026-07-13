@@ -1,5 +1,26 @@
 # Setup
 
+## Jira-to-org routing
+
+Every connected Salesforce org is registered in `middleware/config/org-registry.json`. Automatic ticket routing uses only configured Jira project keys, components, and custom-field values. Ticket descriptions, comments, aliases, usernames, URLs, and credentials are never org-selection inputs.
+
+Use a unique project mapping when one Jira project belongs to one org:
+
+```json
+"jiraProjectKeys": ["SAPA"]
+```
+
+When a project serves multiple orgs, configure a Jira component or a dedicated single-select custom field on each registry entry:
+
+```json
+"jiraComponents": ["Development"],
+"jiraCustomFieldMappings": {
+  "customfield_10001": ["SAPA Dev Sandbox"]
+}
+```
+
+All configured routing signals must agree. Zero or multiple matches put the job in `AWAITING_ORG_SELECTION`; no Salesforce inspection or execution starts until an authenticated user selects an offered connected org. Every subsequent Salesforce command reverifies the alias, Organization ID, instance URL, username, and environment, and includes an explicit `--target-org`.
+
 ## Jira
 
 1. Create a least-privilege Jira service account and record its account ID.

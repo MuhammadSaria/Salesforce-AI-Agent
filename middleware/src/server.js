@@ -129,7 +129,9 @@ async function jiraWebhook(req, res, next) {
     const parsed = parseJiraWebhook(req.body);
     const eventId = String(req.get('x-atlassian-webhook-identifier') || `${parsed.event}:${parsed.issue.key}:${req.body?.timestamp || ''}`);
     if (!(await claimWebhookEvent(eventId))) return res.status(200).json({ accepted: true, duplicate: true });
-    const job = await createJobRecord({ jobId: nanoid(), jiraIssueKey: parsed.issue.key, source: 'jira-webhook', prompt: `Analyze Jira issue ${parsed.issue.key}`, userId: 'jira-webhook', context: { jiraProjectKey: parsed.issue.projectKey, jiraComponent: parsed.issue.components[0] }, jira: null });
+    const existing = (await listJobRecords()).find((job) => job.jiraIssueKey === parsed.issue.key);
+    if (existing) return res.status(200).json({ accepted: true, duplicate: true, jobId: existing.jobId });
+    const job = await createJobRecord({ jobId: nanoid(), jiraIssueKey: parsed.issue.key, source: 'jira-webhook', prompt: `Analyze Jira issue ${parsed.issue.key}`, userId: 'jira-webhook', context: { jiraProjectKey: parsed.issue.projectKey, jiraComponents: parsed.issue.components, jiraCustomFields: parsed.issue.customFields }, jira: parsed.issue });
     await enqueueAgentJob({ jobId: job.jobId, action: 'analyze', actor: 'jira-webhook' }, { jobId: `${job.jobId}:analyze:1` });
     res.status(202).json({ accepted: true, jobId: job.jobId });
   } catch (error) { next(error); }
@@ -140,7 +142,7 @@ function jobRoute(handler) { return asyncRoute(async (req, res) => { const job =
 function asyncRoute(handler) { return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next); }
 function approvalRecord(job, req, type, extra) { return { approvalId: nanoid(), jobId: job.jobId, jiraIssueKey: job.jiraIssueKey, approvalType: type, planVersion: job.plan?.planVersion, planHash: job.plan?.planHash, metadataScopeHash: job.metadataScope?.hash, orgRegistryId: job.orgContext?.orgRegistryId, salesforceOrganizationId: job.orgContext?.expectedOrgId, environment: job.orgContext?.environment, approverIdentity: req.actor.id, comments: sanitizeUntrustedText(req.body?.comments, 1000), approvalTimestamp: new Date().toISOString(), ...extra }; }
 function publicJob(job) { const safe = { ...job }; delete safe.prompt; return safe; }
-function safeContext(context) { return { selectedOrgRegistryId: String(context?.selectedOrgRegistryId || ''), jiraProjectKey: String(context?.jiraProjectKey || ''), jiraComponent: String(context?.jiraComponent || ''), customerName: String(context?.customerName || ''), environment: String(context?.environment || '') }; }
+function safeContext(context) { return { selectedOrgRegistryId: String(context?.selectedOrgRegistryId || ''), customerName: String(context?.customerName || ''), environment: String(context?.environment || '') }; }
 function normalizeIssueKey(value) { const key = String(value || '').trim().toUpperCase(); if (key && !/^[A-Z][A-Z0-9_]{1,19}-[1-9][0-9]{0,9}$/.test(key)) throw Object.assign(new Error('Invalid Jira issue key.'), { statusCode: 422 }); return key; }
 function conflict(res, message) { return res.status(409).json({ error: { message } }); }
 function errorHandler(error, req, res, _next) { req.log?.error({ err: error, code: error.code }, 'Request failed'); res.status(error.statusCode || 500).json({ error: { code: error.code || 'REQUEST_FAILED', message: error.message || 'Unexpected middleware error.' } }); }

@@ -19,62 +19,72 @@ export async function loadOrgRegistry() {
 
 export async function selectOrgForJob(job) {
   const registry = await loadOrgRegistry();
-  const activeOrgs = registry.orgs.filter((org) => org.active);
-  const context = job.context || {};
-  const candidates = [];
+  return selectOrgFromRegistry(registry.orgs, job);
+}
 
-  const addMatches = (matches, source) => {
-    for (const org of matches) {
-      if (!candidates.some((candidate) => candidate.org.id === org.id)) {
-        candidates.push({ org, source });
-      }
-    }
-  };
+export function selectOrgFromRegistry(orgs, job) {
+  const activeOrgs = orgs.filter((org) => org.active && org.authenticationStatus === 'connected');
+  const context = job.context || {};
 
   if (context.selectedOrgRegistryId) {
     const explicitlyAllowed = activeOrgs.filter((org) => org.id === context.selectedOrgRegistryId);
-    return selectionResult(explicitlyAllowed.map((org) => ({ org, source: 'explicitUserSelection' })));
+    return selectionResult(explicitlyAllowed, ['explicitUserSelection']);
   }
 
   if (job.orgId) {
     const exact = activeOrgs.filter((org) => sameOrgId(org.expectedOrgId, job.orgId));
-    if (exact.length) return selectionResult(exact.map((org) => ({ org, source: 'authenticatedSalesforceOrgId' })));
+    if (exact.length) return selectionResult(exact, ['authenticatedSalesforceOrgId']);
   }
 
+  const signals = [];
   if (context.jiraProjectKey) {
-    addMatches(
-      activeOrgs.filter((org) => org.jiraProjectKeys.includes(String(context.jiraProjectKey).toUpperCase())),
-      'jiraProjectKey'
-    );
+    signals.push({
+      source: 'jiraProjectKey',
+      matches: activeOrgs.filter((org) => org.jiraProjectKeys.includes(String(context.jiraProjectKey).toUpperCase()))
+    });
   }
 
-  if (context.jiraComponent) {
-    addMatches(activeOrgs.filter((org) => org.jiraComponents.includes(String(context.jiraComponent))), 'jiraComponent');
-  }
-
-  if (context.customerName) {
-    addMatches(
-      activeOrgs.filter((org) => normalizeText(org.customerName) === normalizeText(context.customerName)),
-      'customerName'
-    );
-  }
-
-  if (context.environment) {
-    const scoped = candidates.filter((candidate) => candidate.org.environment === String(context.environment).toLowerCase());
-    if (scoped.length > 0) {
-      return selectionResult(scoped, 'environment');
+  const components = normalizeArray(context.jiraComponents || context.jiraComponent);
+  if (components.length) {
+    const mappedComponentsExist = activeOrgs.some((org) => org.jiraComponents.length > 0);
+    if (mappedComponentsExist) {
+      signals.push({
+        source: 'jiraComponent',
+        matches: activeOrgs.filter((org) => org.jiraComponents.some((component) => components.some((value) => normalizeText(value) === normalizeText(component))))
+      });
     }
+  }
+
+  const customFields = context.jiraCustomFields && typeof context.jiraCustomFields === 'object' ? context.jiraCustomFields : {};
+  for (const [fieldId, ticketValue] of Object.entries(customFields)) {
+    if (!normalizeText(ticketValue)) continue;
+    const configured = activeOrgs.filter((org) => Object.hasOwn(org.jiraCustomFieldMappings, fieldId));
+    if (!configured.length) continue;
+    signals.push({
+      source: `jiraCustomField:${fieldId}`,
+      matches: configured.filter((org) => mappingMatches(org.jiraCustomFieldMappings[fieldId], ticketValue))
+    });
+  }
+
+  // Customer/environment are accepted only from the authenticated API context, never ticket prose.
+  if (context.customerName) {
+    signals.push({ source: 'authenticatedCustomer', matches: activeOrgs.filter((org) => normalizeText(org.customerName) === normalizeText(context.customerName)) });
+  }
+  if (context.environment) {
+    signals.push({ source: 'authenticatedEnvironment', matches: activeOrgs.filter((org) => org.environment === String(context.environment).toLowerCase()) });
   }
 
   if (context.repositoryPath) {
     const repositoryPath = resolve(String(context.repositoryPath));
-    addMatches(
-      activeOrgs.filter((org) => org.repositoryPaths.some((path) => repositoryPath.startsWith(resolve(config.projectRoot, path)))),
-      'repositoryMapping'
-    );
+    signals.push({ source: 'repositoryMapping', matches: activeOrgs.filter((org) => org.repositoryPaths.some((path) => repositoryPath.startsWith(resolve(config.projectRoot, path)))) });
   }
 
-  return selectionResult(candidates);
+  if (!signals.length) return selectionResult([], [], activeOrgs);
+  const candidates = signals.reduce(
+    (current, signal) => current.filter((org) => signal.matches.some((match) => match.id === org.id)),
+    activeOrgs
+  );
+  return selectionResult(candidates, signals.map((signal) => signal.source), activeOrgs);
 }
 
 export async function listPublicOrgs() {
@@ -122,23 +132,25 @@ export function publicOrgOption(org) {
   };
 }
 
-function selectionResult(candidates, overrideSource) {
+function selectionResult(candidates, sources = [], selectionOptions = []) {
   if (candidates.length === 1) {
     return {
       status: 'selected',
-      org: candidates[0].org,
-      source: overrideSource || candidates[0].source
+      org: candidates[0],
+      source: sources.join('+'),
+      evidence: sources
     };
   }
 
   if (candidates.length > 1) {
     return {
       status: 'ambiguous',
-      candidates: candidates.map((candidate) => publicOrgOption(candidate.org))
+      candidates: candidates.map(publicOrgOption),
+      evidence: sources
     };
   }
 
-  return { status: 'none', candidates: [] };
+  return { status: 'none', candidates: selectionOptions.map(publicOrgOption), evidence: sources };
 }
 
 function normalizeOrg(org) {
@@ -162,7 +174,7 @@ function normalizeOrg(org) {
     expectedUsername: String(org.expectedUsername || ''),
     jiraProjectKeys: normalizeArray(org.jiraProjectKeys).map((key) => key.toUpperCase()),
     jiraComponents: normalizeArray(org.jiraComponents),
-    jiraCustomFieldMappings: org.jiraCustomFieldMappings && typeof org.jiraCustomFieldMappings === 'object' ? org.jiraCustomFieldMappings : {},
+    jiraCustomFieldMappings: normalizeCustomFieldMappings(org.jiraCustomFieldMappings),
     repositoryPaths: normalizeArray(org.repositoryPaths),
     localProjectPath: String(org.localProjectPath || ''),
     authenticationStatus: String(org.authenticationStatus || 'unknown'),
@@ -184,7 +196,18 @@ function requiredString(value, label) {
 }
 
 function normalizeArray(value) {
-  return Array.isArray(value) ? value.map((item) => String(item || '').trim()).filter(Boolean) : [];
+  const values = Array.isArray(value) ? value : value ? [value] : [];
+  return values.map((item) => String(item || '').trim()).filter(Boolean);
+}
+
+function normalizeCustomFieldMappings(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).map(([fieldId, expected]) => [fieldId, normalizeArray(expected)]));
+}
+
+function mappingMatches(expectedValues, ticketValue) {
+  const actual = normalizeText(ticketValue);
+  return normalizeArray(expectedValues).some((expected) => normalizeText(expected) === actual);
 }
 
 function sameOrgId(left, right) {

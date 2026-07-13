@@ -19,9 +19,11 @@ const COMMANDS = {
     }
   },
   orgDisplay: {
+    operation: 'read',
     args: ({ targetOrg }) => ['org', 'display', '--target-org', targetOrg, '--json']
   },
   dataQuery: {
+    operation: 'read',
     args: ({ query, targetOrg }) => ['data', 'query', '--query', query, '--target-org', targetOrg, '--json'],
     validate: ({ query }) => {
       if (!/^\s*select\b/i.test(query || '')) {
@@ -33,6 +35,7 @@ const COMMANDS = {
     }
   },
   retrieveManifest: {
+    operation: 'retrieve',
     args: ({ manifest, targetOrg, outputDir }) => [
       'project',
       'retrieve',
@@ -48,6 +51,7 @@ const COMMANDS = {
     validate: ({ manifest, outputDir }) => { validateManifestPath(manifest); validateJobOutputPath(outputDir); }
   },
   runApexTests: {
+    operation: 'validate',
     args: ({ tests, targetOrg }) => {
       const args = ['apex', 'run', 'test', '--target-org', targetOrg, '--result-format', 'human', '--wait', '30', '--json'];
       if (tests) {
@@ -57,10 +61,12 @@ const COMMANDS = {
     }
   },
   deployPreview: {
+    operation: 'validate',
     args: ({ manifest, targetOrg }) => ['project', 'deploy', 'preview', '--manifest', manifest, '--target-org', targetOrg, '--json'],
     validate: ({ manifest }) => validateManifestPath(manifest)
   },
   deployDryRun: {
+    operation: 'validate',
     args: ({ manifest, targetOrg, tests }) => {
       const args = ['project', 'deploy', 'start', '--dry-run', '--manifest', manifest, '--target-org', targetOrg, '--test-level', tests ? 'RunSpecifiedTests' : 'RunLocalTests', '--json'];
       if (tests) args.push('--tests', tests);
@@ -69,6 +75,7 @@ const COMMANDS = {
     validate: ({ manifest }) => validateManifestPath(manifest)
   },
   deployManifest: {
+    operation: 'deploy',
     requiresApproval: true,
     args: ({ manifest, targetOrg, tests }) => {
       const args = ['project', 'deploy', 'start', '--manifest', manifest, '--target-org', targetOrg, '--test-level', tests ? 'RunSpecifiedTests' : 'RunLocalTests', '--json'];
@@ -107,6 +114,10 @@ export async function runSfCommand(command, params = {}, options = {}) {
     const error = new Error(`Command ${command} requires explicit approval.`);
     error.code = 'NEEDS_APPROVAL';
     throw error;
+  }
+
+  if (definition.operation && !orgContext.allowedOperations?.includes(definition.operation)) {
+    throw new Error(`Operation ${definition.operation} is not allowed for the selected Salesforce org.`);
   }
 
   if (params.targetOrg && params.targetOrg !== orgContext.salesforceAlias) {

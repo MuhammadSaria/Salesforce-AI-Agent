@@ -82,7 +82,7 @@ function normalizeIssue(issue) {
     environment: sanitizeUntrustedText(fields.environment, 500),
     status: sanitizeUntrustedText(fields.status?.name, 100),
     linkedIssues: (fields.issuelinks || []).map((link) => link.outwardIssue?.key || link.inwardIssue?.key).filter(Boolean),
-    customFields: Object.fromEntries(Object.entries(fields).filter(([key]) => key.startsWith('customfield_')).map(([key, value]) => [key, sanitizeUntrustedText(extractAdfText(value), 2000)]))
+    customFields: Object.fromEntries(Object.entries(fields).filter(([key]) => key.startsWith('customfield_')).map(([key, value]) => [key, sanitizeUntrustedText(extractJiraFieldValue(value), 2000)]))
   };
 }
 
@@ -99,6 +99,14 @@ function extractAdfText(value) {
   if (Array.isArray(value)) return value.map(extractAdfText).join(' ');
   if (value && typeof value === 'object') return [value.text, extractAdfText(value.content)].filter(Boolean).join(' ');
   return '';
+}
+
+function extractJiraFieldValue(value) {
+  if (Array.isArray(value)) return value.map(extractJiraFieldValue).filter(Boolean).join(', ');
+  if (value && typeof value === 'object') {
+    return extractAdfText(value) || String(value.value || value.name || value.id || '').trim();
+  }
+  return extractAdfText(value);
 }
 
 function adfDocument(text) {

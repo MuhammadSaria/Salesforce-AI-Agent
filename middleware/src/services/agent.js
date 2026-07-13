@@ -25,17 +25,27 @@ export async function processAgentJob(message) {
 }
 
 async function analyze(job, actor) {
-  let selection = await selectOrgForJob(job);
+  const jira = job.jiraIssueKey && !job.jira ? await getJiraIssue(job.jiraIssueKey) : job.jira;
+  const routingContext = jira ? {
+    ...job.context,
+    jiraProjectKey: jira.projectKey,
+    jiraComponents: jira.components,
+    jiraCustomFields: jira.customFields
+  } : job.context;
+  if (jira) await updateJob(job.jobId, { jira, context: routingContext });
+  job = { ...job, jira, context: routingContext };
+
+  const selection = await selectOrgForJob(job);
   if (selection.status !== 'selected') {
     await transitionJob(job.jobId, JOB_STATES.AWAITING_ORG_SELECTION, { actor, reason: selection.status === 'ambiguous' ? 'Multiple trusted org mappings matched.' : 'No trusted org mapping matched.' });
-    await updateJob(job.jobId, { orgCandidates: selection.candidates });
+    await updateJob(job.jobId, { orgCandidates: selection.candidates, orgRoutingEvidence: selection.evidence });
     return;
   }
 
   await transitionJob(job.jobId, JOB_STATES.VERIFYING_ORG, { actor, reason: `Selected by ${selection.source}.` });
   const orgContext = buildOrgContext(selection, job);
   const paths = await writeOrgContext(job.jobId, orgContext);
-  await updateJob(job.jobId, { orgContext, orgCandidates: [] });
+  await updateJob(job.jobId, { orgContext, orgCandidates: [], orgRoutingEvidence: selection.evidence });
   try {
     const verified = await verifySelectedOrg(orgContext, auditOptions(job, actor));
     await updateJob(job.jobId, { orgContext: { ...orgContext, verified } });
@@ -45,7 +55,6 @@ async function analyze(job, actor) {
   }
 
   await transitionJob(job.jobId, JOB_STATES.ANALYZING_JIRA, { actor, reason: 'Org verified.' });
-  const jira = job.jiraIssueKey && !job.jira ? await getJiraIssue(job.jiraIssueKey) : job.jira;
   const requirement = extractRequirement(jira, job.prompt, job.instructions);
   await writeFile(join(paths.analysis, 'requirement.json'), JSON.stringify(requirement, null, 2), 'utf8');
   await updateJob(job.jobId, { jira, requirement });
@@ -76,6 +85,13 @@ async function analyze(job, actor) {
   await updateJob(job.jobId, { plan, metadataScope: finalScope });
   await transitionJob(job.jobId, JOB_STATES.AWAITING_PLAN_APPROVAL, { actor, reason: 'Versioned implementation plan generated.' });
   await auditEvent({ ...auditOptions(job, actor), orgRegistryId: orgContext.orgRegistryId, salesforceOrgId: orgContext.expectedOrgId, environment: orgContext.environment, action: 'PLAN_GENERATED', result: 'success', safeMetadata: { planVersion: plan.planVersion, planHash: plan.planHash, metadataScopeHash: scope.hash } });
+  if (job.jiraIssueKey) {
+    try {
+      await addJiraComment(job.jiraIssueKey, planReviewComment(job, plan, orgContext));
+    } catch (error) {
+      await appendLog(job.jobId, 'warn', `Plan generated, but the Jira review comment could not be added: ${error.message}`);
+    }
+  }
 }
 
 async function implement(job, actor) {
@@ -164,8 +180,8 @@ function assertDeploymentGuard(job, approval) {
   if (!validation || validation.status !== 'PASSED' || new Date(validation.expiryTimestamp) <= new Date()) throw new Error('A current successful validation is required.');
   if (approval.validationId !== validation.validationId || approval.validatedSourceHash !== validation.sourceHash || approval.deploymentPackageHash !== validation.packageHash) throw new Error('Deployment approval does not match the validated artifacts.');
   if (job.orgContext.environment === 'production' && (!config.allowProductionDeployment || approval.productionSpecificApproval !== true)) throw new Error('Production deployment is disabled or lacks production-specific approval.');
+  if (job.orgContext.deploymentPermission !== 'allowed' || !job.orgContext.allowedOperations.includes('deploy')) throw new Error('Deployment is not enabled for the selected org registry entry.');
   if (job.plan.destructiveChanges?.length) throw new Error('Destructive changes are blocked by default.');
-  if (job.orgContext.deploymentPermission !== 'allowed') throw new Error('Deployment is blocked by the org registry.');
 }
 
 function assertState(job, ...states) { if (!states.includes(job.status)) throw Object.assign(new Error(`Job must be in ${states.join(' or ')}.`), { statusCode: 409 }); }
@@ -182,3 +198,4 @@ async function assertCleanImplementation(paths, implementation) {
   if (head.stdout.trim() !== implementation.commitHash) throw new Error('Implementation Git commit no longer matches the approved source.');
 }
 function completionComment(job, deployment) { return [`AI agent job ${job.jobId} completed.`, `Salesforce org: ${job.orgContext.displayName} (${job.orgContext.expectedOrgId})`, `Environment: ${job.orgContext.environment}`, `Validation: ${job.validation.status} (${job.validation.validationId})`, `Deployment ID: ${deployment.deploymentId || 'not returned'}`, `Rollback: ${job.plan.rollbackPlan}`].join('\n'); }
+function planReviewComment(job, plan, orgContext) { return [`AI agent plan ready for review.`, `Job: ${job.jobId}`, `Target org: ${orgContext.displayName} (${orgContext.expectedOrgId})`, `Environment: ${orgContext.environment}`, `Requirement: ${plan.requirementSummary || 'See issue details.'}`, `Risk: ${plan.estimatedRiskLevel}`, `Plan version: ${plan.planVersion}`, plan.notice || 'No changes have been made yet.', `Review and approve implementation in the Salesforce AI Agent console.`].join('\n'); }

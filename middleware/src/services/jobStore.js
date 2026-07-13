@@ -17,7 +17,8 @@ export async function createJobRecord(input) {
     context: input.context || {},
     orgContext: null,
     orgCandidates: [],
-    jira: null,
+    orgRoutingEvidence: [],
+    jira: input.jira || null,
     metadataScope: null,
     plan: null,
     instructions: [],
@@ -110,7 +111,7 @@ async function invalidate(jobId, selection, actor, reason) {
   }
   const now = new Date().toISOString();
   record.stateHistory.push({ previousState: record.status, newState: JOB_STATES.RECEIVED, timestamp: now, actor, reason, approvalId: '', orgId: '' });
-  Object.assign(record, { status: JOB_STATES.RECEIVED, context: { ...record.context, selectedOrgRegistryId: selection }, orgContext: null, orgCandidates: [], metadataScope: null, plan: null, approvals: [], validation: null, deployment: null, implementation: null, diff: '', updatedAt: now });
+  Object.assign(record, { status: JOB_STATES.RECEIVED, context: { ...record.context, selectedOrgRegistryId: selection }, orgContext: null, orgCandidates: [], orgRoutingEvidence: [], metadataScope: null, plan: null, approvals: [], validation: null, deployment: null, implementation: null, diff: '', updatedAt: now });
   await save(record);
   return record;
 }
