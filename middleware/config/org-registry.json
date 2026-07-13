@@ -119,7 +119,7 @@
       "environment": "sandbox",
       "instanceUrl": "https://sudaneseamericanphysiciansassociat--devsandbox.sandbox.my.salesforce.com",
       "expectedUsername": "adil@providus.io.devsandbox",
-      "jiraProjectKeys": ["SAPA"],
+      "jiraProjectKeys": ["TA"],
       "jiraComponents": [],
       "jiraCustomFieldMappings": {},
       "repositoryPaths": ["."],

@@ -7,7 +7,7 @@ Every connected Salesforce org is registered in `middleware/config/org-registry.
 Use a unique project mapping when one Jira project belongs to one org:
 
 ```json
-"jiraProjectKeys": ["SAPA"]
+"jiraProjectKeys": ["TA"]
 ```
 
 When a project serves multiple orgs, configure a Jira component or a dedicated single-select custom field on each registry entry:
