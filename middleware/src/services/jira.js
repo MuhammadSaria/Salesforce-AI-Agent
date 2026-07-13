@@ -5,13 +5,20 @@ import { sanitizeUntrustedText } from '../utils/sanitize.js';
 
 const memoryEvents = new Set();
 
-export function verifyJiraWebhook(rawBody, signature) {
+export function verifyJiraWebhook(rawBody, signature, webhookToken) {
   if (!config.jiraWebhookSecret) throw unauthorized('Jira webhook secret is not configured.');
+  if (safeEqual(String(webhookToken || ''), config.jiraWebhookSecret)) return;
   const supplied = String(signature || '').replace(/^sha256=/i, '');
   const expected = createHmac('sha256', config.jiraWebhookSecret).update(rawBody).digest('hex');
   const left = Buffer.from(supplied);
   const right = Buffer.from(expected);
   if (left.length !== right.length || !timingSafeEqual(left, right)) throw unauthorized('Invalid Jira webhook signature.');
+}
+
+function safeEqual(left, right) {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
 }
 
 export async function claimWebhookEvent(eventId) {

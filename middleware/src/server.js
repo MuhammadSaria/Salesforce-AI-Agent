@@ -125,7 +125,7 @@ export function createApp() {
 
 async function jiraWebhook(req, res, next) {
   try {
-    verifyJiraWebhook(req.rawBody || Buffer.from(''), req.get('x-agent-webhook-signature'));
+    verifyJiraWebhook(req.rawBody || Buffer.from(''), req.get('x-agent-webhook-signature'), req.get('x-agent-webhook-token'));
     const parsed = parseJiraWebhook(req.body);
     const eventId = String(req.get('x-atlassian-webhook-identifier') || `${parsed.event}:${parsed.issue.key}:${req.body?.timestamp || ''}`);
     if (!(await claimWebhookEvent(eventId))) return res.status(200).json({ accepted: true, duplicate: true });

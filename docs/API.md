@@ -4,7 +4,7 @@ All `/api/*` routes except the Jira webhook require `Authorization: Bearer <MIDD
 
 ## Routes
 
-- `POST /api/webhooks/jira`: signed Jira event, fast `202`, idempotent async processing.
+- `POST /api/webhooks/jira`: Jira event authenticated by a constant-time checked hidden webhook token or HMAC signature, fast `202`, idempotent async processing.
 - `GET /api/orgs`, `GET /api/orgs/:orgId`: public policy fields for active registry orgs.
 - `POST /api/jobs`, `GET /api/jobs`, `GET /api/jobs/:jobId`: create/list/read jobs.
 - `POST /api/jobs/:jobId/select-org`: select only an active registry ID and invalidate old artifacts.

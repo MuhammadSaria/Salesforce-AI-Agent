@@ -4,7 +4,7 @@
 
 1. Create a least-privilege Jira service account and record its account ID.
 2. Set `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_AGENT_ACCOUNT_ID`, `JIRA_WEBHOOK_SECRET`, and `JIRA_ALLOWED_PROJECT_KEYS` only in the middleware secret store.
-3. Configure Jira or an API gateway to send `POST /api/webhooks/jira` with `X-Agent-Webhook-Signature: sha256=<HMAC-SHA256(raw-body)>`.
+3. Configure Jira Automation to send `POST /api/webhooks/jira` with a hidden `X-Agent-Webhook-Token` header equal to `JIRA_WEBHOOK_SECRET`. An API gateway can instead send `X-Agent-Webhook-Signature: sha256=<HMAC-SHA256(raw-body)>`.
 4. Subscribe only to issue-created and issue-updated events. The middleware processes only allowed projects and issues assigned to the configured agent.
 5. Jira transition automation is intentionally disabled by default; successful deployment adds a comment but does not close the issue.
 

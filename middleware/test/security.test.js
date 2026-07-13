@@ -35,6 +35,7 @@ test('Jira webhook signature and supported event are validated', () => {
   const body = Buffer.from('{"webhookEvent":"jira:issue_created"}');
   const signature = createHmac('sha256', 'test-secret').update(body).digest('hex');
   assert.doesNotThrow(() => verifyJiraWebhook(body, `sha256=${signature}`));
+  assert.doesNotThrow(() => verifyJiraWebhook(body, '', 'test-secret'));
   assert.throws(() => verifyJiraWebhook(body, 'sha256=bad'), /Invalid Jira webhook signature/);
   const parsed = parseJiraWebhook({ webhookEvent: 'jira:issue_created', issue: { key: 'READ-42', fields: { summary: 'Task', components: [] } } });
   assert.equal(parsed.issue.key, 'READ-42');
