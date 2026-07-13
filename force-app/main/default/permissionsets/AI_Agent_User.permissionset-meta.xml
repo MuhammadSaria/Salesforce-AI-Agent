@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">
+    <applicationVisibilities>
+        <application>AI_Agent</application>
+        <visible>true</visible>
+    </applicationVisibilities>
+    <classAccesses>
+        <apexClass>AgentController</apexClass>
+        <enabled>true</enabled>
+    </classAccesses>
+    <externalCredentialPrincipalAccesses>
+        <enabled>true</enabled>
+        <externalCredentialPrincipal>Agent_Middleware_External-AgentPrincipal</externalCredentialPrincipal>
+    </externalCredentialPrincipalAccesses>
+    <label>AI Agent User</label>
+    <tabSettings>
+        <tab>Agent_Console</tab>
+        <visibility>Visible</visibility>
+    </tabSettings>
+</PermissionSet>
