@@ -1,0 +1,184 @@
+import { readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { nanoid } from 'nanoid';
+import { JOB_STATES } from '../domain/jobState.js';
+import { config } from '../config.js';
+import { stableHash } from '../utils/hash.js';
+import { appendCommand, appendLog, getJobRecord, transitionJob, updateJob } from './jobStore.js';
+import { auditEvent } from './auditLog.js';
+import { buildOrgContext, selectOrgForJob } from './orgRegistry.js';
+import { ensureJobWorkspace, writeOrgContext } from './jobWorkspace.js';
+import { addJiraComment, getJiraIssue } from './jira.js';
+import { analyzeDependencies, buildMetadataScope, buildPlan, expandScopeForFileOperations, extractRequirement, writeManifest } from './planning.js';
+import { runSfCommand, verifySelectedOrg } from './sfExecutor.js';
+import { runGit } from './gitExecutor.js';
+import { enrichPlanWithAi } from './aiPlanner.js';
+
+export async function processAgentJob(message) {
+  const job = await requiredJob(message.jobId);
+  const actor = message.actor || 'system';
+  if (message.action === 'analyze') return analyze(job, actor);
+  if (message.action === 'implement') return implement(job, actor);
+  if (message.action === 'validate') return validate(job, actor);
+  if (message.action === 'deploy') return deploy(job, actor);
+  throw new Error(`Unsupported worker action: ${message.action}`);
+}
+
+async function analyze(job, actor) {
+  let selection = await selectOrgForJob(job);
+  if (selection.status !== 'selected') {
+    await transitionJob(job.jobId, JOB_STATES.AWAITING_ORG_SELECTION, { actor, reason: selection.status === 'ambiguous' ? 'Multiple trusted org mappings matched.' : 'No trusted org mapping matched.' });
+    await updateJob(job.jobId, { orgCandidates: selection.candidates });
+    return;
+  }
+
+  await transitionJob(job.jobId, JOB_STATES.VERIFYING_ORG, { actor, reason: `Selected by ${selection.source}.` });
+  const orgContext = buildOrgContext(selection, job);
+  const paths = await writeOrgContext(job.jobId, orgContext);
+  await updateJob(job.jobId, { orgContext, orgCandidates: [] });
+  try {
+    const verified = await verifySelectedOrg(orgContext, auditOptions(job, actor));
+    await updateJob(job.jobId, { orgContext: { ...orgContext, verified } });
+  } catch (error) {
+    await transitionJob(job.jobId, JOB_STATES.ORG_VERIFICATION_FAILED, { actor, reason: 'Expected and connected org identity did not match.', error: error.message });
+    return;
+  }
+
+  await transitionJob(job.jobId, JOB_STATES.ANALYZING_JIRA, { actor, reason: 'Org verified.' });
+  const jira = job.jiraIssueKey && !job.jira ? await getJiraIssue(job.jiraIssueKey) : job.jira;
+  const requirement = extractRequirement(jira, job.prompt, job.instructions);
+  await writeFile(join(paths.analysis, 'requirement.json'), JSON.stringify(requirement, null, 2), 'utf8');
+  await updateJob(job.jobId, { jira, requirement });
+
+  await transitionJob(job.jobId, JOB_STATES.DISCOVERING_METADATA, { actor, reason: 'Requirement extracted.' });
+  const scope = buildMetadataScope(requirement, orgContext);
+  const manifest = await writeManifest(paths, scope);
+  await updateJob(job.jobId, { metadataScope: scope, manifest });
+
+  await transitionJob(job.jobId, JOB_STATES.RETRIEVING_RELEVANT_METADATA, { actor, reason: `${scope.primaryMetadata.length} task-relevant components scoped.` });
+  if (scope.primaryMetadata.length) {
+    const result = await runSfCommand('retrieveManifest', { manifest }, sfOptions(job, orgContext, paths, actor, scope));
+    await appendCommand(job.jobId, result);
+    if (result.exitCode !== 0) throw new Error(`Selective metadata retrieval failed: ${result.stderr}`);
+  }
+
+  await transitionJob(job.jobId, JOB_STATES.ANALYZING_DEPENDENCIES, { actor, reason: 'Selective retrieval completed.' });
+  const dependencies = await analyzeDependencies(paths, scope);
+  const current = await requiredJob(job.jobId);
+  const basePlan = buildPlan({ ...current, orgContext }, requirement, scope, dependencies);
+  let plan = await enrichPlanWithAi(basePlan, requirement, { ...scope, dependencies }, orgContext);
+  const finalScope = expandScopeForFileOperations({ ...scope, dependencies }, plan.fileOperations, orgContext);
+  await writeManifest(paths, finalScope);
+  const planWithoutHash = { ...plan, metadataScopeHash: finalScope.hash };
+  delete planWithoutHash.planHash;
+  plan = { ...planWithoutHash, planHash: stableHash(planWithoutHash) };
+  await writeFile(join(paths.plan, `plan-v${plan.planVersion}.json`), JSON.stringify(plan, null, 2), 'utf8');
+  await updateJob(job.jobId, { plan, metadataScope: finalScope });
+  await transitionJob(job.jobId, JOB_STATES.AWAITING_PLAN_APPROVAL, { actor, reason: 'Versioned implementation plan generated.' });
+  await auditEvent({ ...auditOptions(job, actor), orgRegistryId: orgContext.orgRegistryId, salesforceOrgId: orgContext.expectedOrgId, environment: orgContext.environment, action: 'PLAN_GENERATED', result: 'success', safeMetadata: { planVersion: plan.planVersion, planHash: plan.planHash, metadataScopeHash: scope.hash } });
+}
+
+async function implement(job, actor) {
+  assertState(job, JOB_STATES.IMPLEMENTING);
+  const approval = validApproval(job, 'IMPLEMENTATION');
+  await verifySelectedOrg(job.orgContext, auditOptions(job, actor));
+  const paths = await ensureJobWorkspace(job.jobId, job.orgContext.orgRegistryId);
+  const branch = `ai-agent/${(job.jiraIssueKey || 'MANUAL-0').toUpperCase()}-${job.jobId}`.replace(/[^A-Za-z0-9_\/-]/g, '-');
+  const branchResult = await runGit('worktree-add', { branch, path: paths.implementationProject });
+  if (branchResult.exitCode !== 0) throw new Error(`Cannot create the required Git branch. ${branchResult.stderr}`);
+  const baselineResult = await runGit('rev-parse', { ref: 'HEAD', cwd: paths.implementationProject });
+
+  const changedFiles = [];
+  for (const operation of job.plan.fileOperations || []) {
+    if (!['create', 'modify'].includes(operation.operation)) throw new Error('Destructive file operations require a separately approved plan and are blocked by default.');
+    const result = await runSfCommand('writeMetadataFile', { path: operation.path, content: operation.content }, { ...sfOptions(job, job.orgContext, paths, actor, job.metadataScope, true), localProjectRoot: paths.implementationProject, cwd: paths.implementationProject });
+    await appendCommand(job.jobId, result);
+    changedFiles.push(operation.path);
+  }
+  const sourceHash = stableHash({ planHash: job.plan.planHash, files: job.plan.fileOperations || [] });
+  let diffResult = { stdout: '', exitCode: 0 };
+  let commitHash = baselineResult.stdout.trim();
+  if (changedFiles.length) {
+    const addResult = await runGit('add', { paths: changedFiles, cwd: paths.implementationProject });
+    if (addResult.exitCode !== 0) throw new Error(`Cannot stage approved files. ${addResult.stderr}`);
+    diffResult = await runGit('diff', { paths: changedFiles, cached: true, cwd: paths.implementationProject });
+    const commitResult = await runGit('commit', { message: `${job.jiraIssueKey || 'Manual'}: approved AI agent implementation`, cwd: paths.implementationProject });
+    if (commitResult.exitCode !== 0) throw new Error(`Cannot commit approved files. ${commitResult.stderr}`);
+    commitHash = (await runGit('rev-parse', { ref: 'HEAD', cwd: paths.implementationProject })).stdout.trim();
+  }
+  await writeFile(join(paths.diff, 'implementation.diff'), diffResult.stdout, 'utf8');
+  await updateJob(job.jobId, { implementation: { approvalId: approval.approvalId, branch, baselineCommit: baselineResult.stdout.trim(), commitHash, changedFiles, sourceHash, implementedAt: new Date().toISOString() }, diff: diffResult.stdout });
+  await appendLog(job.jobId, 'info', changedFiles.length ? `Implemented ${changedFiles.length} approved file operations locally. No deployment was performed.` : 'The approved plan contained no file operations. No source files were changed and deployment remains blocked.');
+}
+
+async function validate(job, actor) {
+  assertState(job, JOB_STATES.IMPLEMENTING, JOB_STATES.VALIDATION_FAILED);
+  validApproval(job, 'IMPLEMENTATION');
+  await transitionJob(job.jobId, JOB_STATES.VALIDATING, { actor, reason: 'Validation requested.' });
+  try {
+    const current = await requiredJob(job.jobId);
+    const paths = await ensureJobWorkspace(current.jobId, current.orgContext.orgRegistryId);
+    await verifySelectedOrg(current.orgContext, auditOptions(current, actor));
+    await assertCleanImplementation(paths, current.implementation);
+    const result = await runSfCommand('deployDryRun', { manifest: current.manifest }, { ...sfOptions(current, current.orgContext, paths, actor, current.metadataScope), cwd: paths.implementationProject });
+    await appendCommand(current.jobId, result);
+    const now = new Date();
+    if (result.exitCode !== 0) throw new Error(result.stderr || 'Salesforce validation failed.');
+    const validation = { validationId: nanoid(), targetOrgId: current.orgContext.expectedOrgId, status: 'PASSED', sourceHash: current.implementation?.sourceHash || stableHash([]), commitHash: current.implementation?.commitHash || '', planHash: current.plan.planHash, metadataScopeHash: current.metadataScope.hash, packageHash: await fileHash(current.manifest), commands: [result.command], result: result.stdout, timestamp: now.toISOString(), expiryTimestamp: new Date(now.getTime() + config.validationExpiryMinutes * 60000).toISOString() };
+    await writeFile(join(paths.validation, `${validation.validationId}.json`), JSON.stringify(validation, null, 2), 'utf8');
+    await updateJob(current.jobId, { validation });
+    await transitionJob(current.jobId, JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL, { actor, reason: 'Validation passed.' });
+  } catch (error) {
+    await updateJob(job.jobId, { validation: { status: 'FAILED', error: error.message, timestamp: new Date().toISOString() } });
+    await transitionJob(job.jobId, JOB_STATES.VALIDATION_FAILED, { actor, reason: 'Validation failed.', error: error.message });
+  }
+}
+
+async function deploy(job, actor) {
+  assertState(job, JOB_STATES.DEPLOYING);
+  const approval = validApproval(job, 'DEPLOYMENT');
+  assertDeploymentGuard(job, approval);
+  const paths = await ensureJobWorkspace(job.jobId, job.orgContext.orgRegistryId);
+  await verifySelectedOrg(job.orgContext, auditOptions(job, actor));
+  await assertCleanImplementation(paths, job.implementation);
+  const result = await runSfCommand('deployManifest', { manifest: job.manifest }, { ...sfOptions(job, job.orgContext, paths, actor, job.metadataScope, true), cwd: paths.implementationProject });
+  await appendCommand(job.jobId, result);
+  if (result.exitCode !== 0) {
+    await transitionJob(job.jobId, JOB_STATES.FAILED, { actor, reason: 'Deployment failed.', error: result.stderr });
+    return;
+  }
+  const deployment = { deploymentId: extractDeployId(result.stdout), targetOrgId: job.orgContext.expectedOrgId, sourceHash: job.validation.sourceHash, packageHash: job.validation.packageHash, commitHash: job.validation.commitHash || '', result: result.stdout, deployedAt: new Date().toISOString() };
+  await updateJob(job.jobId, { deployment });
+  if (job.jiraIssueKey) await addJiraComment(job.jiraIssueKey, completionComment(job, deployment));
+  await transitionJob(job.jobId, JOB_STATES.COMPLETED, { actor, reason: 'Approved package deployed and Jira updated.', approvalId: approval.approvalId });
+}
+
+function validApproval(job, type) {
+  const approval = [...job.approvals].reverse().find((item) => item.approvalType === type && item.decision === 'APPROVED');
+  if (!approval || approval.planHash !== job.plan?.planHash || approval.metadataScopeHash !== job.metadataScope?.hash || approval.salesforceOrganizationId !== job.orgContext?.expectedOrgId) throw Object.assign(new Error(`A current ${type.toLowerCase()} approval for this exact plan, scope, and org is required.`), { statusCode: 409 });
+  return approval;
+}
+
+function assertDeploymentGuard(job, approval) {
+  const validation = job.validation;
+  if (!validation || validation.status !== 'PASSED' || new Date(validation.expiryTimestamp) <= new Date()) throw new Error('A current successful validation is required.');
+  if (approval.validationId !== validation.validationId || approval.validatedSourceHash !== validation.sourceHash || approval.deploymentPackageHash !== validation.packageHash) throw new Error('Deployment approval does not match the validated artifacts.');
+  if (job.orgContext.environment === 'production' && (!config.allowProductionDeployment || approval.productionSpecificApproval !== true)) throw new Error('Production deployment is disabled or lacks production-specific approval.');
+  if (job.plan.destructiveChanges?.length) throw new Error('Destructive changes are blocked by default.');
+  if (job.orgContext.deploymentPermission !== 'allowed') throw new Error('Deployment is blocked by the org registry.');
+}
+
+function assertState(job, ...states) { if (!states.includes(job.status)) throw Object.assign(new Error(`Job must be in ${states.join(' or ')}.`), { statusCode: 409 }); }
+function auditOptions(job, actor) { return { jobId: job.jobId, jiraIssueKey: job.jiraIssueKey, actor }; }
+function sfOptions(job, orgContext, paths, actor, scope, approved = false) { return { ...auditOptions(job, actor), orgContext, jobPaths: paths, metadataScope: scope, approved }; }
+async function requiredJob(jobId) { const job = await getJobRecord(jobId); if (!job) throw Object.assign(new Error('Job not found.'), { statusCode: 404 }); return job; }
+async function fileHash(path) { return stableHash(await readFile(path, 'utf8')); }
+function extractDeployId(stdout) { try { const parsed = JSON.parse(stdout); return parsed.result?.id || parsed.result?.deployId || ''; } catch { return ''; } }
+async function assertCleanImplementation(paths, implementation) {
+  if (!implementation) throw new Error('A completed local implementation record is required.');
+  const status = await runGit('status', { cwd: paths.implementationProject });
+  const head = await runGit('rev-parse', { ref: 'HEAD', cwd: paths.implementationProject });
+  if (status.exitCode !== 0 || status.stdout.trim()) throw new Error('Implementation worktree contains unapproved or uncommitted changes.');
+  if (head.stdout.trim() !== implementation.commitHash) throw new Error('Implementation Git commit no longer matches the approved source.');
+}
+function completionComment(job, deployment) { return [`AI agent job ${job.jobId} completed.`, `Salesforce org: ${job.orgContext.displayName} (${job.orgContext.expectedOrgId})`, `Environment: ${job.orgContext.environment}`, `Validation: ${job.validation.status} (${job.validation.validationId})`, `Deployment ID: ${deployment.deploymentId || 'not returned'}`, `Rollback: ${job.plan.rollbackPlan}`].join('\n'); }

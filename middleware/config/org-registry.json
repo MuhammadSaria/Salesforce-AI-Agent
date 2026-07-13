@@ -1,0 +1,29 @@
+{
+  "orgs": [
+    {
+      "id": "read_usa_sandbox",
+      "displayName": "Read Foundation USA Sandbox",
+      "customerName": "Read Foundation USA",
+      "salesforceAlias": "read-usa-sandbox",
+      "expectedOrgId": "00D000000000000",
+      "environment": "sandbox",
+      "instanceUrl": "https://example--readusa.sandbox.my.salesforce.com",
+      "expectedUsername": "agent@example.invalid.readusa",
+      "jiraProjectKeys": ["READUSA"],
+      "jiraComponents": ["Fundraising"],
+      "jiraCustomFieldMappings": {
+        "customer": "customfield_10050",
+        "environment": "customfield_10051"
+      },
+      "repositoryPaths": ["."],
+      "localProjectPath": "workspaces/read_usa_sandbox/project",
+      "authenticationStatus": "cli-required",
+      "deploymentPermission": "allowed",
+      "productionApprovalRequired": false,
+      "active": false,
+      "allowedMetadataTypes": ["CustomObject", "CustomField", "Flow", "ApexClass", "ApexTrigger", "LightningComponentBundle", "PermissionSet", "ValidationRule", "CustomMetadata", "CustomLabels", "Layout", "FlexiPage", "RecordType"],
+      "restrictedMetadataTypes": ["Profile", "ConnectedApp", "AuthProvider"],
+      "allowedOperations": ["read", "retrieve", "validate", "deploy"]
+    }
+  ]
+}

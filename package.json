@@ -1,0 +1,12 @@
+{
+  "name": "salesforce-in-org-ai-agent",
+  "version": "2.0.0",
+  "private": true,
+  "scripts": {
+    "test:unit": "sfdx-lwc-jest -- --runInBand",
+    "test:unit:watch": "sfdx-lwc-jest --watch"
+  },
+  "devDependencies": {
+    "@salesforce/sfdx-lwc-jest": "^7.0.0"
+  }
+}

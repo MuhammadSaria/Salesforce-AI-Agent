@@ -1,0 +1,13 @@
+.sf/
+.sfdx/
+.vscode/
+middleware/.env
+middleware/.ngrok-url
+middleware/node_modules/
+node_modules/
+middleware/logs/
+middleware/*.log
+jobs/
+workspaces/
+coverage/
+dist/
