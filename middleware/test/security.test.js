@@ -59,6 +59,11 @@ test('summary-only Jira tickets remain actionable requirements', () => {
   assert.equal(requirement.businessRequirement, 'Create a Donor Account field');
 });
 
+test('review instructions are retained for revised Codex plans', () => {
+  const requirement = extractRequirement({ summary: 'Create an Account' }, '', [{ text: 'Use the verified Person Account record type.' }]);
+  assert.deepEqual(requirement.userInstructions, ['Use the verified Person Account record type.']);
+});
+
 test('Jira select-list custom fields are normalized for trusted org routing', () => {
   config.jiraAgentAccountId = '';
   config.jiraAllowedProjectKeys = ['SAPA'];

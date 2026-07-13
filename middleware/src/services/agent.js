@@ -249,6 +249,14 @@ async function validatePlannedDataOperations(job, paths, actor) {
     for (const fieldName of Object.keys(operation.fields)) {
       const field = fields.find((item) => item.name === fieldName);
       if (!field || (operation.operation === 'create' ? field.createable === false : field.updateable === false)) throw new Error(`Field ${operation.objectApiName}.${fieldName} is not ${operation.operation}able.`);
+      const value = operation.fields[fieldName];
+      if (field.type === 'picklist' && !field.picklistValues?.some((item) => item.active && item.value === String(value))) throw new Error(`Value ${value} is not an active option for ${operation.objectApiName}.${fieldName}.`);
+      if (field.type === 'reference' && value && !/^[A-Za-z0-9]{15,18}$/.test(String(value))) throw new Error(`Field ${operation.objectApiName}.${fieldName} requires a valid Salesforce record ID.`);
+      if (fieldName === 'RecordTypeId' && value) {
+        const recordTypeQuery = await runSfCommand('dataQuery', { query: `SELECT Id FROM RecordType WHERE Id = '${value}' AND SObjectType = '${operation.objectApiName}' AND IsActive = true LIMIT 1` }, sfOptions(job, job.orgContext, paths, actor, job.metadataScope));
+        await appendCommand(job.jobId, recordTypeQuery); commands.push(recordTypeQuery.command);
+        if (recordTypeQuery.exitCode !== 0 || Number(JSON.parse(recordTypeQuery.stdout)?.result?.totalSize || 0) !== 1) throw new Error(`Record type ${value} is not active for ${operation.objectApiName} in the verified target org.`);
+      }
     }
     if (operation.operation === 'update') {
       const query = await runSfCommand('dataQuery', { query: `SELECT Id FROM ${operation.objectApiName} WHERE Id = '${operation.recordId}' LIMIT 1` }, sfOptions(job, job.orgContext, paths, actor, job.metadataScope));
