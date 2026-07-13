@@ -1,29 +1,48 @@
 {
   "orgs": [
     {
-      "id": "read_usa_sandbox",
-      "displayName": "Read Foundation USA Sandbox",
-      "customerName": "Read Foundation USA",
-      "salesforceAlias": "read-usa-sandbox",
-      "expectedOrgId": "00D000000000000",
-      "environment": "sandbox",
-      "instanceUrl": "https://example--readusa.sandbox.my.salesforce.com",
-      "expectedUsername": "agent@example.invalid.readusa",
-      "jiraProjectKeys": ["READUSA"],
-      "jiraComponents": ["Fundraising"],
-      "jiraCustomFieldMappings": {
-        "customer": "customfield_10050",
-        "environment": "customfield_10051"
-      },
+      "id": "providus_orgfarm_dev",
+      "displayName": "Providus Technology Developer Org",
+      "customerName": "Providus Technology",
+      "salesforceAlias": "orgfarm-dev",
+      "expectedOrgId": "00Dg500000E07e9EAB",
+      "environment": "developer",
+      "instanceUrl": "https://orgfarm-9914d7f2f7-dev-ed.develop.my.salesforce.com",
+      "expectedUsername": "saria4505102.8535b64837ad@agentforce.com",
+      "jiraProjectKeys": [],
+      "jiraComponents": [],
+      "jiraCustomFieldMappings": {},
       "repositoryPaths": ["."],
-      "localProjectPath": "workspaces/read_usa_sandbox/project",
-      "authenticationStatus": "cli-required",
-      "deploymentPermission": "allowed",
+      "localProjectPath": "workspaces/providus_orgfarm_dev/project",
+      "authenticationStatus": "connected",
+      "deploymentPermission": "blocked",
       "productionApprovalRequired": false,
-      "active": false,
-      "allowedMetadataTypes": ["CustomObject", "CustomField", "Flow", "ApexClass", "ApexTrigger", "LightningComponentBundle", "PermissionSet", "ValidationRule", "CustomMetadata", "CustomLabels", "Layout", "FlexiPage", "RecordType"],
-      "restrictedMetadataTypes": ["Profile", "ConnectedApp", "AuthProvider"],
-      "allowedOperations": ["read", "retrieve", "validate", "deploy"]
+      "active": true,
+      "allowedMetadataTypes": [
+        "CustomObject",
+        "CustomField",
+        "Flow",
+        "ApexClass",
+        "ApexTrigger",
+        "LightningComponentBundle",
+        "PermissionSet",
+        "ValidationRule",
+        "CustomMetadata",
+        "CustomLabels",
+        "Layout",
+        "FlexiPage",
+        "RecordType"
+      ],
+      "restrictedMetadataTypes": [
+        "Profile",
+        "ConnectedApp",
+        "AuthProvider"
+      ],
+      "allowedOperations": [
+        "read",
+        "retrieve",
+        "validate"
+      ]
     }
   ]
 }
