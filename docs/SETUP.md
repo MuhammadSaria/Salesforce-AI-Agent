@@ -25,9 +25,10 @@ All configured routing signals must agree. Zero or multiple matches put the job 
 
 1. Create a least-privilege Jira service account and record its account ID.
 2. Set `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_AGENT_ACCOUNT_ID`, `JIRA_WEBHOOK_SECRET`, and `JIRA_ALLOWED_PROJECT_KEYS` only in the middleware secret store.
-3. Register a Jira admin webhook for `jira:issue_created` and `jira:issue_updated`, filtered to the allowed project, and set its URL to `POST /api/webhooks/jira`. Set the webhook `secret` to `JIRA_WEBHOOK_SECRET`; Jira sends the resulting HMAC in `X-Hub-Signature`.
-4. The middleware verifies the raw-body HMAC, allowed project, and configured assignee before accepting an event. Jira Automation remains an optional fallback using a hidden `X-Agent-Webhook-Token` header.
-5. Jira transition automation is intentionally disabled by default; successful deployment adds a comment but does not close the issue.
+3. Set `JIRA_POLL_INTERVAL_SECONDS=60` to discover assigned issues when an admin-managed webhook is unavailable. Set it to `0` only after webhook delivery is confirmed.
+4. Register a Jira admin webhook for `jira:issue_created` and `jira:issue_updated`, filtered to the allowed project, and set its URL to `POST /api/webhooks/jira`. Set the webhook `secret` to `JIRA_WEBHOOK_SECRET`; Jira sends the resulting HMAC in `X-Hub-Signature`.
+5. The middleware verifies the raw-body HMAC, allowed project, and configured assignee before accepting an event. Jira Automation remains an optional fallback using a hidden `X-Agent-Webhook-Token` header.
+6. Jira transition automation is intentionally disabled by default; successful deployment adds a comment but does not close the issue.
 
 For local testing, set `NGROK_AUTHTOKEN` in the middleware secret store and run `npm run tunnel`. The launcher relies on ngrok's environment-based authentication so the token is not exposed in process arguments.
 

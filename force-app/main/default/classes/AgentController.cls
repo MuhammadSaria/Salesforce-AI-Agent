@@ -64,7 +64,10 @@ public with sharing class AgentController {
         request.setTimeout(TIMEOUT_MS);
         request.setHeader('Accept', 'application/json');
         request.setHeader('X-Agent-User-Id', UserInfo.getUserId());
-        request.setHeader('X-Agent-Role', FeatureManagement.checkPermission('AI_Agent_Deploy') ? 'deployer' : 'developer');
+        String agentRole = FeatureManagement.checkPermission('AI_Agent_Admin')
+            ? 'admin'
+            : (FeatureManagement.checkPermission('AI_Agent_Deploy') ? 'deployer' : 'developer');
+        request.setHeader('X-Agent-Role', agentRole);
         if (payload != null) {
             request.setHeader('Content-Type', 'application/json');
             request.setBody(JSON.serialize(payload));

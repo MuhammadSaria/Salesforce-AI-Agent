@@ -12,6 +12,7 @@ import { requireApiAuth, requireRole } from './middleware/auth.js';
 import { getRegisteredOrg, listPublicOrgs } from './services/orgRegistry.js';
 import { claimWebhookEvent, parseJiraWebhook, verifyJiraWebhook } from './services/jira.js';
 import { JOB_STATES } from './domain/jobState.js';
+import { startJiraPoller } from './services/jiraPoller.js';
 
 export function createApp() {
   const app = express();
@@ -50,7 +51,7 @@ export function createApp() {
   app.get('/api/jobs/:jobId/logs', jobRoute((req, res, job) => res.json({ logs: job.logs, commands: job.commands })));
   app.get('/api/jobs/:jobId/audit', jobRoute((req, res, job) => res.json({ stateHistory: job.stateHistory, audit: job.audit })));
 
-  app.post('/api/jobs/:jobId/select-org', requireRole('developer', 'admin'), jobRoute(async (req, res, job) => {
+  app.post('/api/jobs/:jobId/select-org', requireRole('developer', 'deployer', 'admin'), jobRoute(async (req, res, job) => {
     const org = await getRegisteredOrg(String(req.body?.orgRegistryId || ''));
     if (!org) return res.status(422).json({ error: { message: 'Select an active org from the registry.' } });
     const updated = await invalidateForOrgChange(job.jobId, org.id, req.actor.id);
@@ -58,14 +59,14 @@ export function createApp() {
     res.json({ jobId: updated.jobId, status: updated.status, message: 'Org selected. Prior artifacts and approvals were invalidated.' });
   }));
 
-  app.post('/api/jobs/:jobId/analyze', requireRole('developer', 'admin'), jobRoute(async (req, res, job) => {
+  app.post('/api/jobs/:jobId/analyze', requireRole('developer', 'deployer', 'admin'), jobRoute(async (req, res, job) => {
     if (![JOB_STATES.RECEIVED, JOB_STATES.PLAN_REJECTED, JOB_STATES.ORG_VERIFICATION_FAILED].includes(job.status)) return conflict(res, 'Job is not ready for analysis.');
     if (job.status === JOB_STATES.PLAN_REJECTED) await invalidateForPlanChange(job.jobId, req.actor.id);
     await enqueueAgentJob({ jobId: job.jobId, action: 'analyze', actor: req.actor.id }, { jobId: `${job.jobId}:analyze:${Date.now()}` });
     res.status(202).json({ jobId: job.jobId, message: 'Analysis queued.' });
   }));
 
-  app.post('/api/jobs/:jobId/instructions', requireRole('developer', 'admin'), jobRoute(async (req, res, job) => {
+  app.post('/api/jobs/:jobId/instructions', requireRole('developer', 'deployer', 'admin'), jobRoute(async (req, res, job) => {
     const text = sanitizeUntrustedText(req.body?.instruction, 4000).trim();
     if (!text) return res.status(422).json({ error: { message: 'Instruction is required.' } });
     const instructions = [...job.instructions, { instructionId: nanoid(), text, actor: req.actor.id, timestamp: new Date().toISOString() }];
@@ -75,7 +76,7 @@ export function createApp() {
     res.status(201).json({ instructions });
   }));
 
-  app.post('/api/jobs/:jobId/approve-implementation', requireRole('developer', 'admin'), jobRoute(async (req, res, job) => {
+  app.post('/api/jobs/:jobId/approve-implementation', requireRole('developer', 'deployer', 'admin'), jobRoute(async (req, res, job) => {
     if (job.status !== JOB_STATES.AWAITING_PLAN_APPROVAL) return conflict(res, 'Job is not awaiting implementation approval.');
     if (Number(req.body?.planVersion) !== job.plan?.planVersion) return conflict(res, 'Approval must identify the current plan version.');
     const approval = approvalRecord(job, req, 'IMPLEMENTATION', { decision: 'APPROVED' });
@@ -83,15 +84,15 @@ export function createApp() {
     await transitionJob(job.jobId, JOB_STATES.IMPLEMENTING, { actor: req.actor.id, reason: 'Explicit implementation approval recorded.', approvalId: approval.approvalId });
     res.status(201).json({ approval });
   }));
-  app.post('/api/jobs/:jobId/reject-plan', requireRole('developer', 'admin'), jobRoute(async (req, res, job) => {
+  app.post('/api/jobs/:jobId/reject-plan', requireRole('developer', 'deployer', 'admin'), jobRoute(async (req, res, job) => {
     if (job.status !== JOB_STATES.AWAITING_PLAN_APPROVAL) return conflict(res, 'Job is not awaiting plan review.');
     const approval = approvalRecord(job, req, 'IMPLEMENTATION', { decision: 'REJECTED' });
     await updateJob(job.jobId, { approvals: [...job.approvals, approval] });
     await transitionJob(job.jobId, JOB_STATES.PLAN_REJECTED, { actor: req.actor.id, reason: 'Plan rejected.', approvalId: approval.approvalId });
     res.status(201).json({ approval });
   }));
-  app.post('/api/jobs/:jobId/implement', requireRole('developer', 'admin'), queueAction('implement', [JOB_STATES.IMPLEMENTING]));
-  app.post('/api/jobs/:jobId/validate', requireRole('developer', 'admin'), queueAction('validate', [JOB_STATES.IMPLEMENTING, JOB_STATES.VALIDATION_FAILED]));
+  app.post('/api/jobs/:jobId/implement', requireRole('developer', 'deployer', 'admin'), queueAction('implement', [JOB_STATES.IMPLEMENTING]));
+  app.post('/api/jobs/:jobId/validate', requireRole('developer', 'deployer', 'admin'), queueAction('validate', [JOB_STATES.IMPLEMENTING, JOB_STATES.VALIDATION_FAILED]));
 
   app.post('/api/jobs/:jobId/approve-deployment', requireRole('deployer', 'admin'), jobRoute(async (req, res, job) => {
     if (job.status !== JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL) return conflict(res, 'Job is not awaiting deployment approval.');
@@ -147,4 +148,7 @@ function normalizeIssueKey(value) { const key = String(value || '').trim().toUpp
 function conflict(res, message) { return res.status(409).json({ error: { message } }); }
 function errorHandler(error, req, res, _next) { req.log?.error({ err: error, code: error.code }, 'Request failed'); res.status(error.statusCode || 500).json({ error: { code: error.code || 'REQUEST_FAILED', message: error.message || 'Unexpected middleware error.' } }); }
 
-if (process.env.NODE_ENV !== 'test') createApp().listen(config.port, () => logger.info({ port: config.port }, 'Agent middleware listening'));
+if (process.env.NODE_ENV !== 'test') createApp().listen(config.port, () => {
+  logger.info({ port: config.port }, 'Agent middleware listening');
+  startJiraPoller();
+});

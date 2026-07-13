@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomPermission xmlns="http://soap.sforce.com/2006/04/metadata">
+    <description>Allows a user to perform all supervised AI agent console actions while approvals and org policy remain enforced.</description>
+    <isLicensed>false</isLicensed>
+    <label>AI Agent Admin</label>
+</CustomPermission>

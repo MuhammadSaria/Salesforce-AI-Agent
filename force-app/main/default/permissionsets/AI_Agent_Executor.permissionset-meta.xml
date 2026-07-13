@@ -4,5 +4,9 @@
         <enabled>true</enabled>
         <name>AI_Agent_Deploy</name>
     </customPermissions>
+    <customPermissions>
+        <enabled>true</enabled>
+        <name>AI_Agent_Admin</name>
+    </customPermissions>
     <label>AI Agent Executor</label>
 </PermissionSet>

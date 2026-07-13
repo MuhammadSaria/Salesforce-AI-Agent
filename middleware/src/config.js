@@ -15,6 +15,7 @@ export const config = {
   jiraAgentAccountId: process.env.JIRA_AGENT_ACCOUNT_ID || '',
   jiraWebhookSecret: process.env.JIRA_WEBHOOK_SECRET || '',
   jiraAllowedProjectKeys: String(process.env.JIRA_ALLOWED_PROJECT_KEYS || '').split(',').map((value) => value.trim().toUpperCase()).filter(Boolean),
+  jiraPollIntervalSeconds: Number(process.env.JIRA_POLL_INTERVAL_SECONDS || 60),
   orgRegistryPath: process.env.SALESFORCE_ORG_REGISTRY_PATH || process.env.ORG_REGISTRY_PATH || resolve(process.cwd(), 'config', 'org-registry.json'),
   workspaceRoot: process.env.WORKSPACE_ROOT || resolve(process.cwd(), '..'),
   maxDependencyDepth: Number(process.env.MAX_DEPENDENCY_DEPTH || 2),

@@ -7,6 +7,7 @@ import { claimWebhookEvent, parseJiraWebhook, verifyJiraWebhook } from '../src/s
 import { redactSecrets } from '../src/utils/sanitize.js';
 import { stableHash } from '../src/utils/hash.js';
 import { runSfCommand } from '../src/services/sfExecutor.js';
+import { buildAssignedIssuesJql } from '../src/services/jiraPoller.js';
 
 test('secret masking removes authorization, API keys, and token fields', () => {
   const value = 'Authorization: Bearer abc.def.ghi sk-example access_token=super-secret';
@@ -72,6 +73,10 @@ test('Jira select-list custom fields are normalized for trusted org routing', ()
     issue: { key: 'SAPA-42', fields: { summary: 'Task', components: [], customfield_10001: { value: 'DEV' } } }
   });
   assert.equal(parsed.issue.customFields.customfield_10001, 'DEV');
+});
+
+test('Jira polling is restricted to configured projects and the agent account', () => {
+  assert.equal(buildAssignedIssuesJql(['TA'], 'agent-account-id'), 'project IN (TA) AND assignee = "agent-account-id" ORDER BY updated DESC');
 });
 
 test('Salesforce operations are blocked when the org registry does not allow them', async () => {
