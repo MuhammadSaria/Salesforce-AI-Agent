@@ -12,7 +12,7 @@ import { addJiraComment, getJiraIssue } from './jira.js';
 import { analyzeDependencies, buildMetadataScope, buildPlan, expandScopeForFileOperations, extractRequirement, writeManifest } from './planning.js';
 import { runSfCommand, verifySelectedOrg } from './sfExecutor.js';
 import { runGit } from './gitExecutor.js';
-import { enrichPlanWithAi } from './aiPlanner.js';
+import { enrichPlanWithCodex } from './codexExecutor.js';
 
 export async function processAgentJob(message) {
   const job = await requiredJob(message.jobId);
@@ -66,7 +66,7 @@ async function analyze(job, actor) {
   const dependencies = await analyzeDependencies(paths, scope);
   const current = await requiredJob(job.jobId);
   const basePlan = buildPlan({ ...current, orgContext }, requirement, scope, dependencies);
-  let plan = await enrichPlanWithAi(basePlan, requirement, { ...scope, dependencies }, orgContext);
+  let plan = await enrichPlanWithCodex(basePlan, requirement, { ...scope, dependencies }, orgContext);
   const finalScope = expandScopeForFileOperations({ ...scope, dependencies }, plan.fileOperations, orgContext);
   await writeManifest(paths, finalScope);
   const planWithoutHash = { ...plan, metadataScopeHash: finalScope.hash };

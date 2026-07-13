@@ -38,4 +38,4 @@ The middleware URL must be HTTPS and reachable from Salesforce. The Apex proxy a
 - Configure HTTPS, gateway authentication, request throttling, centralized logs, backups, and a production-grade secret manager.
 - Configure the Named Credential/External Credential principal and permission sets in Salesforce.
 - Configure the Jira webhook HMAC gateway and service-account permissions.
-- Enable `OPENAI_ENABLED=true` and configure `OPENAI_API_KEY` to generate constrained source proposals for review. With AI disabled, the deterministic planner intentionally produces no file writes.
+- Install the Codex CLI on the middleware worker and run `codex login`. The middleware uses an ephemeral, read-only Codex execution with schema-constrained output; it does not require or expose an OpenAI API key. Keep `AGENT_BACKEND=codex`.

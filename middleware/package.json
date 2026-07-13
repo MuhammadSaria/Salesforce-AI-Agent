@@ -22,7 +22,6 @@
     "ioredis": "^5.7.0",
     "nanoid": "^5.1.5",
     "ngrok": "^5.0.0-beta.2",
-    "openai": "^5.10.2",
     "pino": "^9.7.0",
     "pino-http": "^10.5.0",
     "redis-memory-server": "^0.17.0",
