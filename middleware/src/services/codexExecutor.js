@@ -45,7 +45,7 @@ export async function enrichPlanWithCodex(plan, requirement, metadataScope, orgC
     'Do not include credentials, Salesforce records, arbitrary shell commands, destructive changes, or deployment authorization.',
     'Propose only task-relevant create or modify operations under force-app/main/default. No changes are applied during this run.',
     JSON.stringify({
-      requirement: sanitizeUntrustedText(requirement, config.maxPromptLength),
+      requirement: sanitizeUntrustedText(JSON.stringify(requirement), config.maxPromptLength),
       metadataScope,
       orgPolicy: {
         environment: orgContext.environment,

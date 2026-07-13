@@ -25,7 +25,8 @@ export async function processAgentJob(message) {
 }
 
 async function analyze(job, actor) {
-  const jira = job.jiraIssueKey && !job.jira ? await getJiraIssue(job.jiraIssueKey) : job.jira;
+  // Webhook issue payloads can omit fields, so Jira remains the authoritative source.
+  const jira = job.jiraIssueKey ? await getJiraIssue(job.jiraIssueKey) : job.jira;
   const routingContext = jira ? {
     ...job.context,
     jiraProjectKey: jira.projectKey,
@@ -136,10 +137,20 @@ async function validate(job, actor) {
     const paths = await ensureJobWorkspace(current.jobId, current.orgContext.orgRegistryId);
     await verifySelectedOrg(current.orgContext, auditOptions(current, actor));
     await assertCleanImplementation(paths, current.implementation);
+    const noSourceChanges = !(current.plan.fileOperations || []).length && !(current.implementation?.changedFiles || []).length;
+    if (noSourceChanges) {
+      const now = new Date();
+      const validation = { validationId: nanoid(), targetOrgId: current.orgContext.expectedOrgId, status: 'PASSED', outcome: 'NO_CHANGES', sourceHash: current.implementation?.sourceHash || stableHash([]), commitHash: current.implementation?.commitHash || '', planHash: current.plan.planHash, metadataScopeHash: current.metadataScope.hash, packageHash: stableHash([]), commands: [], result: 'No source changes were proposed, so Salesforce deployment validation was not required.', warnings: ['No Salesforce source changes to validate or deploy.'], timestamp: now.toISOString(), expiryTimestamp: new Date(now.getTime() + config.validationExpiryMinutes * 60000).toISOString() };
+      await writeFile(join(paths.validation, `${validation.validationId}.json`), JSON.stringify(validation, null, 2), 'utf8');
+      await updateJob(current.jobId, { validation, deployment: { notRequired: true, reason: 'No source changes were proposed.' } });
+      if (current.jiraIssueKey) await addJiraComment(current.jiraIssueKey, noChangeCompletionComment(current, validation));
+      await transitionJob(current.jobId, JOB_STATES.COMPLETED, { actor, reason: 'Validation completed with no source changes; deployment was not required.' });
+      return;
+    }
     const result = await runSfCommand('deployDryRun', { manifest: current.manifest }, { ...sfOptions(current, current.orgContext, paths, actor, current.metadataScope), cwd: paths.implementationProject });
     await appendCommand(current.jobId, result);
     const now = new Date();
-    if (result.exitCode !== 0) throw new Error(result.stderr || 'Salesforce validation failed.');
+    if (result.exitCode !== 0) throw new Error(sfFailureMessage(result));
     const validation = { validationId: nanoid(), targetOrgId: current.orgContext.expectedOrgId, status: 'PASSED', sourceHash: current.implementation?.sourceHash || stableHash([]), commitHash: current.implementation?.commitHash || '', planHash: current.plan.planHash, metadataScopeHash: current.metadataScope.hash, packageHash: await fileHash(current.manifest), commands: [result.command], result: result.stdout, timestamp: now.toISOString(), expiryTimestamp: new Date(now.getTime() + config.validationExpiryMinutes * 60000).toISOString() };
     await writeFile(join(paths.validation, `${validation.validationId}.json`), JSON.stringify(validation, null, 2), 'utf8');
     await updateJob(current.jobId, { validation });
@@ -199,3 +210,13 @@ async function assertCleanImplementation(paths, implementation) {
 }
 function completionComment(job, deployment) { return [`AI agent job ${job.jobId} completed.`, `Salesforce org: ${job.orgContext.displayName} (${job.orgContext.expectedOrgId})`, `Environment: ${job.orgContext.environment}`, `Validation: ${job.validation.status} (${job.validation.validationId})`, `Deployment ID: ${deployment.deploymentId || 'not returned'}`, `Rollback: ${job.plan.rollbackPlan}`].join('\n'); }
 function planReviewComment(job, plan, orgContext) { return [`AI agent plan ready for review.`, `Job: ${job.jobId}`, `Target org: ${orgContext.displayName} (${orgContext.expectedOrgId})`, `Environment: ${orgContext.environment}`, `Requirement: ${plan.requirementSummary || 'See issue details.'}`, `Risk: ${plan.estimatedRiskLevel}`, `Plan version: ${plan.planVersion}`, plan.notice || 'No changes have been made yet.', `Review and approve implementation in the Salesforce AI Agent console.`].join('\n'); }
+function noChangeCompletionComment(job, validation) { return [`AI agent job ${job.jobId} completed without deployment.`, `Salesforce org: ${job.orgContext.displayName} (${job.orgContext.expectedOrgId})`, `Validation: ${validation.status} (${validation.validationId})`, `Result: No Salesforce source changes were proposed, so deployment was not required.`].join('\n'); }
+function sfFailureMessage(result) {
+  try {
+    const parsed = JSON.parse(result.stdout || '{}');
+    if (parsed.message) return parsed.message;
+  } catch {
+    // Fall through to sanitized CLI output.
+  }
+  return result.stderr || 'Salesforce validation failed.';
+}

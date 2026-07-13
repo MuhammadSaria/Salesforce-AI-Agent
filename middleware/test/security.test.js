@@ -54,6 +54,11 @@ test('duplicate Jira webhook event is rejected idempotently', async () => {
   assert.equal(await claimWebhookEvent(id), false);
 });
 
+test('summary-only Jira tickets remain actionable requirements', () => {
+  const requirement = extractRequirement({ summary: 'Create a Donor Account field', description: '' }, 'Analyze Jira issue SAPA-1', []);
+  assert.equal(requirement.businessRequirement, 'Create a Donor Account field');
+});
+
 test('Jira select-list custom fields are normalized for trusted org routing', () => {
   config.jiraAgentAccountId = '';
   config.jiraAllowedProjectKeys = ['SAPA'];

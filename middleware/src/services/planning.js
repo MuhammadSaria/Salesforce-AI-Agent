@@ -18,7 +18,7 @@ export function extractRequirement(jira, prompt, instructions = []) {
   return {
     summary: jira?.summary || String(prompt || '').slice(0, 500),
     acceptanceCriteria: jira?.acceptanceCriteria || '',
-    businessRequirement: jira?.description || prompt || '',
+    businessRequirement: jira?.description || jira?.summary || prompt || '',
     securityRequirements: matchingLines(text, /secur|permission|sharing|access/i),
     testingRequirements: matchingLines(text, /test|coverage|acceptance/i),
     ambiguities: detectAmbiguities(text),

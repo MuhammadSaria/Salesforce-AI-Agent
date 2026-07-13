@@ -11,3 +11,7 @@ test('invalid transition cannot bypass implementation and deployment approvals',
   assert.throws(() => assertTransition(JOB_STATES.RECEIVED, JOB_STATES.DEPLOYING), /Invalid job transition/);
   assert.throws(() => assertTransition(JOB_STATES.AWAITING_PLAN_APPROVAL, JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL), /Invalid job transition/);
 });
+
+test('a validated no-change plan can complete without deployment', () => {
+  assert.doesNotThrow(() => assertTransition(JOB_STATES.VALIDATING, JOB_STATES.COMPLETED));
+});
