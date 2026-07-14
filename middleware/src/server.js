@@ -141,7 +141,10 @@ async function jiraWebhook(req, res, next) {
     const eventId = String(req.get('x-atlassian-webhook-identifier') || `${parsed.event}:${parsed.issue.key}:${req.body?.timestamp || ''}`);
     if (!(await claimWebhookEvent(eventId))) return res.status(200).json({ accepted: true, duplicate: true });
     const existing = (await listJobRecords()).find((job) => job.jiraIssueKey === parsed.issue.key);
-    if (existing) return res.status(200).json({ accepted: true, duplicate: true, jobId: existing.jobId });
+    if (existing) {
+      await enqueueAgentJob({ jobId: existing.jobId, action: 'sync-jira', actor: 'jira-webhook' }, { jobId: `${existing.jobId}:jira-sync:${Date.now()}` });
+      return res.status(202).json({ accepted: true, updateQueued: true, jobId: existing.jobId });
+    }
     const job = await createJobRecord({ jobId: nanoid(), jiraIssueKey: parsed.issue.key, source: 'jira-webhook', prompt: `Analyze Jira issue ${parsed.issue.key}`, userId: 'jira-webhook', context: { jiraProjectKey: parsed.issue.projectKey, jiraComponents: parsed.issue.components, jiraCustomFields: parsed.issue.customFields }, jira: parsed.issue });
     await enqueueAgentJob({ jobId: job.jobId, action: 'analyze', actor: 'jira-webhook' }, { jobId: `${job.jobId}:analyze:1` });
     res.status(202).json({ accepted: true, jobId: job.jobId });

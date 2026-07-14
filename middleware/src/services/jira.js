@@ -29,6 +29,14 @@ export async function claimWebhookEvent(eventId) {
   return true;
 }
 
+export async function claimJiraComment(jobId, commentId) {
+  const key = `jira-comment:${jobId}:${commentId}`;
+  if (redis) return (await redis.set(key, '1', 'EX', 86400 * 30, 'NX')) === 'OK';
+  if (memoryEvents.has(key)) return false;
+  memoryEvents.add(key);
+  return true;
+}
+
 export function parseJiraWebhook(payload) {
   const event = String(payload?.webhookEvent || '');
   if (!['jira:issue_created', 'jira:issue_updated'].includes(event)) throw unsupported('Unsupported Jira event.');
@@ -50,6 +58,17 @@ export async function getJiraIssue(issueKey) {
   return issue;
 }
 
+export async function getJiraComments(issueKey) {
+  validateIssueKey(issueKey);
+  assertConfigured();
+  const response = await fetch(`${config.jiraBaseUrl.replace(/\/$/, '')}/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment?maxResults=100`, {
+    headers: { Accept: 'application/json', Authorization: `Basic ${Buffer.from(`${config.jiraEmail}:${config.jiraApiToken}`).toString('base64')}` }
+  });
+  if (!response.ok) throw new Error(`Jira comment retrieval failed with status ${response.status}.`);
+  const payload = await response.json();
+  return (payload.comments || []).map(normalizeComment).filter((comment) => comment.id && comment.body);
+}
+
 export async function addJiraComment(issueKey, body) {
   validateIssueKey(issueKey);
   assertConfigured();
@@ -65,13 +84,15 @@ function normalizeIssue(issue) {
   const fields = issue?.fields || {};
   const key = String(issue?.key || '').toUpperCase();
   validateIssueKey(key);
+  const commentEntries = (fields.comment?.comments || []).slice(-50).map(normalizeComment).filter((comment) => comment.body);
   return {
     key,
     projectKey: key.split('-')[0],
     summary: sanitizeUntrustedText(fields.summary, 500),
     description: sanitizeUntrustedText(extractAdfText(fields.description), 20000),
     acceptanceCriteria: sanitizeUntrustedText(fields.acceptanceCriteria || fields.customfield_acceptance_criteria, 10000),
-    comments: (fields.comment?.comments || []).slice(-50).map((comment) => sanitizeUntrustedText(extractAdfText(comment.body), 4000)),
+    comments: commentEntries.map((comment) => comment.body),
+    commentEntries,
     attachments: (fields.attachment || []).map(({ id, filename, mimeType, size }) => ({ id: String(id), filename: sanitizeUntrustedText(filename, 255), mimeType, size })),
     priority: sanitizeUntrustedText(fields.priority?.name, 100),
     reporter: sanitizeUntrustedText(fields.reporter?.displayName, 200),
@@ -83,6 +104,17 @@ function normalizeIssue(issue) {
     status: sanitizeUntrustedText(fields.status?.name, 100),
     linkedIssues: (fields.issuelinks || []).map((link) => link.outwardIssue?.key || link.inwardIssue?.key).filter(Boolean),
     customFields: Object.fromEntries(Object.entries(fields).filter(([key]) => key.startsWith('customfield_')).map(([key, value]) => [key, sanitizeUntrustedText(extractJiraFieldValue(value), 2000)]))
+  };
+}
+
+function normalizeComment(comment) {
+  return {
+    id: String(comment?.id || ''),
+    body: sanitizeUntrustedText(extractAdfText(comment?.body), 4000),
+    authorAccountId: String(comment?.author?.accountId || ''),
+    authorDisplayName: sanitizeUntrustedText(comment?.author?.displayName, 200),
+    created: String(comment?.created || ''),
+    updated: String(comment?.updated || '')
   };
 }
 

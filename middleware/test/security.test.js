@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import { config } from '../src/config.js';
 import { buildMetadataScope, buildPlan, extractRequirement } from '../src/services/planning.js';
-import { claimWebhookEvent, parseJiraWebhook, verifyJiraWebhook } from '../src/services/jira.js';
+import { claimJiraComment, claimWebhookEvent, parseJiraWebhook, verifyJiraWebhook } from '../src/services/jira.js';
 import { redactSecrets } from '../src/utils/sanitize.js';
 import { stableHash } from '../src/utils/hash.js';
 import { runSfCommand } from '../src/services/sfExecutor.js';
 import { buildAssignedIssuesJql } from '../src/services/jiraPoller.js';
+import { isAgentGeneratedComment, selectNewUserComments } from '../src/services/jiraSync.js';
 
 test('secret masking removes authorization, API keys, and token fields', () => {
   const value = 'Authorization: Bearer abc.def.ghi sk-example access_token=super-secret';
@@ -53,6 +54,30 @@ test('duplicate Jira webhook event is rejected idempotently', async () => {
   const id = `event-${Date.now()}`;
   assert.equal(await claimWebhookEvent(id), true);
   assert.equal(await claimWebhookEvent(id), false);
+});
+
+test('a Jira comment can be claimed only once per job', async () => {
+  const jobId = `job-${Date.now()}`;
+  assert.equal(await claimJiraComment(jobId, 'comment-1'), true);
+  assert.equal(await claimJiraComment(jobId, 'comment-1'), false);
+  assert.equal(await claimJiraComment(`${jobId}-other`, 'comment-1'), true);
+});
+
+test('Jira comment synchronization ignores agent comments and keeps new user feedback', () => {
+  const comments = [
+    { id: '1', body: 'Original requirement' },
+    { id: '2', body: 'AI agent plan ready for review.\nJob: job-1' },
+    { id: '3', body: 'Use a picklist instead of a text field.' }
+  ];
+  const selected = selectNewUserComments({ jiraSync: { commentIds: ['1'] }, instructions: [] }, comments);
+  assert.deepEqual(selected.map((comment) => comment.id), ['3']);
+  assert.equal(isAgentGeneratedComment('AI agent job job-1 completed.\nDeployment ID: 0Af'), true);
+});
+
+test('legacy jobs do not reprocess Jira comments already used during analysis', () => {
+  const comments = [{ id: '1', body: 'Existing planning comment' }, { id: '2', body: 'New review instruction' }];
+  const selected = selectNewUserComments({ jira: { comments: ['Existing planning comment'] }, instructions: [] }, comments);
+  assert.deepEqual(selected.map((comment) => comment.id), ['2']);
 });
 
 test('secret masking preserves Git and source hashes used by deployment guards', () => {

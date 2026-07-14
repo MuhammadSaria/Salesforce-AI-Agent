@@ -15,10 +15,16 @@ import { runGit } from './gitExecutor.js';
 import { enrichPlanWithCodex } from './codexExecutor.js';
 import { latestApprovedApproval } from '../domain/approval.js';
 import { humanizeValidationFailure } from '../utils/validationFailure.js';
+import { activatePendingJiraRevision, syncJiraComments } from './jiraSync.js';
 
 export async function processAgentJob(message) {
   const job = await requiredJob(message.jobId);
   const actor = message.actor || 'system';
+  if (message.action === 'sync-jira') {
+    const result = await syncJiraComments(job, actor);
+    if (result.reanalysisRequired) return analyze(await requiredJob(job.jobId), actor);
+    return result;
+  }
   if (message.action === 'analyze') return analyze(job, actor);
   if (message.action === 'implement') return implement(job, actor);
   if (message.action === 'validate') return validate(job, actor);
@@ -35,7 +41,7 @@ async function analyze(job, actor) {
     jiraComponents: jira.components,
     jiraCustomFields: jira.customFields
   } : job.context;
-  if (jira) await updateJob(job.jobId, { jira, context: routingContext });
+  if (jira) await updateJob(job.jobId, { jira, context: routingContext, jiraSync: job.jiraSync || { commentIds: (jira.commentEntries || []).map((comment) => comment.id), syncedAt: new Date().toISOString() } });
   job = { ...job, jira, context: routingContext };
 
   const selection = await selectOrgForJob(job);
@@ -95,6 +101,7 @@ async function analyze(job, actor) {
       await appendLog(job.jobId, 'warn', `Plan generated, but the Jira review comment could not be added: ${error.message}`);
     }
   }
+  if (await activatePendingJiraRevision(job.jobId, actor)) return analyze(await requiredJob(job.jobId), actor);
 }
 
 async function implement(job, actor) {
@@ -167,6 +174,7 @@ async function validate(job, actor) {
       await writeFile(join(paths.validation, `${validation.validationId}.json`), JSON.stringify(validation, null, 2), 'utf8');
       await updateJob(current.jobId, { validation });
       await transitionJob(current.jobId, JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL, { actor, reason: 'Data operations validated; separate execution approval required.' });
+      if (await activatePendingJiraRevision(current.jobId, actor)) return analyze(await requiredJob(current.jobId), actor);
       return;
     }
     const result = await runSfCommand('deployDryRun', { manifest: current.manifest }, { ...sfOptions(current, current.orgContext, paths, actor, current.metadataScope), cwd: implementationProject });
@@ -177,9 +185,11 @@ async function validate(job, actor) {
     await writeFile(join(paths.validation, `${validation.validationId}.json`), JSON.stringify(validation, null, 2), 'utf8');
     await updateJob(current.jobId, { validation });
     await transitionJob(current.jobId, JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL, { actor, reason: 'Validation passed.' });
+    if (await activatePendingJiraRevision(current.jobId, actor)) return analyze(await requiredJob(current.jobId), actor);
   } catch (error) {
     await updateJob(job.jobId, { validation: { status: 'FAILED', error: error.message, failureReason: humanizeValidationFailure(error.message), timestamp: new Date().toISOString() } });
     await transitionJob(job.jobId, JOB_STATES.VALIDATION_FAILED, { actor, reason: 'Validation failed.', error: error.message });
+    if (await activatePendingJiraRevision(job.jobId, actor)) return analyze(await requiredJob(job.jobId), actor);
   }
 }
 

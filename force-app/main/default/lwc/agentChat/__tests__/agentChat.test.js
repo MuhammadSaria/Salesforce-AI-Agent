@@ -123,7 +123,7 @@ describe('c-agent-chat', () => {
             plan: { notice: 'No changes have been deployed.' },
             implementation: { commitHash: 'commit-1' },
             validation: { status: 'FAILED', failureReason: 'The Flow email recipient is configured in a format Salesforce does not accept.' },
-            instructions: [{ instructionId: 'instruction-1', text: 'Use a direct email address instead of a collection.', timestamp: '2026-07-14T12:00:00Z' }],
+            instructions: [{ instructionId: 'instruction-1', text: 'Use a direct email address instead of a collection.', timestamp: '2026-07-14T12:00:00Z', source: 'jira-comment' }],
             metadataScope: { primaryMetadata: [], dependencies: [] }
         };
         getJobs.mockResolvedValue(JSON.stringify({ jobs: [job] }));
@@ -140,6 +140,7 @@ describe('c-agent-chat', () => {
         expect(element.shadowRoot.querySelector('.milestone--failed').textContent).toContain('Validation failed');
         expect(buttonByLabel(element, 'Approve Deployment')).toBeUndefined();
         expect(element.shadowRoot.querySelector('.conversation-stream').textContent).toContain('Use a direct email address instead of a collection.');
+        expect(element.shadowRoot.querySelector('.conversation-stream').textContent).toContain('Jira comment');
         expect(element.shadowRoot.querySelector('.conversation-stream').textContent).toContain('Send a change request');
         expect(textareaByLabel(element, 'Request a change or add an instruction').disabled).toBe(false);
         expect(buttonByLabel(element, 'Send Instruction')).not.toBeUndefined();

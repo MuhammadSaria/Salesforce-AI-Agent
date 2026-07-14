@@ -26,6 +26,9 @@ export async function createJobRecord(input) {
     orgCandidates: [],
     orgRoutingEvidence: [],
     jira: input.jira || null,
+    jiraSync: null,
+    pendingRevision: false,
+    followUpRequired: false,
     metadataScope: null,
     plan: null,
     nextPlanVersion: 1,
@@ -180,7 +183,7 @@ async function invalidate(jobId, selection, actor, reason) {
       });
     }
     record.stateHistory.push({ previousState: record.status, newState: JOB_STATES.RECEIVED, timestamp: now, actor, reason, approvalId: '', orgId: '' });
-    Object.assign(record, { status: JOB_STATES.RECEIVED, context: { ...record.context, selectedOrgRegistryId: selection }, orgContext: null, orgCandidates: [], orgRoutingEvidence: [], metadataScope: null, plan: null, nextPlanVersion: Math.max(1, currentPlanVersion + 1), revisions, approvals: [], validation: null, deployment: null, implementation: null, diff: '', error: '', updatedAt: now });
+    Object.assign(record, { status: JOB_STATES.RECEIVED, context: { ...record.context, selectedOrgRegistryId: selection }, orgContext: null, orgCandidates: [], orgRoutingEvidence: [], metadataScope: null, plan: null, nextPlanVersion: Math.max(1, currentPlanVersion + 1), revisions, approvals: [], validation: null, deployment: null, implementation: null, diff: '', pendingRevision: false, followUpRequired: false, error: '', updatedAt: now });
     await save(record);
     return record;
   });

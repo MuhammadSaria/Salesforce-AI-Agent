@@ -95,7 +95,7 @@ export default class AgentChat extends LightningElement {
     get conversationItems() {
         const messages = (this.job?.instructions || []).map((item, index) => ({
             key: item.instructionId || `instruction-${index}`,
-            author: 'You',
+            author: item.source === 'jira-comment' ? 'Jira comment' : 'You',
             meta: item.timestamp || '',
             text: item.text,
             className: 'message message--user'
