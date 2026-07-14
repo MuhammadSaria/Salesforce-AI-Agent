@@ -22,7 +22,8 @@ export const agentQueue =
 
 export async function enqueueAgentJob(job, options = {}) {
   if (agentQueue) {
-    return agentQueue.add('process-agent-job', job, options);
+    const safeOptions = options.jobId ? { ...options, jobId: safeQueueJobId(options.jobId) } : options;
+    return agentQueue.add('process-agent-job', job, safeOptions);
   }
 
   setImmediate(async () => {
@@ -38,4 +39,10 @@ export async function enqueueAgentJob(job, options = {}) {
     }
   });
   return { id: options.jobId || job.jobId };
+}
+
+export function safeQueueJobId(value) {
+  const result = String(value || '').replace(/[^A-Za-z0-9_-]/g, '-').replace(/-+/g, '-').slice(0, 240);
+  if (!result) throw new Error('Queue job ID is required.');
+  return result;
 }
