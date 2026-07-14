@@ -41,9 +41,10 @@ export default class AgentChat extends LightningElement {
     get canValidate() { return this.status === 'VALIDATION_FAILED' && Boolean(this.job?.implementation); }
     get canApproveDeployment() { return this.status === 'AWAITING_DEPLOYMENT_APPROVAL'; }
     get hasDataOperations() { return Boolean(this.plan?.dataOperations?.length); }
-    get approvalActionLabel() { return this.hasDataOperations ? 'Approve Data Execution' : 'Approve Deployment'; }
-    get rejectionActionLabel() { return this.hasDataOperations ? 'Reject Data Execution' : 'Reject Deployment'; }
-    get executionActionLabel() { return this.hasDataOperations ? 'Execute Approved Data Changes' : 'Deploy Approved Package'; }
+    get hasDeleteOperations() { return Boolean(this.plan?.dataOperations?.some((operation) => operation.operation === 'delete')); }
+    get approvalActionLabel() { return this.hasDeleteOperations ? 'Approve Record Deletion' : this.hasDataOperations ? 'Approve Data Execution' : 'Approve Deployment'; }
+    get rejectionActionLabel() { return this.hasDeleteOperations ? 'Reject Record Deletion' : this.hasDataOperations ? 'Reject Data Execution' : 'Reject Deployment'; }
+    get executionActionLabel() { return this.hasDeleteOperations ? 'Delete Approved Record' : this.hasDataOperations ? 'Execute Approved Data Changes' : 'Deploy Approved Package'; }
     get hasDeploymentApproval() { return (this.job?.approvals || []).some((item) => item.approvalType === 'DEPLOYMENT' && item.decision === 'APPROVED' && item.validationId === this.validation?.validationId); }
     get canRefreshAnalysis() { return ['RECEIVED', 'PLAN_REJECTED', 'ORG_VERIFICATION_FAILED'].includes(this.status); }
     get canCancel() { return !['COMPLETED', 'FAILED', 'CANCELLED', 'DEPLOYING'].includes(this.status); }

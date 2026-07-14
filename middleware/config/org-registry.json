@@ -127,14 +127,16 @@
       "authenticationStatus": "connected",
       "deploymentPermission": "allowed",
       "dataMutationPermission": "allowed",
+      "recordDeletionPermission": "allowed",
       "allowedDataObjects": ["*"],
       "restrictedDataObjects": ["User", "UserRole", "Profile", "PermissionSet", "PermissionSetAssignment", "PermissionSetGroup", "PermissionSetGroupComponent", "SetupEntityAccess", "Group", "GroupMember", "QueueSobject", "AuthSession", "LoginHistory", "OauthToken", "ConnectedApplication", "ExternalDataUserAuth"],
       "maximumDataOperations": 10,
+      "maximumDeleteOperations": 1,
       "productionApprovalRequired": false,
       "active": true,
       "allowedMetadataTypes": ["CustomObject", "CustomField", "Flow", "ApexClass", "ApexTrigger", "LightningComponentBundle", "PermissionSet", "ValidationRule", "CustomMetadata", "CustomLabels", "Layout", "FlexiPage", "RecordType"],
       "restrictedMetadataTypes": ["Profile", "ConnectedApp", "AuthProvider"],
-      "allowedOperations": ["read", "retrieve", "validate", "deploy", "data-create", "data-update"]
+      "allowedOperations": ["read", "retrieve", "validate", "deploy", "data-create", "data-update", "data-delete"]
     },
     {
       "id": "read_canada_production",

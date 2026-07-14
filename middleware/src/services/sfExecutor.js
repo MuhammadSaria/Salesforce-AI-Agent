@@ -55,6 +55,15 @@ const COMMANDS = {
       validateDataFields(fields);
     }
   },
+  dataDelete: {
+    operation: 'data-delete',
+    requiresApproval: true,
+    args: ({ objectApiName, recordId, targetOrg }) => ['data', 'delete', 'record', '--sobject', objectApiName, '--record-id', recordId, '--target-org', targetOrg, '--json'],
+    validate: ({ objectApiName, recordId }) => {
+      validateApiName(objectApiName, 'object');
+      if (!/^[A-Za-z0-9]{15,18}$/.test(String(recordId || ''))) throw new Error('A valid Salesforce record ID is required for delete.');
+    }
+  },
   retrieveManifest: {
     operation: 'retrieve',
     args: ({ manifest, targetOrg, outputDir }) => [

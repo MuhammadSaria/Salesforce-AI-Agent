@@ -21,6 +21,7 @@
                 </div>
                 <template if:true={isProduction}><div class="production-warning" role="alert">You are reviewing work for a Production Salesforce org. Deployment requires production-specific approval.</div></template>
                 <template if:true={hasDataOperations}><div class="production-warning" role="alert">This plan contains Salesforce record changes. Review every object, record ID, field, and value before granting the separate execution approval.</div></template>
+                <template if:true={hasDeleteOperations}><div class="production-warning" role="alert">Destructive action: this plan will delete an existing Salesforce record. Confirm the exact object and record ID. Recovery depends on Salesforce Recycle Bin support and retention.</div></template>
 
                 <template if:true={canSelectOrg}>
                     <section class="action-band">

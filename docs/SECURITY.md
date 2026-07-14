@@ -1,7 +1,7 @@
 # Security Model and Limits
 
 - Every Salesforce CLI operation reverifies alias, Organization ID, and instance URL and supplies `--target-org` explicitly.
-- CLI and Git commands use fixed argument arrays with `shell: false`; shell operators, output redirection, destructive Git, record deletion, and broad destructive metadata are unavailable. Structured record creates and updates are available only for registry-allowlisted objects and operations after validation and a separate execution approval. A wildcard business-object policy still blocks identity, authentication, permission, session, and setup objects through `restrictedDataObjects`.
+- CLI and Git commands use fixed argument arrays with `shell: false`; shell operators, output redirection, destructive Git, and broad destructive metadata are unavailable. Structured record creates, updates, and exact-ID deletes are available only for registry-allowlisted objects and operations after validation and a separate execution approval. Deletes are limited per job, blocked in production, and rejected for identity, authentication, permission, session, and setup objects through `restrictedDataObjects`.
 - Jira aliases, usernames, URLs, credentials, comments, attachments, Salesforce records, and prompts cannot select an org or authorize a stage.
 - Implementation and deployment approvals are separate, explicit, versioned, actor-attributed records. Production requires a production flag plus the server-side production feature flag.
 - Retrieval and deployment use a job-specific manifest within an isolated workspace. Component/depth/operation limits stop uncontrolled expansion.

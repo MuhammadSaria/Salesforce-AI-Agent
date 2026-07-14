@@ -24,9 +24,12 @@ test('accepts structured Salesforce record create operations', () => {
   assert.equal(result.dataOperations[0].objectApiName, 'Account');
 });
 
-test('rejects record deletes and sensitive fields', () => {
+test('accepts an exact record delete and rejects unsafe data operations', () => {
   const base = { ...proposal({ operation: 'modify', path: 'force-app/main/default/classes/SapaService.cls', content: 'public class SapaService {}', reason: 'Test' }), files: [] };
-  assert.throws(() => validateCodexProposal({ ...base, dataOperations: [{ operation: 'delete', objectApiName: 'Account', recordId: '', fieldValues: [{ name: 'Name', value: 'x' }], reason: 'No' }] }), /blocked data operation/);
+  const result = validateCodexProposal({ ...base, dataOperations: [{ operation: 'delete', objectApiName: 'Account', recordId: '001000000000001AAA', fieldValues: [], reason: 'Explicitly requested.' }] });
+  assert.equal(result.dataOperations[0].operation, 'delete');
+  assert.throws(() => validateCodexProposal({ ...base, dataOperations: [{ operation: 'delete', objectApiName: 'Account', recordId: '', fieldValues: [], reason: 'No' }] }), /valid Salesforce record ID/);
+  assert.throws(() => validateCodexProposal({ ...base, dataOperations: [{ operation: 'delete', objectApiName: 'Account', recordId: '001000000000001AAA', fieldValues: [{ name: 'Name', value: 'x' }], reason: 'No' }] }), /cannot include field changes/);
   assert.throws(() => validateCodexProposal({ ...base, dataOperations: [{ operation: 'create', objectApiName: 'Account', recordId: '', fieldValues: [{ name: 'ApiToken__c', value: 'secret' }], reason: 'No' }] }), /Blocked Salesforce field/);
 });
 

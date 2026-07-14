@@ -190,7 +190,7 @@ async function deploy(job, actor) {
   const recordResults = [];
   if (dataOperations.length) {
     for (const operation of dataOperations) {
-      const command = operation.operation === 'create' ? 'dataCreate' : 'dataUpdate';
+      const command = operation.operation === 'create' ? 'dataCreate' : operation.operation === 'update' ? 'dataUpdate' : 'dataDelete';
       result = await runSfCommand(command, operation, { ...sfOptions(job, job.orgContext, paths, actor, job.metadataScope, true), cwd: paths.implementationProject });
       await appendCommand(job.jobId, result);
       if (result.exitCode !== 0) {
@@ -227,6 +227,7 @@ function assertDeploymentGuard(job, approval) {
   if (job.orgContext.environment === 'production' && (!config.allowProductionDeployment || approval.productionSpecificApproval !== true)) throw new Error('Production execution is disabled or lacks production-specific approval.');
   const hasDataOperations = Boolean(job.plan.dataOperations?.length);
   if (hasDataOperations && job.orgContext.dataMutationPermission !== 'allowed') throw new Error('Data mutation is not enabled for the selected org registry entry.');
+  if (job.plan.dataOperations?.some((operation) => operation.operation === 'delete') && job.orgContext.recordDeletionPermission !== 'allowed') throw new Error('Record deletion is not enabled for the selected org registry entry.');
   if (!hasDataOperations && (job.orgContext.deploymentPermission !== 'allowed' || !job.orgContext.allowedOperations.includes('deploy'))) throw new Error('Deployment is not enabled for the selected org registry entry.');
   if (job.plan.destructiveChanges?.length) throw new Error('Destructive changes are blocked by default.');
 }
@@ -243,10 +244,14 @@ async function validatePlannedDataOperations(job, paths, actor) {
   if (!operations.length) return [];
   if (job.orgContext.dataMutationPermission !== 'allowed') throw new Error('Data mutation is blocked for the selected org.');
   if (operations.length > job.orgContext.maximumDataOperations) throw new Error(`Data operation count exceeds the org limit of ${job.orgContext.maximumDataOperations}.`);
+  const deleteCount = operations.filter((operation) => operation.operation === 'delete').length;
+  if (deleteCount && job.orgContext.recordDeletionPermission !== 'allowed') throw new Error('Record deletion is blocked for the selected org.');
+  if (deleteCount > job.orgContext.maximumDeleteOperations) throw new Error(`Record deletion count exceeds the org limit of ${job.orgContext.maximumDeleteOperations}.`);
+  if (deleteCount && job.orgContext.environment === 'production') throw new Error('Direct production record deletion is blocked.');
   const commands = [];
   for (const operation of operations) {
     if (!isDataObjectAllowed(job.orgContext, operation.objectApiName)) throw new Error(`Data operations on ${operation.objectApiName} are not allowed for this org.`);
-    const requiredPermission = operation.operation === 'create' ? 'data-create' : 'data-update';
+    const requiredPermission = operation.operation === 'create' ? 'data-create' : operation.operation === 'update' ? 'data-update' : 'data-delete';
     if (!job.orgContext.allowedOperations.includes(requiredPermission)) throw new Error(`${requiredPermission} is not allowed for this org.`);
     const describe = await runSfCommand('sobjectDescribe', { objectApiName: operation.objectApiName }, sfOptions(job, job.orgContext, paths, actor, job.metadataScope));
     await appendCommand(job.jobId, describe); commands.push(describe.command);
@@ -254,6 +259,7 @@ async function validatePlannedDataOperations(job, paths, actor) {
     const objectDescription = JSON.parse(describe.stdout)?.result || {};
     if (operation.operation === 'create' && objectDescription.createable !== true) throw new Error(`${operation.objectApiName} is not createable for the connected Salesforce user.`);
     if (operation.operation === 'update' && objectDescription.updateable !== true) throw new Error(`${operation.objectApiName} is not updateable for the connected Salesforce user.`);
+    if (operation.operation === 'delete' && objectDescription.deletable !== true) throw new Error(`${operation.objectApiName} is not deletable for the connected Salesforce user.`);
     const fields = objectDescription.fields || [];
     for (const fieldName of Object.keys(operation.fields)) {
       const field = fields.find((item) => item.name === fieldName);
@@ -267,7 +273,7 @@ async function validatePlannedDataOperations(job, paths, actor) {
         if (recordTypeQuery.exitCode !== 0 || Number(JSON.parse(recordTypeQuery.stdout)?.result?.totalSize || 0) !== 1) throw new Error(`Record type ${value} is not active for ${operation.objectApiName} in the verified target org.`);
       }
     }
-    if (operation.operation === 'update') {
+    if (['update', 'delete'].includes(operation.operation)) {
       const query = await runSfCommand('dataQuery', { query: `SELECT Id FROM ${operation.objectApiName} WHERE Id = '${operation.recordId}' LIMIT 1` }, sfOptions(job, job.orgContext, paths, actor, job.metadataScope));
       await appendCommand(job.jobId, query); commands.push(query.command);
       if (query.exitCode !== 0 || Number(JSON.parse(query.stdout)?.result?.totalSize || 0) !== 1) throw new Error('The approved update record does not exist in the verified target org.');
