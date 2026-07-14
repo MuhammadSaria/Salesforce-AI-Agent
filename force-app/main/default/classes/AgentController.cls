@@ -63,6 +63,7 @@ public with sharing class AgentController {
         request.setMethod(method);
         request.setTimeout(TIMEOUT_MS);
         request.setHeader('Accept', 'application/json');
+        request.setHeader('ngrok-skip-browser-warning', 'true');
         request.setHeader('X-Agent-User-Id', UserInfo.getUserId());
         String agentRole = FeatureManagement.checkPermission('AI_Agent_Admin')
             ? 'admin'

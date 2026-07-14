@@ -31,6 +31,7 @@ private class AgentControllerTest {
         AgentMock(Integer statusCode, String body) { this.statusCode = statusCode; this.body = body; }
         public HttpResponse respond(HttpRequest request) {
             System.assert(request.getEndpoint().startsWith('callout:Agent_Middleware/api/'));
+            System.assertEquals('true', request.getHeader('ngrok-skip-browser-warning'));
             System.assertNotEquals(null, request.getHeader('X-Agent-User-Id'));
             System.assertNotEquals(null, request.getHeader('X-Agent-Role'));
             HttpResponse response = new HttpResponse(); response.setStatusCode(statusCode); response.setBody(body); return response;
