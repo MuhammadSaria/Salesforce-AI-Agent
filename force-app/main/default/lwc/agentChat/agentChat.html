@@ -23,10 +23,25 @@
                 <template if:true={hasDataOperations}><div class="production-warning" role="alert">This plan contains Salesforce record changes. Review every object, record ID, field, and value before granting the separate execution approval.</div></template>
                 <template if:true={hasDeleteOperations}><div class="production-warning" role="alert">Destructive action: this plan will delete an existing Salesforce record. Confirm the exact object and record ID. Recovery depends on Salesforce Recycle Bin support and retention.</div></template>
 
+                <section class="milestones" aria-label="Job progress">
+                    <div class={implementationMilestoneClass}>
+                        <lightning-icon icon-name={implementationMilestoneIcon} size="small" alternative-text={implementationMilestoneTitle}></lightning-icon>
+                        <div><strong>{implementationMilestoneTitle}</strong><span>{implementationMilestoneMessage}</span></div>
+                    </div>
+                    <div class={validationMilestoneClass}>
+                        <lightning-icon icon-name={validationMilestoneIcon} size="small" alternative-text={validationMilestoneTitle}></lightning-icon>
+                        <div><strong>{validationMilestoneTitle}</strong><span>{validationMilestoneMessage}</span></div>
+                    </div>
+                    <div class={deploymentMilestoneClass}>
+                        <lightning-icon icon-name={deploymentMilestoneIcon} size="small" alternative-text={deploymentMilestoneTitle}></lightning-icon>
+                        <div><strong>{deploymentMilestoneTitle}</strong><span>{deploymentMilestoneMessage}</span></div>
+                    </div>
+                </section>
+
                 <template if:true={canSelectOrg}>
                     <section class="action-band">
                         <lightning-combobox label="Target Org Selection" options={orgOptions} value={selectedOrgId} onchange={handleValue} data-field="selectedOrgId"></lightning-combobox>
-                        <lightning-button variant="brand" label="Select Org" icon-name="utility:check" onclick={handleSelectOrg}></lightning-button>
+                        <lightning-button variant="brand" label="Select Org" icon-name="utility:check" onclick={handleSelectOrg} disabled={isBusy}></lightning-button>
                     </section>
                 </template>
 
@@ -34,12 +49,10 @@
                     <lightning-accordion-section name="details" label="Jira Task Details and Requirement Analysis">
                         <dl class="details"><dt>Issue</dt><dd>{job.jiraIssueKey}</dd><dt>Summary</dt><dd>{job.requirement.summary}</dd><dt>Acceptance Criteria</dt><dd>{job.requirement.acceptanceCriteria}</dd><dt>Org Verification</dt><dd>{orgContext.verified.verifiedAt}</dd></dl>
                     </lightning-accordion-section>
-                    <lightning-accordion-section name="metadata" label="Current Salesforce State and Relevant Metadata"><pre>{metadataText}</pre></lightning-accordion-section>
-                    <lightning-accordion-section name="dependencies" label="Retrieved Metadata, Dependencies, and Exclusions"><pre>{dependencyText}</pre></lightning-accordion-section>
                     <lightning-accordion-section name="plan" label="Implementation Plan for Approval">
                         <div class="human-plan">
                             <h3>What will be delivered</h3>
-                            <p>{planSummary}</p>
+                            <p class="plan-summary">{planSummary}</p>
                             <h3>Implementation steps</h3>
                             <ol>
                                 <template for:each={implementationSteps} for:item="step"><li key={step.key}>{step.text}</li></template>
@@ -56,35 +69,31 @@
                             <ul><template for:each={outOfScopeItems} for:item="item"><li key={item.key}>{item.text}</li></template></ul>
                             <h3>Rollback</h3>
                             <p>{rollbackPlan}</p>
-                            <p class="notice">{plan.notice}</p>
+                            <p class="notice">{planNotice}</p>
                         </div>
                     </lightning-accordion-section>
-                    <lightning-accordion-section name="technical" label="Technical Change Details"><pre>{technicalPlanText}</pre></lightning-accordion-section>
-                    <lightning-accordion-section name="validation" label="Validation Results"><pre>{validationText}</pre></lightning-accordion-section>
-                    <lightning-accordion-section name="diff" label="Git Diff"><pre class="diff">{diffText}</pre></lightning-accordion-section>
-                    <lightning-accordion-section name="logs" label="Execution Logs and Audit"><pre>{logsText}</pre></lightning-accordion-section>
                 </lightning-accordion>
 
                 <section class="instruction-band">
                     <lightning-textarea label="Add Instruction" value={instruction} data-field="instruction" onchange={handleValue}></lightning-textarea>
-                    <lightning-button label="Add Instruction" icon-name="utility:add" onclick={handleAddInstruction}></lightning-button>
+                    <lightning-button label="Add Instruction" icon-name="utility:add" onclick={handleAddInstruction} disabled={isBusy}></lightning-button>
                 </section>
 
                 <div class="actions">
                     <template if:true={canReviewPlan}>
-                        <lightning-button variant="brand" label="Approve Implementation" icon-name="utility:check" onclick={handleApproveImplementation}></lightning-button>
-                        <lightning-button label="Request Changes" icon-name="utility:edit" onclick={handleAddInstruction}></lightning-button>
-                        <lightning-button variant="destructive-text" label="Reject" icon-name="utility:close" onclick={handleRejectPlan}></lightning-button>
+                        <lightning-button variant="brand" label="Approve Implementation" icon-name="utility:check" onclick={handleApproveImplementation} disabled={isBusy}></lightning-button>
+                        <lightning-button label="Request Changes" icon-name="utility:edit" onclick={handleAddInstruction} disabled={isBusy}></lightning-button>
+                        <lightning-button variant="destructive-text" label="Reject" icon-name="utility:close" onclick={handleRejectPlan} disabled={isBusy}></lightning-button>
                     </template>
-                    <template if:true={canImplement}><lightning-button variant="brand" label="Implement Locally" icon-name="utility:code_playground" onclick={handleImplement}></lightning-button></template>
-                    <template if:true={canValidate}><lightning-button label="Validate" icon-name="utility:test" onclick={handleValidate}></lightning-button></template>
+                    <template if:true={canImplement}><lightning-button variant="brand" label="Implement Locally" icon-name="utility:code_playground" onclick={handleImplement} disabled={isBusy}></lightning-button></template>
+                    <template if:true={canValidate}><lightning-button label="Validate" icon-name="utility:test" onclick={handleValidate} disabled={isBusy}></lightning-button></template>
                     <template if:true={canApproveDeployment}>
-                        <lightning-button variant="brand" label={approvalActionLabel} icon-name="utility:approval" onclick={handleApproveDeployment}></lightning-button>
-                        <lightning-button label={rejectionActionLabel} icon-name="utility:close" onclick={handleRejectDeployment}></lightning-button>
+                        <lightning-button variant="brand" label={approvalActionLabel} icon-name="utility:approval" onclick={handleApproveDeployment} disabled={isBusy}></lightning-button>
+                        <lightning-button label={rejectionActionLabel} icon-name="utility:close" onclick={handleRejectDeployment} disabled={isBusy}></lightning-button>
                     </template>
-                    <template if:true={hasDeploymentApproval}><lightning-button variant="destructive" label={executionActionLabel} icon-name="utility:upload" onclick={handleDeploy}></lightning-button></template>
-                    <template if:true={canRefreshAnalysis}><lightning-button label="Refresh Analysis" icon-name="utility:refresh" onclick={handleRefreshAnalysis}></lightning-button></template>
-                    <template if:true={canCancel}><lightning-button label="Cancel" icon-name="utility:ban" onclick={handleCancel}></lightning-button></template>
+                    <template if:true={hasDeploymentApproval}><lightning-button variant="destructive" label={executionActionLabel} icon-name="utility:upload" onclick={handleDeploy} disabled={isBusy}></lightning-button></template>
+                    <template if:true={canRefreshAnalysis}><lightning-button label="Refresh Analysis" icon-name="utility:refresh" onclick={handleRefreshAnalysis} disabled={isBusy}></lightning-button></template>
+                    <template if:true={canCancel}><lightning-button label="Cancel" icon-name="utility:ban" onclick={handleCancel} disabled={isBusy}></lightning-button></template>
                 </div>
             </template>
         </div>

@@ -45,6 +45,75 @@ describe('c-agent-chat', () => {
         expect(buttonByLabel(element, 'Approve Implementation')).not.toBeNull();
         expect(buttonByLabel(element, 'Approve Deployment')).toBeUndefined();
     });
+
+    it('hides the deployment action after the job completes', async () => {
+        const job = {
+            jobId: 'job-completed', status: 'COMPLETED', logs: [],
+            orgContext: { displayName: 'Sandbox', environment: 'sandbox', expectedOrgId: '00D000000000001', verified: {} },
+            plan: { notice: 'Deployment completed.' },
+            validation: { validationId: 'validation-1' },
+            implementation: { commitHash: 'commit-1' },
+            deployment: { deploymentId: '0Af000000000001' },
+            approvals: [{ approvalType: 'DEPLOYMENT', validationId: 'validation-1', decision: 'APPROVED' }],
+            metadataScope: { primaryMetadata: [], dependencies: [] }
+        };
+        getJobs.mockResolvedValue(JSON.stringify({ jobs: [job] }));
+        getAgentJob.mockResolvedValue(JSON.stringify(job));
+
+        const element = createElement('c-agent-chat', { is: AgentChat });
+        document.body.appendChild(element);
+        await flushPromises();
+
+        expect(buttonByLabel(element, 'Deploy Approved Package')).toBeUndefined();
+        expect(element.shadowRoot.querySelector('.milestones').textContent).toContain('Deployment completed');
+        expect(element.shadowRoot.querySelector('.milestones').textContent).toContain('0Af000000000001');
+    });
+
+    it('clearly reports completed implementation and validation milestones', async () => {
+        const job = {
+            jobId: 'job-validated', status: 'AWAITING_DEPLOYMENT_APPROVAL', logs: [],
+            orgContext: { displayName: 'SAPA Sandbox', environment: 'sandbox', expectedOrgId: '00D000000000001', verified: {} },
+            plan: { notice: 'Separate deployment approval is required.' },
+            implementation: { commitHash: 'commit-1' },
+            validation: { validationId: 'validation-1', status: 'PASSED' },
+            approvals: [], metadataScope: { primaryMetadata: [], dependencies: [] }
+        };
+        getJobs.mockResolvedValue(JSON.stringify({ jobs: [job] }));
+        getAgentJob.mockResolvedValue(JSON.stringify(job));
+
+        const element = createElement('c-agent-chat', { is: AgentChat });
+        document.body.appendChild(element);
+        await flushPromises();
+
+        const milestones = element.shadowRoot.querySelector('.milestones').textContent;
+        expect(milestones).toContain('Local implementation completed');
+        expect(milestones).toContain('Validation passed');
+        expect(milestones).toContain('Deployment pending');
+        expect(buttonByLabel(element, 'Approve Deployment')).not.toBeUndefined();
+        const sectionLabels = [...element.shadowRoot.querySelectorAll('lightning-accordion-section')].map((section) => section.label);
+        expect(sectionLabels).toEqual(['Jira Task Details and Requirement Analysis', 'Implementation Plan for Approval']);
+    });
+
+    it('replaces deployment approval with one execution action after approval', async () => {
+        const job = {
+            jobId: 'job-approved', status: 'AWAITING_DEPLOYMENT_APPROVAL', logs: [],
+            orgContext: { displayName: 'SAPA Sandbox', environment: 'sandbox', expectedOrgId: '00D000000000001', verified: {} },
+            plan: { notice: 'Separate deployment approval is required.' },
+            implementation: { commitHash: 'commit-1' },
+            validation: { validationId: 'validation-1', status: 'PASSED' },
+            approvals: [{ approvalType: 'DEPLOYMENT', validationId: 'validation-1', decision: 'APPROVED' }],
+            metadataScope: { primaryMetadata: [], dependencies: [] }
+        };
+        getJobs.mockResolvedValue(JSON.stringify({ jobs: [job] }));
+        getAgentJob.mockResolvedValue(JSON.stringify(job));
+
+        const element = createElement('c-agent-chat', { is: AgentChat });
+        document.body.appendChild(element);
+        await flushPromises();
+
+        expect(buttonByLabel(element, 'Approve Deployment')).toBeUndefined();
+        expect(buttonByLabel(element, 'Deploy Approved Package')).not.toBeUndefined();
+    });
 });
 
 function buttonByLabel(element, label) {

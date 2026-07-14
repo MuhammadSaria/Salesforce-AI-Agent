@@ -39,26 +39,24 @@ export default class AgentChat extends LightningElement {
     get canReviewPlan() { return this.status === 'AWAITING_PLAN_APPROVAL'; }
     get canImplement() { return this.status === 'VALIDATION_FAILED' && !this.job?.implementation; }
     get canValidate() { return this.status === 'VALIDATION_FAILED' && Boolean(this.job?.implementation); }
-    get canApproveDeployment() { return this.status === 'AWAITING_DEPLOYMENT_APPROVAL'; }
+    get canApproveDeployment() { return this.status === 'AWAITING_DEPLOYMENT_APPROVAL' && !this.hasDeploymentApproval; }
     get hasDataOperations() { return Boolean(this.plan?.dataOperations?.length); }
     get hasDeleteOperations() { return Boolean(this.plan?.dataOperations?.some((operation) => operation.operation === 'delete')); }
     get approvalActionLabel() { return this.hasDeleteOperations ? 'Approve Record Deletion' : this.hasDataOperations ? 'Approve Data Execution' : 'Approve Deployment'; }
     get rejectionActionLabel() { return this.hasDeleteOperations ? 'Reject Record Deletion' : this.hasDataOperations ? 'Reject Data Execution' : 'Reject Deployment'; }
     get executionActionLabel() { return this.hasDeleteOperations ? 'Delete Approved Record' : this.hasDataOperations ? 'Execute Approved Data Changes' : 'Deploy Approved Package'; }
     get hasDeploymentApproval() {
+        if (this.status !== 'AWAITING_DEPLOYMENT_APPROVAL') return false;
         const latest = [...(this.job?.approvals || [])].reverse().find((item) => item.approvalType === 'DEPLOYMENT' && item.validationId === this.validation?.validationId);
         return latest?.decision === 'APPROVED';
     }
     get canRefreshAnalysis() { return ['RECEIVED', 'PLAN_REJECTED', 'ORG_VERIFICATION_FAILED'].includes(this.status); }
     get canCancel() { return !['COMPLETED', 'FAILED', 'CANCELLED', 'DEPLOYING'].includes(this.status); }
-    get hasDiff() { return Boolean(this.job?.diff); }
     get jobOptions() { return this.jobs.map((item) => ({ label: `${item.jiraIssueKey || 'Manual'} - ${item.status}`, value: item.jobId })); }
     get orgOptions() {
         const candidates = this.job?.orgCandidates?.length ? this.job.orgCandidates : this.orgs;
         return candidates.map((item) => ({ label: `${item.displayName} (${item.environment})`, value: item.orgRegistryId }));
     }
-    get metadataText() { return this.pretty(this.job?.metadataScope?.primaryMetadata || []); }
-    get dependencyText() { return this.pretty(this.job?.metadataScope?.dependencies || []); }
     get planSummary() { return this.plan?.proposedImplementation || 'The implementation proposal is being prepared.'; }
     get implementationSteps() { return this.listItems(this.plan?.implementationSteps?.length ? this.plan.implementationSteps : [this.planSummary], 'step'); }
     get expectedOutcome() { return this.plan?.expectedOutcome || 'The requested Salesforce behavior will be available after validation and separate deployment approval.'; }
@@ -67,10 +65,27 @@ export default class AgentChat extends LightningElement {
     get riskAndAssumptionItems() { return this.listItems([...(this.plan?.risks || []), ...(this.plan?.assumptions || [])], 'risk'); }
     get outOfScopeItems() { return this.listItems(this.plan?.outOfScope?.length ? this.plan.outOfScope : ['Unrelated Salesforce behavior and data.'], 'scope'); }
     get rollbackPlan() { return this.plan?.rollbackPlan || 'Revert the approved change using the captured baseline.'; }
-    get technicalPlanText() { return this.pretty({ filesToCreate: this.plan?.filesToCreate || [], filesToModify: this.plan?.filesToModify || [], dataOperations: this.plan?.dataOperations || [], metadataScopeHash: this.plan?.metadataScopeHash, planHash: this.plan?.planHash }); }
-    get validationText() { return this.pretty(this.validation || {}); }
-    get logsText() { return (this.job?.logs || []).map((item) => `${item.timestamp} [${item.level}] ${item.message}`).join('\n'); }
-    get diffText() { return this.job?.diff || 'No local source differences recorded.'; }
+    get planNotice() {
+        if (this.deploymentComplete) return `Deployment completed successfully in ${this.orgContext.displayName}.`;
+        if (this.validationComplete) return 'Validation passed. No deployment will occur until separate deployment approval is granted.';
+        if (this.implementationComplete) return 'Local implementation completed. No Salesforce changes have been deployed yet.';
+        return this.plan?.notice || 'No changes have been made yet.';
+    }
+    get implementationComplete() { return Boolean(this.job?.implementation); }
+    get validationComplete() { return this.validation?.status === 'PASSED'; }
+    get deploymentComplete() { return this.status === 'COMPLETED' && Boolean(this.job?.deployment); }
+    get implementationMilestoneClass() { return this.milestoneClass(this.implementationComplete, this.status === 'IMPLEMENTING'); }
+    get validationMilestoneClass() { return this.milestoneClass(this.validationComplete, this.status === 'VALIDATING'); }
+    get deploymentMilestoneClass() { return this.milestoneClass(this.deploymentComplete, this.status === 'DEPLOYING'); }
+    get implementationMilestoneIcon() { return this.milestoneIcon(this.implementationComplete, this.status === 'IMPLEMENTING'); }
+    get validationMilestoneIcon() { return this.milestoneIcon(this.validationComplete, this.status === 'VALIDATING'); }
+    get deploymentMilestoneIcon() { return this.milestoneIcon(this.deploymentComplete, this.status === 'DEPLOYING'); }
+    get implementationMilestoneTitle() { return this.implementationComplete ? 'Local implementation completed' : this.status === 'IMPLEMENTING' ? 'Implementation in progress' : 'Implementation pending'; }
+    get validationMilestoneTitle() { return this.validationComplete ? 'Validation passed' : this.status === 'VALIDATING' ? 'Validation in progress' : 'Validation pending'; }
+    get deploymentMilestoneTitle() { return this.deploymentComplete ? 'Deployment completed' : this.status === 'DEPLOYING' ? 'Deployment in progress' : 'Deployment pending'; }
+    get implementationMilestoneMessage() { return this.implementationComplete ? 'The approved changes were created locally and committed.' : 'Waiting for implementation approval and local execution.'; }
+    get validationMilestoneMessage() { return this.validationComplete ? `Salesforce validation passed for ${this.orgContext.displayName}.` : 'Validation starts after the local implementation is complete.'; }
+    get deploymentMilestoneMessage() { return this.deploymentComplete ? `Successfully deployed to ${this.orgContext.displayName}. Deployment ID: ${this.job.deployment.deploymentId || 'not returned'}.` : 'A separate deployment approval is required after validation.'; }
     get createDisabled() { return this.isBusy || (!this.prompt.trim() && !this.jiraIssueKey.trim()); }
 
     async loadConsole() {
@@ -156,7 +171,8 @@ export default class AgentChat extends LightningElement {
             metadataScope: job?.metadataScope || { primaryMetadata: [], dependencies: [] }
         };
     }
-    pretty(value) { return JSON.stringify(value, null, 2); }
     listItems(values, prefix) { return values.map((text, index) => ({ key: `${prefix}-${index}`, text })); }
+    milestoneClass(complete, active) { return `milestone${complete ? ' milestone--complete' : active ? ' milestone--active' : ''}`; }
+    milestoneIcon(complete, active) { return complete ? 'utility:success' : active ? 'utility:sync' : 'utility:clock'; }
     normalizeError(error) { return error?.body?.message || error?.message || 'Unexpected error.'; }
 }
