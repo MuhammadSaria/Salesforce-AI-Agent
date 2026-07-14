@@ -8,7 +8,7 @@ import { redactSecrets } from '../src/utils/sanitize.js';
 import { stableHash } from '../src/utils/hash.js';
 import { runSfCommand } from '../src/services/sfExecutor.js';
 import { buildAssignedIssuesJql } from '../src/services/jiraPoller.js';
-import { isAgentGeneratedComment, selectNewUserComments } from '../src/services/jiraSync.js';
+import { isAgentGeneratedComment, selectNewUserComments, shouldResumeReceivedRevision } from '../src/services/jiraSync.js';
 
 test('secret masking removes authorization, API keys, and token fields', () => {
   const value = 'Authorization: Bearer abc.def.ghi sk-example access_token=super-secret';
@@ -78,6 +78,12 @@ test('legacy jobs do not reprocess Jira comments already used during analysis', 
   const comments = [{ id: '1', body: 'Existing planning comment' }, { id: '2', body: 'New review instruction' }];
   const selected = selectNewUserComments({ jira: { comments: ['Existing planning comment'] }, instructions: [] }, comments);
   assert.deepEqual(selected.map((comment) => comment.id), ['2']);
+});
+
+test('an interrupted received revision is automatically resumed', () => {
+  assert.equal(shouldResumeReceivedRevision({ status: 'RECEIVED', nextPlanVersion: 2 }), true);
+  assert.equal(shouldResumeReceivedRevision({ status: 'RECEIVED', nextPlanVersion: 1 }), false);
+  assert.equal(shouldResumeReceivedRevision({ status: 'VALIDATING', nextPlanVersion: 2 }), false);
 });
 
 test('secret masking preserves Git and source hashes used by deployment guards', () => {

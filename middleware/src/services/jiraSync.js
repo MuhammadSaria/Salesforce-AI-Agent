@@ -23,7 +23,7 @@ export async function syncJiraComments(job, actor = 'jira-sync') {
   const jiraSync = { commentIds: comments.map((comment) => comment.id), syncedAt: new Date().toISOString() };
   if (!selection.length) {
     await updateJob(job.jobId, { jiraSync });
-    return { added: 0, reanalysisRequired: false };
+    return { added: 0, reanalysisRequired: shouldResumeReceivedRevision(job) };
   }
 
   const instructions = [...(job.instructions || []), ...selection.map((comment) => ({
@@ -37,6 +37,7 @@ export async function syncJiraComments(job, actor = 'jira-sync') {
   await updateJob(job.jobId, { instructions, jiraSync });
   await appendAudit(job.jobId, { actor, action: 'JIRA_COMMENTS_SYNCHRONIZED', result: 'accepted', safeMetadata: { commentIds: selection.map((comment) => comment.id), count: selection.length } });
 
+  if (job.status === JOB_STATES.RECEIVED) return { added: selection.length, reanalysisRequired: true };
   if (REVISION_READY_STATES.has(job.status)) {
     await invalidateForPlanChange(job.jobId, actor);
     return { added: selection.length, reanalysisRequired: true };
@@ -47,6 +48,10 @@ export async function syncJiraComments(job, actor = 'jira-sync') {
   }
   await updateJob(job.jobId, { pendingRevision: true });
   return { added: selection.length, reanalysisRequired: false };
+}
+
+export function shouldResumeReceivedRevision(job) {
+  return job.status === JOB_STATES.RECEIVED && Number(job.nextPlanVersion || 1) > 1;
 }
 
 export async function activatePendingJiraRevision(jobId, actor = 'jira-sync') {
