@@ -6,7 +6,7 @@ import { config } from '../config.js';
 import { stableHash } from '../utils/hash.js';
 import { appendCommand, appendLog, getJobRecord, transitionJob, updateJob } from './jobStore.js';
 import { auditEvent } from './auditLog.js';
-import { buildOrgContext, selectOrgForJob } from './orgRegistry.js';
+import { buildOrgContext, isDataObjectAllowed, selectOrgForJob } from './orgRegistry.js';
 import { ensureJobWorkspace, writeOrgContext } from './jobWorkspace.js';
 import { addJiraComment, getJiraIssue } from './jira.js';
 import { analyzeDependencies, buildMetadataScope, buildPlan, expandScopeForFileOperations, extractRequirement, writeManifest } from './planning.js';
@@ -245,13 +245,16 @@ async function validatePlannedDataOperations(job, paths, actor) {
   if (operations.length > job.orgContext.maximumDataOperations) throw new Error(`Data operation count exceeds the org limit of ${job.orgContext.maximumDataOperations}.`);
   const commands = [];
   for (const operation of operations) {
-    if (!job.orgContext.allowedDataObjects.includes(operation.objectApiName)) throw new Error(`Data operations on ${operation.objectApiName} are not allowed for this org.`);
+    if (!isDataObjectAllowed(job.orgContext, operation.objectApiName)) throw new Error(`Data operations on ${operation.objectApiName} are not allowed for this org.`);
     const requiredPermission = operation.operation === 'create' ? 'data-create' : 'data-update';
     if (!job.orgContext.allowedOperations.includes(requiredPermission)) throw new Error(`${requiredPermission} is not allowed for this org.`);
     const describe = await runSfCommand('sobjectDescribe', { objectApiName: operation.objectApiName }, sfOptions(job, job.orgContext, paths, actor, job.metadataScope));
     await appendCommand(job.jobId, describe); commands.push(describe.command);
     if (describe.exitCode !== 0) throw new Error(sfFailureMessage(describe));
-    const fields = JSON.parse(describe.stdout)?.result?.fields || [];
+    const objectDescription = JSON.parse(describe.stdout)?.result || {};
+    if (operation.operation === 'create' && objectDescription.createable !== true) throw new Error(`${operation.objectApiName} is not createable for the connected Salesforce user.`);
+    if (operation.operation === 'update' && objectDescription.updateable !== true) throw new Error(`${operation.objectApiName} is not updateable for the connected Salesforce user.`);
+    const fields = objectDescription.fields || [];
     for (const fieldName of Object.keys(operation.fields)) {
       const field = fields.find((item) => item.name === fieldName);
       if (!field || (operation.operation === 'create' ? field.createable === false : field.updateable === false)) throw new Error(`Field ${operation.objectApiName}.${fieldName} is not ${operation.operation}able.`);

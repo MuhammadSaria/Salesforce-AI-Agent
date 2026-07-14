@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { selectOrgFromRegistry } from '../src/services/orgRegistry.js';
+import { isDataObjectAllowed, selectOrgFromRegistry } from '../src/services/orgRegistry.js';
 
 function org(id, projectKeys, options = {}) {
   return {
@@ -63,4 +63,12 @@ test('conflicting trusted signals pause for org selection', () => {
     org('two', ['READ'], { components: ['Two'] })
   ], { context: { jiraProjectKey: 'SAPA', jiraComponents: ['Two'] } });
   assert.equal(result.status, 'none');
+});
+
+test('wildcard data access permits business objects but retains the security denylist', () => {
+  const context = { allowedDataObjects: ['*'], restrictedDataObjects: ['User', 'PermissionSetAssignment'] };
+  assert.equal(isDataObjectAllowed(context, 'Invoice__c'), true);
+  assert.equal(isDataObjectAllowed(context, 'Order'), true);
+  assert.equal(isDataObjectAllowed(context, 'User'), false);
+  assert.equal(isDataObjectAllowed(context, 'PermissionSetAssignment'), false);
 });

@@ -110,6 +110,7 @@ export function buildOrgContext(selection, job) {
     deploymentPermission: selection.org.deploymentPermission,
     dataMutationPermission: selection.org.dataMutationPermission,
     allowedDataObjects: selection.org.allowedDataObjects,
+    restrictedDataObjects: selection.org.restrictedDataObjects,
     maximumDataOperations: selection.org.maximumDataOperations,
     productionApprovalRequired: selection.org.productionApprovalRequired,
     allowedOperations: selection.org.allowedOperations,
@@ -185,6 +186,7 @@ function normalizeOrg(org) {
     deploymentPermission: String(org.deploymentPermission || 'blocked'),
     dataMutationPermission: String(org.dataMutationPermission || 'blocked'),
     allowedDataObjects: normalizeArray(org.allowedDataObjects),
+    restrictedDataObjects: normalizeArray(org.restrictedDataObjects),
     maximumDataOperations: Math.max(1, Math.min(Number(org.maximumDataOperations || 10), 25)),
     productionApprovalRequired: org.productionApprovalRequired === true || environment === 'production',
     active: org.active !== false,
@@ -192,6 +194,13 @@ function normalizeOrg(org) {
     allowedMetadataTypes: normalizeArray(org.allowedMetadataTypes),
     restrictedMetadataTypes: normalizeArray(org.restrictedMetadataTypes)
   };
+}
+
+export function isDataObjectAllowed(orgContext, objectApiName) {
+  const name = String(objectApiName || '');
+  const allowed = orgContext.allowedDataObjects || [];
+  const restricted = new Set((orgContext.restrictedDataObjects || []).map((item) => item.toLowerCase()));
+  return (allowed.includes('*') || allowed.includes(name)) && !restricted.has(name.toLowerCase());
 }
 
 function requiredString(value, label) {

@@ -83,6 +83,7 @@ export async function enrichPlanWithCodex(plan, requirement, metadataScope, orgC
         restrictedMetadataTypes: orgContext.restrictedMetadataTypes,
         dataMutationPermission: orgContext.dataMutationPermission,
         allowedDataObjects: orgContext.allowedDataObjects,
+        restrictedDataObjects: orgContext.restrictedDataObjects,
         maximumDataOperations: orgContext.maximumDataOperations
       }
     })
