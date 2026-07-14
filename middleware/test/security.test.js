@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import { config } from '../src/config.js';
-import { buildMetadataScope, extractRequirement } from '../src/services/planning.js';
+import { buildMetadataScope, buildPlan, extractRequirement } from '../src/services/planning.js';
 import { claimWebhookEvent, parseJiraWebhook, verifyJiraWebhook } from '../src/services/jira.js';
 import { redactSecrets } from '../src/utils/sanitize.js';
 import { stableHash } from '../src/utils/hash.js';
@@ -70,6 +70,13 @@ test('summary-only Jira tickets remain actionable requirements', () => {
 test('review instructions are retained for revised Codex plans', () => {
   const requirement = extractRequirement({ summary: 'Create an Account' }, '', [{ text: 'Use the verified Person Account record type.' }]);
   assert.deepEqual(requirement.userInstructions, ['Use the verified Person Account record type.']);
+});
+
+test('a revised job uses its next durable plan version', () => {
+  const requirement = extractRequirement({ summary: 'Revise a Case Flow' }, '', [{ text: 'Use a picklist instead of text.' }]);
+  const scope = buildMetadataScope(requirement, { expectedOrgId: '00DTEST', allowedMetadataTypes: ['Flow'], restrictedMetadataTypes: [] });
+  const plan = buildPlan({ jobId: 'job-1', jiraIssueKey: 'TA-1', nextPlanVersion: 3, orgContext: { customerName: 'SAPA', displayName: 'Sandbox', expectedOrgId: '00DTEST', environment: 'sandbox' } }, requirement, scope, []);
+  assert.equal(plan.planVersion, 3);
 });
 
 test('Jira select-list custom fields are normalized for trusted org routing', () => {

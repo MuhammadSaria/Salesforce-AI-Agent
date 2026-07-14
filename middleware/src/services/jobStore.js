@@ -28,6 +28,8 @@ export async function createJobRecord(input) {
     jira: input.jira || null,
     metadataScope: null,
     plan: null,
+    nextPlanVersion: 1,
+    revisions: [],
     instructions: [],
     approvals: [],
     validation: null,
@@ -156,11 +158,29 @@ async function invalidate(jobId, selection, actor, reason) {
   return withJobLock(jobId, async () => {
     const record = await requiredJob(jobId);
     if ([JOB_STATES.COMPLETED, JOB_STATES.CANCELLED, JOB_STATES.DEPLOYING].includes(record.status)) {
-      throw Object.assign(new Error('The target org cannot change in the current state.'), { statusCode: 409 });
+      throw Object.assign(new Error('This job cannot be revised in its current state.'), { statusCode: 409 });
     }
     const now = new Date().toISOString();
+    const currentPlanVersion = Number(record.plan?.planVersion || record.nextPlanVersion || 0);
+    const revisions = [...(record.revisions || [])];
+    if (record.plan || record.implementation || record.validation || record.approvals?.length) {
+      revisions.push({
+        revisionNumber: currentPlanVersion,
+        invalidatedAt: now,
+        invalidatedBy: actor,
+        reason,
+        orgContext: record.orgContext,
+        metadataScope: record.metadataScope,
+        plan: record.plan,
+        approvals: record.approvals,
+        implementation: record.implementation,
+        validation: record.validation,
+        deployment: record.deployment,
+        diff: record.diff
+      });
+    }
     record.stateHistory.push({ previousState: record.status, newState: JOB_STATES.RECEIVED, timestamp: now, actor, reason, approvalId: '', orgId: '' });
-    Object.assign(record, { status: JOB_STATES.RECEIVED, context: { ...record.context, selectedOrgRegistryId: selection }, orgContext: null, orgCandidates: [], orgRoutingEvidence: [], metadataScope: null, plan: null, approvals: [], validation: null, deployment: null, implementation: null, diff: '', updatedAt: now });
+    Object.assign(record, { status: JOB_STATES.RECEIVED, context: { ...record.context, selectedOrgRegistryId: selection }, orgContext: null, orgCandidates: [], orgRoutingEvidence: [], metadataScope: null, plan: null, nextPlanVersion: Math.max(1, currentPlanVersion + 1), revisions, approvals: [], validation: null, deployment: null, implementation: null, diff: '', error: '', updatedAt: now });
     await save(record);
     return record;
   });

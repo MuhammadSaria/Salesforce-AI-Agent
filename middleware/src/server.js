@@ -71,11 +71,18 @@ export function createApp() {
   app.post('/api/jobs/:jobId/instructions', requireRole('developer', 'deployer', 'admin'), jobRoute(async (req, res, job) => {
     const text = sanitizeUntrustedText(req.body?.instruction, 4000).trim();
     if (!text) return res.status(422).json({ error: { message: 'Instruction is required.' } });
+    if ([JOB_STATES.IMPLEMENTING, JOB_STATES.VALIDATING, JOB_STATES.DEPLOYING].includes(job.status)) return conflict(res, 'Wait for the current operation to finish before requesting a change.');
+    if ([JOB_STATES.COMPLETED, JOB_STATES.CANCELLED, JOB_STATES.FAILED].includes(job.status)) return conflict(res, 'This job can no longer be revised. Create a new job for additional work.');
     const instructions = [...job.instructions, { instructionId: nanoid(), text, actor: req.actor.id, timestamp: new Date().toISOString() }];
     await updateJob(job.jobId, { instructions });
-    if (![JOB_STATES.RECEIVED, JOB_STATES.AWAITING_ORG_SELECTION, JOB_STATES.ORG_VERIFICATION_FAILED, JOB_STATES.PLAN_REJECTED].includes(job.status)) await invalidateForPlanChange(job.jobId, req.actor.id);
-    await appendAudit(job.jobId, { actor: req.actor.id, action: 'USER_INSTRUCTION_ADDED', result: 'accepted', safeMetadata: { instructionLength: text.length } });
-    res.status(201).json({ instructions });
+    let revised = await getJobRecord(job.jobId);
+    if (![JOB_STATES.RECEIVED, JOB_STATES.AWAITING_ORG_SELECTION].includes(job.status)) revised = await invalidateForPlanChange(job.jobId, req.actor.id);
+    await appendAudit(job.jobId, { actor: req.actor.id, action: 'USER_INSTRUCTION_ADDED', result: 'accepted', safeMetadata: { instructionLength: text.length, nextPlanVersion: revised.nextPlanVersion } });
+    if (revised.status === JOB_STATES.RECEIVED) {
+      await enqueueAgentJob({ jobId: job.jobId, action: 'analyze', actor: req.actor.id }, { jobId: `${job.jobId}:analyze:instruction:${Date.now()}` });
+      return res.status(202).json({ instructions, status: revised.status, nextPlanVersion: revised.nextPlanVersion, message: 'Instruction accepted. Revised analysis queued.' });
+    }
+    res.status(201).json({ instructions, status: revised.status, nextPlanVersion: revised.nextPlanVersion, message: 'Instruction accepted. Select the target org to continue.' });
   }));
 
   app.post('/api/jobs/:jobId/approve-implementation', requireRole('developer', 'deployer', 'admin'), jobRoute(async (req, res, job) => {
@@ -147,6 +154,17 @@ function asyncRoute(handler) { return (req, res, next) => Promise.resolve(handle
 function approvalRecord(job, req, type, extra) { return { approvalId: nanoid(), jobId: job.jobId, jiraIssueKey: job.jiraIssueKey, approvalType: type, planVersion: job.plan?.planVersion, planHash: job.plan?.planHash, metadataScopeHash: job.metadataScope?.hash, orgRegistryId: job.orgContext?.orgRegistryId, salesforceOrganizationId: job.orgContext?.expectedOrgId, environment: job.orgContext?.environment, approverIdentity: req.actor.id, comments: sanitizeUntrustedText(req.body?.comments, 1000), approvalTimestamp: new Date().toISOString(), ...extra }; }
 function publicJob(job) {
   const safe = { ...job };
+  safe.revisions = (job.revisions || []).map((revision) => ({
+    revisionNumber: revision.revisionNumber,
+    invalidatedAt: revision.invalidatedAt,
+    invalidatedBy: revision.invalidatedBy,
+    reason: revision.reason,
+    orgDisplayName: revision.orgContext?.displayName || '',
+    planVersion: revision.plan?.planVersion || revision.revisionNumber,
+    implementationCompleted: Boolean(revision.implementation),
+    validationStatus: revision.validation?.status || '',
+    approvalsInvalidated: (revision.approvals || []).length
+  }));
   if (safe.validation?.status === 'FAILED') {
     safe.validation = { ...safe.validation, failureReason: safe.validation.failureReason || humanizeValidationFailure(safe.validation.error || safe.error) };
   }

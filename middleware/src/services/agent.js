@@ -1,4 +1,4 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { nanoid } from 'nanoid';
 import { JOB_STATES } from '../domain/jobState.js';
@@ -107,31 +107,33 @@ async function implement(job, actor) {
   }
   await verifySelectedOrg(job.orgContext, auditOptions(job, actor));
   const paths = await ensureJobWorkspace(job.jobId, job.orgContext.orgRegistryId);
-  const branch = `ai-agent/${(job.jiraIssueKey || 'MANUAL-0').toUpperCase()}-${job.jobId}`.replace(/[^A-Za-z0-9_\/-]/g, '-');
-  const branchResult = await runGit('worktree-add', { branch, path: paths.implementationProject });
+  const implementationProject = join(paths.implementation, `plan-v${job.plan.planVersion}`, 'project');
+  await mkdir(join(paths.implementation, `plan-v${job.plan.planVersion}`), { recursive: true });
+  const branch = `ai-agent/${(job.jiraIssueKey || 'MANUAL-0').toUpperCase()}-${job.jobId}-v${job.plan.planVersion}`.replace(/[^A-Za-z0-9_\/-]/g, '-');
+  const branchResult = await runGit('worktree-add', { branch, path: implementationProject });
   if (branchResult.exitCode !== 0) throw new Error(`Cannot create the required Git branch. ${branchResult.stderr}`);
-  const baselineResult = await runGit('rev-parse', { ref: 'HEAD', cwd: paths.implementationProject });
+  const baselineResult = await runGit('rev-parse', { ref: 'HEAD', cwd: implementationProject });
 
   const changedFiles = [];
   for (const operation of job.plan.fileOperations || []) {
     if (!['create', 'modify'].includes(operation.operation)) throw new Error('Destructive file operations require a separately approved plan and are blocked by default.');
-    const result = await runSfCommand('writeMetadataFile', { path: operation.path, content: operation.content }, { ...sfOptions(job, job.orgContext, paths, actor, job.metadataScope, true), localProjectRoot: paths.implementationProject, cwd: paths.implementationProject });
+    const result = await runSfCommand('writeMetadataFile', { path: operation.path, content: operation.content }, { ...sfOptions(job, job.orgContext, paths, actor, job.metadataScope, true), localProjectRoot: implementationProject, cwd: implementationProject });
     await appendCommand(job.jobId, result);
     changedFiles.push(operation.path);
   }
-  const sourceHash = await calculateSourceHash(paths.implementationProject, changedFiles, job.plan);
+  const sourceHash = await calculateSourceHash(implementationProject, changedFiles, job.plan);
   let diffResult = { stdout: '', exitCode: 0 };
   let commitHash = baselineResult.stdout.trim();
   if (changedFiles.length) {
-    const addResult = await runGit('add', { paths: changedFiles, cwd: paths.implementationProject });
+    const addResult = await runGit('add', { paths: changedFiles, cwd: implementationProject });
     if (addResult.exitCode !== 0) throw new Error(`Cannot stage approved files. ${addResult.stderr}`);
-    diffResult = await runGit('diff', { paths: changedFiles, cached: true, cwd: paths.implementationProject });
-    const commitResult = await runGit('commit', { message: `${job.jiraIssueKey || 'Manual'}: approved AI agent implementation`, cwd: paths.implementationProject });
+    diffResult = await runGit('diff', { paths: changedFiles, cached: true, cwd: implementationProject });
+    const commitResult = await runGit('commit', { message: `${job.jiraIssueKey || 'Manual'}: approved AI agent implementation`, cwd: implementationProject });
     if (commitResult.exitCode !== 0) throw new Error(`Cannot commit approved files. ${commitResult.stderr}`);
-    commitHash = (await runGit('rev-parse', { ref: 'HEAD', cwd: paths.implementationProject })).stdout.trim();
+    commitHash = (await runGit('rev-parse', { ref: 'HEAD', cwd: implementationProject })).stdout.trim();
   }
   await writeFile(join(paths.diff, 'implementation.diff'), diffResult.stdout, 'utf8');
-  await updateJob(job.jobId, { implementation: { approvalId: approval.approvalId, branch, baselineCommit: baselineResult.stdout.trim(), commitHash, changedFiles, sourceHash, implementedAt: new Date().toISOString() }, diff: diffResult.stdout });
+  await updateJob(job.jobId, { implementation: { approvalId: approval.approvalId, branch, workspacePath: `implementation/plan-v${job.plan.planVersion}/project`, baselineCommit: baselineResult.stdout.trim(), commitHash, changedFiles, sourceHash, implementedAt: new Date().toISOString() }, diff: diffResult.stdout });
   await appendLog(job.jobId, 'info', changedFiles.length ? `Implemented ${changedFiles.length} approved file operations locally. No deployment or data mutation was performed.` : `Prepared ${(job.plan.dataOperations || []).length} approved data operations. No data mutation was performed.`);
   return validate(await requiredJob(job.jobId), actor);
 }
@@ -143,8 +145,9 @@ async function validate(job, actor) {
   try {
     const current = await requiredJob(job.jobId);
     const paths = await ensureJobWorkspace(current.jobId, current.orgContext.orgRegistryId);
+    const implementationProject = resolveImplementationProject(paths, current.implementation);
     await verifySelectedOrg(current.orgContext, auditOptions(current, actor));
-    await assertCleanImplementation(paths, current.implementation, current.plan);
+    await assertCleanImplementation(implementationProject, current.implementation, current.plan);
     const dataOperations = current.plan.dataOperations || [];
     const hasSourceChanges = Boolean((current.plan.fileOperations || []).length || (current.implementation?.changedFiles || []).length);
     if (hasSourceChanges && dataOperations.length) throw new Error('Metadata and record mutations must be split into separate jobs to prevent partial execution.');
@@ -166,7 +169,7 @@ async function validate(job, actor) {
       await transitionJob(current.jobId, JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL, { actor, reason: 'Data operations validated; separate execution approval required.' });
       return;
     }
-    const result = await runSfCommand('deployDryRun', { manifest: current.manifest }, { ...sfOptions(current, current.orgContext, paths, actor, current.metadataScope), cwd: paths.implementationProject });
+    const result = await runSfCommand('deployDryRun', { manifest: current.manifest }, { ...sfOptions(current, current.orgContext, paths, actor, current.metadataScope), cwd: implementationProject });
     await appendCommand(current.jobId, result);
     const now = new Date();
     if (result.exitCode !== 0) throw new Error(sfFailureMessage(result));
@@ -185,15 +188,16 @@ async function deploy(job, actor) {
   const approval = validApproval(job, 'DEPLOYMENT');
   assertDeploymentGuard(job, approval);
   const paths = await ensureJobWorkspace(job.jobId, job.orgContext.orgRegistryId);
+  const implementationProject = resolveImplementationProject(paths, job.implementation);
   await verifySelectedOrg(job.orgContext, auditOptions(job, actor));
-  await assertCleanImplementation(paths, job.implementation, job.plan);
+  await assertCleanImplementation(implementationProject, job.implementation, job.plan);
   const dataOperations = job.plan.dataOperations || [];
   let result;
   const recordResults = [];
   if (dataOperations.length) {
     for (const operation of dataOperations) {
       const command = operation.operation === 'create' ? 'dataCreate' : operation.operation === 'update' ? 'dataUpdate' : 'dataDelete';
-      result = await runSfCommand(command, operation, { ...sfOptions(job, job.orgContext, paths, actor, job.metadataScope, true), cwd: paths.implementationProject });
+      result = await runSfCommand(command, operation, { ...sfOptions(job, job.orgContext, paths, actor, job.metadataScope, true), cwd: implementationProject });
       await appendCommand(job.jobId, result);
       if (result.exitCode !== 0) {
         await updateJob(job.jobId, { deployment: { status: recordResults.length ? 'PARTIAL_FAILURE' : 'FAILED', targetOrgId: job.orgContext.expectedOrgId, recordResults, error: sfFailureMessage(result), failedAt: new Date().toISOString() } });
@@ -203,7 +207,7 @@ async function deploy(job, actor) {
       recordResults.push({ operation: operation.operation, objectApiName: operation.objectApiName, recordId: extractRecordId(result.stdout) || operation.recordId });
     }
   } else {
-    result = await runSfCommand('deployManifest', { manifest: job.manifest }, { ...sfOptions(job, job.orgContext, paths, actor, job.metadataScope, true), cwd: paths.implementationProject });
+    result = await runSfCommand('deployManifest', { manifest: job.manifest }, { ...sfOptions(job, job.orgContext, paths, actor, job.metadataScope, true), cwd: implementationProject });
     await appendCommand(job.jobId, result);
     if (result.exitCode !== 0) {
       await transitionJob(job.jobId, JOB_STATES.FAILED, { actor, reason: 'Deployment failed.', error: sfFailureMessage(result) });
@@ -283,14 +287,17 @@ async function validatePlannedDataOperations(job, paths, actor) {
   }
   return commands;
 }
-async function assertCleanImplementation(paths, implementation, plan) {
+async function assertCleanImplementation(implementationProject, implementation, plan) {
   if (!implementation) throw new Error('A completed local implementation record is required.');
-  const status = await runGit('status', { cwd: paths.implementationProject });
-  const head = await runGit('rev-parse', { ref: 'HEAD', cwd: paths.implementationProject });
+  const status = await runGit('status', { cwd: implementationProject });
+  const head = await runGit('rev-parse', { ref: 'HEAD', cwd: implementationProject });
   if (status.exitCode !== 0 || status.stdout.trim()) throw new Error('Implementation worktree contains unapproved or uncommitted changes.');
   if (head.stdout.trim() !== implementation.commitHash) throw new Error('Implementation Git commit no longer matches the approved source.');
-  const actualSourceHash = await calculateSourceHash(paths.implementationProject, implementation.changedFiles || [], plan);
+  const actualSourceHash = await calculateSourceHash(implementationProject, implementation.changedFiles || [], plan);
   if (actualSourceHash !== implementation.sourceHash) throw new Error('Implemented file content no longer matches the recorded source hash.');
+}
+function resolveImplementationProject(paths, implementation) {
+  return implementation?.workspacePath ? join(paths.jobRoot, implementation.workspacePath) : paths.implementationProject;
 }
 export async function calculateSourceHash(projectRoot, changedFiles, plan) {
   const files = [];

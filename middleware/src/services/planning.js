@@ -132,7 +132,7 @@ export function buildPlan(job, requirement, scope, dependencies) {
     securityConsiderations: [requirement.untrustedSourceNotice, 'No credentials or Salesforce records are included in AI prompts.'],
     permissionImpact: 'Must be confirmed from retrieved permission metadata.', integrationImpact: 'Must be confirmed during dependency analysis.',
     destructiveChanges: [], rollbackPlan: 'Redeploy the captured baseline package or revert the dedicated Git commit.',
-    estimatedRiskLevel: classifyRisk(requirement.businessRequirement), planVersion: 1, metadataScopeHash: scope.hash,
+    estimatedRiskLevel: classifyRisk(requirement.businessRequirement), planVersion: Number(job.nextPlanVersion || 1), metadataScopeHash: scope.hash,
     notice: 'No changes have been made yet.'
   };
   return { ...planCore, planHash: stableHash(planCore) };

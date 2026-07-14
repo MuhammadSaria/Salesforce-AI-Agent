@@ -52,6 +52,9 @@ export default class AgentChat extends LightningElement {
     }
     get canRefreshAnalysis() { return ['RECEIVED', 'PLAN_REJECTED', 'ORG_VERIFICATION_FAILED'].includes(this.status); }
     get canCancel() { return !['COMPLETED', 'FAILED', 'CANCELLED', 'DEPLOYING'].includes(this.status); }
+    get canAddInstruction() { return !['IMPLEMENTING', 'VALIDATING', 'DEPLOYING', 'COMPLETED', 'FAILED', 'CANCELLED'].includes(this.status); }
+    get instructionInputDisabled() { return this.isBusy || !this.canAddInstruction; }
+    get instructionSendDisabled() { return this.instructionInputDisabled || !this.instruction.trim(); }
     get jobOptions() { return this.jobs.map((item) => ({ label: `${item.jiraIssueKey || 'Manual'} - ${item.status}`, value: item.jobId })); }
     get orgOptions() {
         const candidates = this.job?.orgCandidates?.length ? this.job.orgCandidates : this.orgs;
@@ -89,6 +92,29 @@ export default class AgentChat extends LightningElement {
     get implementationMilestoneMessage() { return this.implementationComplete ? 'The approved changes were created locally and committed.' : 'Waiting for implementation approval and local execution.'; }
     get validationMilestoneMessage() { return this.validationFailed ? 'Salesforce rejected part of the proposed implementation.' : this.validationComplete ? `Salesforce validation passed for ${this.orgContext.displayName}.` : 'Validation starts after the local implementation is complete.'; }
     get deploymentMilestoneMessage() { return this.deploymentComplete ? `Successfully deployed to ${this.orgContext.displayName}. Deployment ID: ${this.job.deployment.deploymentId || 'not returned'}.` : this.validationFailed ? 'Deployment is blocked until validation passes.' : 'A separate deployment approval is required after validation.'; }
+    get conversationItems() {
+        const messages = (this.job?.instructions || []).map((item, index) => ({
+            key: item.instructionId || `instruction-${index}`,
+            author: 'You',
+            meta: item.timestamp || '',
+            text: item.text,
+            className: 'message message--user'
+        }));
+        messages.push({ key: `agent-${this.status}-${this.plan?.planVersion || 0}`, author: 'Agent', meta: this.status, text: this.agentConversationMessage, className: 'message message--agent' });
+        return messages;
+    }
+    get agentConversationMessage() {
+        if (this.status === 'AWAITING_PLAN_APPROVAL') return `I prepared plan version ${this.plan?.planVersion || 1}. Review it, request another change, or approve its local implementation.`;
+        if (this.status === 'VALIDATION_FAILED') return `${this.validationFailureReason} Send a change request and I will prepare a revised plan, or revalidate after correcting the approved implementation.`;
+        if (this.status === 'AWAITING_DEPLOYMENT_APPROVAL') return 'Validation passed. You can approve deployment or send another change request; a change request will invalidate the current implementation and validation approvals.';
+        if (this.status === 'IMPLEMENTING') return 'I am implementing the approved plan locally. Change requests will be available when this operation finishes.';
+        if (this.status === 'VALIDATING') return 'I am validating the local implementation against the verified Salesforce org.';
+        if (this.status === 'DEPLOYING') return 'The separately approved package is being deployed. It is too late to revise this deployment job.';
+        if (this.status === 'COMPLETED') return 'The approved change was deployed and this job is complete. Create a new job for additional work.';
+        if (this.status === 'AWAITING_ORG_SELECTION') return 'Select the target Salesforce org before I analyze the requirement.';
+        if (['RECEIVED', 'VERIFYING_ORG', 'ANALYZING_JIRA', 'DISCOVERING_METADATA', 'RETRIEVING_RELEVANT_METADATA', 'ANALYZING_DEPENDENCIES'].includes(this.status)) return `I received the request and am preparing plan version ${this.job?.nextPlanVersion || 1}.`;
+        return 'Review the current job status and provide an instruction when change requests are available.';
+    }
     get createDisabled() { return this.isBusy || (!this.prompt.trim() && !this.jiraIssueKey.trim()); }
 
     async loadConsole() {
@@ -123,7 +149,7 @@ export default class AgentChat extends LightningElement {
         await this.action('select-org', { orgRegistryId: this.selectedOrgId });
     }
     async handleAddInstruction() {
-        if (!this.instruction.trim()) return;
+        if (!this.canAddInstruction || !this.instruction.trim()) return;
         await this.action('instructions', { instruction: this.instruction });
         this.instruction = '';
     }

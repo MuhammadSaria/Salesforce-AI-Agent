@@ -85,9 +85,21 @@
                     </lightning-accordion-section>
                 </lightning-accordion>
 
-                <section class="instruction-band">
-                    <lightning-textarea label="Add Instruction" value={instruction} data-field="instruction" onchange={handleValue}></lightning-textarea>
-                    <lightning-button label="Add Instruction" icon-name="utility:add" onclick={handleAddInstruction} disabled={isBusy}></lightning-button>
+                <section class="conversation" aria-labelledby="conversation-title">
+                    <h2 id="conversation-title">Conversation and change requests</h2>
+                    <div class="conversation-stream" aria-live="polite">
+                        <template for:each={conversationItems} for:item="item">
+                            <article class={item.className} key={item.key}>
+                                <div class="message-heading"><strong>{item.author}</strong><span>{item.meta}</span></div>
+                                <p>{item.text}</p>
+                            </article>
+                        </template>
+                    </div>
+                    <div class="instruction-band">
+                        <lightning-textarea label="Request a change or add an instruction" value={instruction} data-field="instruction" onchange={handleValue} disabled={instructionInputDisabled}></lightning-textarea>
+                        <lightning-button variant="brand" label="Send Instruction" icon-name="utility:send" onclick={handleAddInstruction} disabled={instructionSendDisabled}></lightning-button>
+                    </div>
+                    <template if:false={canAddInstruction}><p class="conversation-note">Change requests are available when the current operation finishes and before deployment begins.</p></template>
                 </section>
 
                 <div class="actions">

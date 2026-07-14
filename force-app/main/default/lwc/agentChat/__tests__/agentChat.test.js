@@ -67,6 +67,7 @@ describe('c-agent-chat', () => {
         expect(buttonByLabel(element, 'Deploy Approved Package')).toBeUndefined();
         expect(element.shadowRoot.querySelector('.milestones').textContent).toContain('Deployment completed');
         expect(element.shadowRoot.querySelector('.milestones').textContent).toContain('0Af000000000001');
+        expect(textareaByLabel(element, 'Request a change or add an instruction').disabled).toBe(true);
     });
 
     it('clearly reports completed implementation and validation milestones', async () => {
@@ -122,6 +123,7 @@ describe('c-agent-chat', () => {
             plan: { notice: 'No changes have been deployed.' },
             implementation: { commitHash: 'commit-1' },
             validation: { status: 'FAILED', failureReason: 'The Flow email recipient is configured in a format Salesforce does not accept.' },
+            instructions: [{ instructionId: 'instruction-1', text: 'Use a direct email address instead of a collection.', timestamp: '2026-07-14T12:00:00Z' }],
             metadataScope: { primaryMetadata: [], dependencies: [] }
         };
         getJobs.mockResolvedValue(JSON.stringify({ jobs: [job] }));
@@ -137,11 +139,19 @@ describe('c-agent-chat', () => {
         expect(failure.textContent).toContain('Nothing was deployed');
         expect(element.shadowRoot.querySelector('.milestone--failed').textContent).toContain('Validation failed');
         expect(buttonByLabel(element, 'Approve Deployment')).toBeUndefined();
+        expect(element.shadowRoot.querySelector('.conversation-stream').textContent).toContain('Use a direct email address instead of a collection.');
+        expect(element.shadowRoot.querySelector('.conversation-stream').textContent).toContain('Send a change request');
+        expect(textareaByLabel(element, 'Request a change or add an instruction').disabled).toBe(false);
+        expect(buttonByLabel(element, 'Send Instruction')).not.toBeUndefined();
     });
 });
 
 function buttonByLabel(element, label) {
     return [...element.shadowRoot.querySelectorAll('lightning-button')].find((button) => button.label === label);
+}
+
+function textareaByLabel(element, label) {
+    return [...element.shadowRoot.querySelectorAll('lightning-textarea')].find((textarea) => textarea.label === label);
 }
 
 function flushPromises() {

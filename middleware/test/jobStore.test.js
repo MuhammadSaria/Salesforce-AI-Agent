@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { config } from '../src/config.js';
-import { appendLog, createJobRecord, getJobRecord, transitionJob, updateJob } from '../src/services/jobStore.js';
+import { appendLog, createJobRecord, getJobRecord, invalidateForPlanChange, transitionJob, updateJob } from '../src/services/jobStore.js';
 import { JOB_STATES } from '../src/domain/jobState.js';
 
 test('job snapshots survive memory loss and concurrent mutations are serialized', async () => {
@@ -38,6 +38,39 @@ test('successful progress clears a stale job error', async () => {
     await updateJob(jobId, { error: 'old validation failure' });
     await transitionJob(jobId, JOB_STATES.VERIFYING_ORG, { actor: 'test' });
     assert.equal((await getJobRecord(jobId)).error, '');
+  } finally {
+    config.workspaceRoot = originalRoot;
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('a conversational revision archives artifacts and advances the plan version', async () => {
+  const originalRoot = config.workspaceRoot;
+  const workspace = await mkdtemp(join(tmpdir(), 'agent-job-store-'));
+  config.workspaceRoot = workspace;
+  const jobId = `revision-${Date.now()}`;
+
+  try {
+    await createJobRecord({ jobId, userId: 'test-user' });
+    await updateJob(jobId, {
+      status: JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL,
+      orgContext: { orgRegistryId: 'sapa', expectedOrgId: '00DTEST' },
+      plan: { planVersion: 1, planHash: 'plan-1' },
+      approvals: [{ approvalType: 'IMPLEMENTATION', decision: 'APPROVED' }, { approvalType: 'DEPLOYMENT', decision: 'APPROVED' }],
+      implementation: { commitHash: 'commit-1' },
+      validation: { status: 'PASSED', validationId: 'validation-1' }
+    });
+
+    const revised = await invalidateForPlanChange(jobId, 'reviewer');
+    assert.equal(revised.status, JOB_STATES.RECEIVED);
+    assert.equal(revised.nextPlanVersion, 2);
+    assert.equal(revised.context.selectedOrgRegistryId, 'sapa');
+    assert.equal(revised.approvals.length, 0);
+    assert.equal(revised.implementation, null);
+    assert.equal(revised.validation, null);
+    assert.equal(revised.revisions.length, 1);
+    assert.equal(revised.revisions[0].validation.validationId, 'validation-1');
+    assert.equal(revised.revisions[0].approvals.length, 2);
   } finally {
     config.workspaceRoot = originalRoot;
     await rm(workspace, { recursive: true, force: true });
