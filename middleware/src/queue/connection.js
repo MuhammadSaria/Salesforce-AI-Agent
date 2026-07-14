@@ -8,4 +8,10 @@ export const redisConnection =
       })
     : null;
 
-export const redis = config.queueDriver === 'redis' ? new IORedis(config.redisUrl) : null;
+export const redis =
+  config.queueDriver === 'redis'
+    ? new IORedis(config.redisUrl, {
+        enableOfflineQueue: false,
+        maxRetriesPerRequest: 1
+      })
+    : null;

@@ -13,6 +13,7 @@ import { analyzeDependencies, buildMetadataScope, buildPlan, expandScopeForFileO
 import { runSfCommand, verifySelectedOrg } from './sfExecutor.js';
 import { runGit } from './gitExecutor.js';
 import { enrichPlanWithCodex } from './codexExecutor.js';
+import { latestApprovedApproval } from '../domain/approval.js';
 
 export async function processAgentJob(message) {
   const job = await requiredJob(message.jobId);
@@ -215,7 +216,7 @@ async function deploy(job, actor) {
 }
 
 function validApproval(job, type) {
-  const approval = [...job.approvals].reverse().find((item) => item.approvalType === type && item.decision === 'APPROVED');
+  const approval = latestApprovedApproval(job, type, type === 'DEPLOYMENT' ? job.validation?.validationId : '');
   if (!approval || approval.planHash !== job.plan?.planHash || approval.metadataScopeHash !== job.metadataScope?.hash || approval.salesforceOrganizationId !== job.orgContext?.expectedOrgId) throw Object.assign(new Error(`A current ${type.toLowerCase()} approval for this exact plan, scope, and org is required.`), { statusCode: 409 });
   return approval;
 }
@@ -276,7 +277,7 @@ async function validatePlannedDataOperations(job, paths, actor) {
     if (['update', 'delete'].includes(operation.operation)) {
       const query = await runSfCommand('dataQuery', { query: `SELECT Id FROM ${operation.objectApiName} WHERE Id = '${operation.recordId}' LIMIT 1` }, sfOptions(job, job.orgContext, paths, actor, job.metadataScope));
       await appendCommand(job.jobId, query); commands.push(query.command);
-      if (query.exitCode !== 0 || Number(JSON.parse(query.stdout)?.result?.totalSize || 0) !== 1) throw new Error('The approved update record does not exist in the verified target org.');
+      if (query.exitCode !== 0 || Number(JSON.parse(query.stdout)?.result?.totalSize || 0) !== 1) throw new Error(`The approved ${operation.operation} record does not exist in the verified target org.`);
     }
   }
   return commands;

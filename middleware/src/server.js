@@ -13,6 +13,7 @@ import { getRegisteredOrg, listPublicOrgs } from './services/orgRegistry.js';
 import { claimWebhookEvent, parseJiraWebhook, verifyJiraWebhook } from './services/jira.js';
 import { JOB_STATES } from './domain/jobState.js';
 import { startJiraPoller } from './services/jiraPoller.js';
+import { latestApprovedApproval } from './domain/approval.js';
 
 export function createApp() {
   const app = express();
@@ -110,7 +111,7 @@ export function createApp() {
   }));
   app.post('/api/jobs/:jobId/deploy', requireRole('deployer', 'admin'), jobRoute(async (req, res, job) => {
     if (job.status !== JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL) return conflict(res, 'Job is not ready to deploy.');
-    const approval = [...job.approvals].reverse().find((item) => item.approvalType === 'DEPLOYMENT' && item.decision === 'APPROVED');
+    const approval = latestApprovedApproval(job, 'DEPLOYMENT', job.validation?.validationId);
     if (!approval) return conflict(res, 'Explicit deployment approval is required.');
     await transitionJob(job.jobId, JOB_STATES.DEPLOYING, { actor: req.actor.id, reason: 'Deployment requested after explicit approval.', approvalId: approval.approvalId });
     await enqueueAgentJob({ jobId: job.jobId, action: 'deploy', actor: req.actor.id }, { jobId: `${job.jobId}:deploy:${Date.now()}` });

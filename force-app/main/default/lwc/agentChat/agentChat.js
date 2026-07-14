@@ -45,7 +45,10 @@ export default class AgentChat extends LightningElement {
     get approvalActionLabel() { return this.hasDeleteOperations ? 'Approve Record Deletion' : this.hasDataOperations ? 'Approve Data Execution' : 'Approve Deployment'; }
     get rejectionActionLabel() { return this.hasDeleteOperations ? 'Reject Record Deletion' : this.hasDataOperations ? 'Reject Data Execution' : 'Reject Deployment'; }
     get executionActionLabel() { return this.hasDeleteOperations ? 'Delete Approved Record' : this.hasDataOperations ? 'Execute Approved Data Changes' : 'Deploy Approved Package'; }
-    get hasDeploymentApproval() { return (this.job?.approvals || []).some((item) => item.approvalType === 'DEPLOYMENT' && item.decision === 'APPROVED' && item.validationId === this.validation?.validationId); }
+    get hasDeploymentApproval() {
+        const latest = [...(this.job?.approvals || [])].reverse().find((item) => item.approvalType === 'DEPLOYMENT' && item.validationId === this.validation?.validationId);
+        return latest?.decision === 'APPROVED';
+    }
     get canRefreshAnalysis() { return ['RECEIVED', 'PLAN_REJECTED', 'ORG_VERIFICATION_FAILED'].includes(this.status); }
     get canCancel() { return !['COMPLETED', 'FAILED', 'CANCELLED', 'DEPLOYING'].includes(this.status); }
     get hasDiff() { return Boolean(this.job?.diff); }

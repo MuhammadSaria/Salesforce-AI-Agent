@@ -1,8 +1,15 @@
+import { access, mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { redis } from '../queue/connection.js';
 import { assertTransition, JOB_STATES } from '../domain/jobState.js';
+import { config } from '../config.js';
 
 const memoryJobs = new Map();
+const localLocks = new Map();
 const keyFor = (jobId) => `agent-job:${jobId}`;
+const indexKey = 'agent-jobs:index';
+const lockKeyFor = (jobId) => `agent-job-lock:${jobId}`;
 
 export async function createJobRecord(input) {
   const now = new Date().toISOString();
@@ -39,60 +46,97 @@ export async function createJobRecord(input) {
 }
 
 export async function getJobRecord(jobId) {
-  const raw = redis ? await redis.hget(keyFor(jobId), 'record') : memoryJobs.get(jobId);
+  assertSafeJobId(jobId);
+  let raw = null;
+  let loadedFromRedis = false;
+  if (redis) {
+    try {
+      raw = await redis.hget(keyFor(jobId), 'record');
+      loadedFromRedis = Boolean(raw);
+    } catch {
+      raw = null;
+    }
+  } else {
+    raw = memoryJobs.get(jobId);
+  }
+  if (!raw) raw = await readSnapshot(jobId);
   if (!raw) return null;
-  return typeof raw === 'string' ? JSON.parse(raw) : structuredClone(raw);
+  const record = typeof raw === 'string' ? JSON.parse(raw) : structuredClone(raw);
+  if (loadedFromRedis) await ensureSnapshot(record);
+  return record;
 }
 
 export async function listJobRecords() {
-  if (!redis) return [...memoryJobs.values()].map(structuredClone);
-  const ids = await redis.smembers('agent-jobs:index');
-  return (await Promise.all(ids.map(getJobRecord))).filter(Boolean);
+  const ids = new Set(memoryJobs.keys());
+  if (redis) {
+    try {
+      for (const id of await redis.smembers(indexKey)) ids.add(id);
+    } catch {
+      // Disk snapshots remain available while Redis is restarting.
+    }
+  }
+  for (const id of await listSnapshotIds()) ids.add(id);
+  return (await Promise.all([...ids].map(getJobRecord))).filter(Boolean);
 }
 
 export async function updateJob(jobId, patch) {
-  const record = await requiredJob(jobId);
-  Object.assign(record, patch, { updatedAt: new Date().toISOString() });
-  await save(record);
-  return record;
+  return withJobLock(jobId, async () => {
+    const record = await requiredJob(jobId);
+    Object.assign(record, patch, { updatedAt: new Date().toISOString() });
+    await save(record);
+    return record;
+  });
 }
 
 export async function transitionJob(jobId, newState, details = {}) {
-  const record = await requiredJob(jobId);
-  assertTransition(record.status, newState);
-  const event = {
-    previousState: record.status,
-    newState,
-    timestamp: new Date().toISOString(),
-    actor: details.actor || 'system',
-    reason: details.reason || '',
-    approvalId: details.approvalId || '',
-    orgId: record.orgContext?.expectedOrgId || ''
-  };
-  record.status = newState;
-  record.stateHistory.push(event);
-  record.updatedAt = event.timestamp;
-  if (details.error) record.error = details.error;
-  await save(record);
-  return record;
+  return withJobLock(jobId, async () => {
+    const record = await requiredJob(jobId);
+    assertTransition(record.status, newState);
+    const event = {
+      previousState: record.status,
+      newState,
+      timestamp: new Date().toISOString(),
+      actor: details.actor || 'system',
+      reason: details.reason || '',
+      approvalId: details.approvalId || '',
+      orgId: record.orgContext?.expectedOrgId || ''
+    };
+    record.status = newState;
+    record.stateHistory.push(event);
+    record.updatedAt = event.timestamp;
+    if (details.error) record.error = details.error;
+    await save(record);
+    return record;
+  });
 }
 
 export async function appendLog(jobId, level, message) {
-  const record = await requiredJob(jobId);
-  record.logs.push({ timestamp: new Date().toISOString(), level, message: String(message).slice(0, 4000) });
-  await save(record);
+  await withJobLock(jobId, async () => {
+    const record = await requiredJob(jobId);
+    record.logs.push({ timestamp: new Date().toISOString(), level, message: String(message).slice(0, 4000) });
+    await save(record);
+  });
 }
 
 export async function appendCommand(jobId, commandLog) {
-  const record = await requiredJob(jobId);
-  record.commands.push({ timestamp: new Date().toISOString(), ...commandLog });
-  await save(record);
+  await withJobLock(jobId, async () => {
+    const record = await requiredJob(jobId);
+    record.commands.push({
+      timestamp: new Date().toISOString(),
+      ...commandLog,
+      stdout: String(commandLog.stdout || '').slice(0, 100000),
+      stderr: String(commandLog.stderr || '').slice(0, 20000)
+    });
+    await save(record);
+  });
 }
 
 export async function appendAudit(jobId, event) {
-  const record = await requiredJob(jobId);
-  record.audit.push({ timestamp: new Date().toISOString(), ...event });
-  await save(record);
+  await withJobLock(jobId, async () => {
+    const record = await requiredJob(jobId);
+    record.audit.push({ timestamp: new Date().toISOString(), ...event });
+    await save(record);
+  });
 }
 
 export async function invalidateForOrgChange(jobId, selection, actor) {
@@ -105,15 +149,17 @@ export async function invalidateForPlanChange(jobId, actor) {
 }
 
 async function invalidate(jobId, selection, actor, reason) {
-  const record = await requiredJob(jobId);
-  if ([JOB_STATES.COMPLETED, JOB_STATES.CANCELLED, JOB_STATES.DEPLOYING].includes(record.status)) {
-    throw Object.assign(new Error('The target org cannot change in the current state.'), { statusCode: 409 });
-  }
-  const now = new Date().toISOString();
-  record.stateHistory.push({ previousState: record.status, newState: JOB_STATES.RECEIVED, timestamp: now, actor, reason, approvalId: '', orgId: '' });
-  Object.assign(record, { status: JOB_STATES.RECEIVED, context: { ...record.context, selectedOrgRegistryId: selection }, orgContext: null, orgCandidates: [], orgRoutingEvidence: [], metadataScope: null, plan: null, approvals: [], validation: null, deployment: null, implementation: null, diff: '', updatedAt: now });
-  await save(record);
-  return record;
+  return withJobLock(jobId, async () => {
+    const record = await requiredJob(jobId);
+    if ([JOB_STATES.COMPLETED, JOB_STATES.CANCELLED, JOB_STATES.DEPLOYING].includes(record.status)) {
+      throw Object.assign(new Error('The target org cannot change in the current state.'), { statusCode: 409 });
+    }
+    const now = new Date().toISOString();
+    record.stateHistory.push({ previousState: record.status, newState: JOB_STATES.RECEIVED, timestamp: now, actor, reason, approvalId: '', orgId: '' });
+    Object.assign(record, { status: JOB_STATES.RECEIVED, context: { ...record.context, selectedOrgRegistryId: selection }, orgContext: null, orgCandidates: [], orgRoutingEvidence: [], metadataScope: null, plan: null, approvals: [], validation: null, deployment: null, implementation: null, diff: '', updatedAt: now });
+    await save(record);
+    return record;
+  });
 }
 
 async function requiredJob(jobId) {
@@ -127,10 +173,105 @@ async function requiredJob(jobId) {
 }
 
 async function save(record) {
+  await writeSnapshot(record);
   if (redis) {
-    await redis.hset(keyFor(record.jobId), 'record', JSON.stringify(record));
-    await redis.sadd('agent-jobs:index', record.jobId);
+    try {
+      await redis.hset(keyFor(record.jobId), 'record', JSON.stringify(record));
+      await redis.sadd(indexKey, record.jobId);
+    } catch {
+      memoryJobs.set(record.jobId, structuredClone(record));
+    }
   } else {
     memoryJobs.set(record.jobId, structuredClone(record));
+  }
+}
+
+async function withJobLock(jobId, operation) {
+  assertSafeJobId(jobId);
+  const previous = localLocks.get(jobId) || Promise.resolve();
+  let releaseLocal;
+  const current = new Promise((resolveLock) => { releaseLocal = resolveLock; });
+  localLocks.set(jobId, current);
+  await previous;
+
+  let lockToken = '';
+  try {
+    lockToken = await acquireRedisLock(jobId);
+    return await operation();
+  } finally {
+    if (lockToken) await releaseRedisLock(jobId, lockToken);
+    releaseLocal();
+    if (localLocks.get(jobId) === current) localLocks.delete(jobId);
+  }
+}
+
+async function acquireRedisLock(jobId) {
+  if (!redis) return '';
+  const token = randomUUID();
+  try {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const acquired = await redis.set(lockKeyFor(jobId), token, 'PX', 15000, 'NX');
+      if (acquired === 'OK') return token;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+    }
+  } catch {
+    return '';
+  }
+  throw Object.assign(new Error('Timed out waiting for the job mutation lock.'), { statusCode: 409 });
+}
+
+async function releaseRedisLock(jobId, token) {
+  try {
+    await redis.eval("if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end", 1, lockKeyFor(jobId), token);
+  } catch {
+    // The lock expires automatically if Redis becomes unavailable.
+  }
+}
+
+function assertSafeJobId(jobId) {
+  if (!/^[A-Za-z0-9_-]+$/.test(String(jobId))) {
+    throw Object.assign(new Error('Invalid job ID.'), { statusCode: 400 });
+  }
+}
+
+function snapshotPath(jobId) {
+  assertSafeJobId(jobId);
+  return resolve(config.workspaceRoot, 'jobs', jobId, 'record.json');
+}
+
+async function writeSnapshot(record) {
+  const path = snapshotPath(record.jobId);
+  const directory = resolve(path, '..');
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  await mkdir(directory, { recursive: true });
+  await writeFile(temporary, JSON.stringify(record, null, 2), { encoding: 'utf8', mode: 0o600 });
+  await rename(temporary, path);
+}
+
+async function ensureSnapshot(record) {
+  try {
+    await access(snapshotPath(record.jobId));
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    await writeSnapshot(record);
+  }
+}
+
+async function readSnapshot(jobId) {
+  try {
+    return await readFile(snapshotPath(jobId), 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+async function listSnapshotIds() {
+  try {
+    const entries = await readdir(resolve(config.workspaceRoot, 'jobs'), { withFileTypes: true });
+    return entries.filter((entry) => entry.isDirectory() && /^[A-Za-z0-9_-]+$/.test(entry.name)).map((entry) => entry.name);
+  } catch (error) {
+    if (error.code === 'ENOENT') return [];
+    throw error;
   }
 }
