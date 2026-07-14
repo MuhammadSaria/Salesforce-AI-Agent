@@ -37,8 +37,8 @@ export default class AgentChat extends LightningElement {
     get isProduction() { return this.orgContext?.environment === 'production'; }
     get canSelectOrg() { return this.status === 'AWAITING_ORG_SELECTION'; }
     get canReviewPlan() { return this.status === 'AWAITING_PLAN_APPROVAL'; }
-    get canImplement() { return this.status === 'IMPLEMENTING' && !this.job?.implementation; }
-    get canValidate() { return this.status === 'IMPLEMENTING' || this.status === 'VALIDATION_FAILED'; }
+    get canImplement() { return this.status === 'VALIDATION_FAILED' && !this.job?.implementation; }
+    get canValidate() { return this.status === 'VALIDATION_FAILED' && Boolean(this.job?.implementation); }
     get canApproveDeployment() { return this.status === 'AWAITING_DEPLOYMENT_APPROVAL'; }
     get hasDataOperations() { return Boolean(this.plan?.dataOperations?.length); }
     get approvalActionLabel() { return this.hasDataOperations ? 'Approve Data Execution' : 'Approve Deployment'; }

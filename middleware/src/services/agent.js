@@ -96,8 +96,13 @@ async function analyze(job, actor) {
 }
 
 async function implement(job, actor) {
-  assertState(job, JOB_STATES.IMPLEMENTING);
+  assertState(job, JOB_STATES.IMPLEMENTING, JOB_STATES.VALIDATION_FAILED);
   const approval = validApproval(job, 'IMPLEMENTATION');
+  if (job.status === JOB_STATES.VALIDATION_FAILED) {
+    if (job.implementation) return validate(job, actor);
+    await transitionJob(job.jobId, JOB_STATES.IMPLEMENTING, { actor, reason: 'Retrying missing local implementation before validation.' });
+    job = await requiredJob(job.jobId);
+  }
   await verifySelectedOrg(job.orgContext, auditOptions(job, actor));
   const paths = await ensureJobWorkspace(job.jobId, job.orgContext.orgRegistryId);
   const branch = `ai-agent/${(job.jiraIssueKey || 'MANUAL-0').toUpperCase()}-${job.jobId}`.replace(/[^A-Za-z0-9_\/-]/g, '-');
@@ -126,6 +131,7 @@ async function implement(job, actor) {
   await writeFile(join(paths.diff, 'implementation.diff'), diffResult.stdout, 'utf8');
   await updateJob(job.jobId, { implementation: { approvalId: approval.approvalId, branch, baselineCommit: baselineResult.stdout.trim(), commitHash, changedFiles, sourceHash, implementedAt: new Date().toISOString() }, diff: diffResult.stdout });
   await appendLog(job.jobId, 'info', changedFiles.length ? `Implemented ${changedFiles.length} approved file operations locally. No deployment or data mutation was performed.` : `Prepared ${(job.plan.dataOperations || []).length} approved data operations. No data mutation was performed.`);
+  return validate(await requiredJob(job.jobId), actor);
 }
 
 async function validate(job, actor) {
