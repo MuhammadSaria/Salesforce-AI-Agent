@@ -11,6 +11,10 @@ const PROPOSAL_SCHEMA = {
   additionalProperties: false,
   properties: {
     proposedImplementation: { type: 'string' },
+    implementationSteps: { type: 'array', minItems: 1, maxItems: 15, items: { type: 'string' } },
+    expectedOutcome: { type: 'string' },
+    businessImpact: { type: 'string' },
+    outOfScope: { type: 'array', maxItems: 15, items: { type: 'string' } },
     files: {
       type: 'array',
       maxItems: 50,
@@ -54,7 +58,7 @@ const PROPOSAL_SCHEMA = {
     risks: { type: 'array', items: { type: 'string' } },
     assumptions: { type: 'array', items: { type: 'string' } }
   },
-  required: ['proposedImplementation', 'files', 'dataOperations', 'testingStrategy', 'risks', 'assumptions']
+  required: ['proposedImplementation', 'implementationSteps', 'expectedOutcome', 'businessImpact', 'outOfScope', 'files', 'dataOperations', 'testingStrategy', 'risks', 'assumptions']
 };
 
 // Codex can only propose source as structured output. The worker applies it after approval.
@@ -69,6 +73,7 @@ export async function enrichPlanWithCodex(plan, requirement, metadataScope, orgC
     'Do not include credentials, arbitrary shell commands, deletes, destructive changes, or deployment authorization.',
     'You may propose structured Salesforce record create or update operations only when the requirement explicitly requests them. Never invent record IDs or secret fields.',
     'Propose only task-relevant create or modify operations under force-app/main/default. No changes are applied during this run.',
+    'Write proposedImplementation, implementationSteps, expectedOutcome, businessImpact, outOfScope, testingStrategy, risks, and assumptions in plain language for a business user reviewing the approval. Explain observable behavior and the sequence of work. Do not put XML, source code, file paths, or metadata syntax in those human-readable fields.',
     JSON.stringify({
       requirement: sanitizeUntrustedText(JSON.stringify(requirement), config.maxPromptLength),
       metadataScope,
@@ -90,6 +95,10 @@ export async function enrichPlanWithCodex(plan, requirement, metadataScope, orgC
     const enriched = {
       ...plan,
       proposedImplementation: proposal.proposedImplementation,
+      implementationSteps: proposal.implementationSteps,
+      expectedOutcome: proposal.expectedOutcome,
+      businessImpact: proposal.businessImpact,
+      outOfScope: proposal.outOfScope,
       fileOperations: proposal.files,
       dataOperations: proposal.dataOperations,
       filesToCreate: proposal.files.filter((item) => item.operation === 'create').map((item) => item.path),
@@ -106,8 +115,23 @@ export async function enrichPlanWithCodex(plan, requirement, metadataScope, orgC
 }
 
 export function validateCodexProposal(proposal) {
-  if (!proposal || !Array.isArray(proposal.files) || !Array.isArray(proposal.dataOperations)) throw new Error('Codex returned an invalid source proposal.');
-  return { ...proposal, files: proposal.files.map(validateFile), dataOperations: proposal.dataOperations.map(validateDataOperation) };
+  if (!proposal || !Array.isArray(proposal.files) || !Array.isArray(proposal.dataOperations) || !Array.isArray(proposal.implementationSteps) || !proposal.implementationSteps.length) throw new Error('Codex returned an invalid source proposal.');
+  return {
+    ...proposal,
+    proposedImplementation: humanText(proposal.proposedImplementation, 4000),
+    implementationSteps: proposal.implementationSteps.map((step) => humanText(step, 1000)).slice(0, 15),
+    expectedOutcome: humanText(proposal.expectedOutcome, 3000),
+    businessImpact: humanText(proposal.businessImpact, 3000),
+    outOfScope: (proposal.outOfScope || []).map((item) => humanText(item, 1000)).slice(0, 15),
+    files: proposal.files.map(validateFile),
+    dataOperations: proposal.dataOperations.map(validateDataOperation)
+  };
+}
+
+function humanText(value, maximumLength) {
+  const text = String(value || '').trim();
+  if (!text) throw new Error('Codex omitted required human-readable plan content.');
+  return text.slice(0, maximumLength);
 }
 
 function validateDataOperation(operation) {

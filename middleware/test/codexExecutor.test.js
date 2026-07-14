@@ -4,6 +4,10 @@ import { validateCodexProposal } from '../src/services/codexExecutor.js';
 
 const proposal = (file) => ({
   proposedImplementation: 'Update the approved Salesforce source.',
+  implementationSteps: ['Prepare the requested Salesforce behavior.', 'Validate that the behavior works as requested.'],
+  expectedOutcome: 'Users can complete the requested process.',
+  businessImpact: 'Only the approved process changes.',
+  outOfScope: ['Unrelated Salesforce features.'],
   files: [file],
   dataOperations: [],
   testingStrategy: ['Run relevant tests.'],

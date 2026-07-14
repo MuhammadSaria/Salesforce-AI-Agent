@@ -286,7 +286,25 @@ function completionComment(job, deployment) {
     : `Deployment ID: ${deployment.deploymentId || 'not returned'}`;
   return [`AI agent job ${job.jobId} completed.`, `Salesforce org: ${job.orgContext.displayName} (${job.orgContext.expectedOrgId})`, `Environment: ${job.orgContext.environment}`, `Validation: ${job.validation.status} (${job.validation.validationId})`, executionResult, `Rollback: ${job.plan.rollbackPlan}`].join('\n');
 }
-function planReviewComment(job, plan, orgContext) { return [`AI agent plan ready for review.`, `Job: ${job.jobId}`, `Target org: ${orgContext.displayName} (${orgContext.expectedOrgId})`, `Environment: ${orgContext.environment}`, `Requirement: ${plan.requirementSummary || 'See issue details.'}`, `Risk: ${plan.estimatedRiskLevel}`, `Plan version: ${plan.planVersion}`, plan.notice || 'No changes have been made yet.', `Review and approve implementation in the Salesforce AI Agent console.`].join('\n'); }
+function planReviewComment(job, plan, orgContext) {
+  const steps = (plan.implementationSteps || []).map((step, index) => `${index + 1}. ${step}`);
+  return [
+    'AI agent plan ready for review.',
+    `Job: ${job.jobId}`,
+    `Target org: ${orgContext.displayName} (${orgContext.expectedOrgId})`,
+    `Environment: ${orgContext.environment}`,
+    `Requirement: ${plan.requirementSummary || 'See issue details.'}`,
+    `What will be delivered: ${plan.proposedImplementation}`,
+    'Implementation steps:',
+    ...steps,
+    `Expected outcome: ${plan.expectedOutcome || 'See the Salesforce AI Agent console.'}`,
+    `Business impact: ${plan.businessImpact || 'Limited to the approved requirement.'}`,
+    `Risk: ${plan.estimatedRiskLevel}`,
+    `Plan version: ${plan.planVersion}`,
+    plan.notice || 'No changes have been made yet.',
+    'Review and approve implementation in the Salesforce AI Agent console.'
+  ].join('\n');
+}
 function noChangeCompletionComment(job, validation) { return [`AI agent job ${job.jobId} completed without deployment.`, `Salesforce org: ${job.orgContext.displayName} (${job.orgContext.expectedOrgId})`, `Validation: ${validation.status} (${validation.validationId})`, `Result: No Salesforce source changes were proposed, so deployment was not required.`].join('\n'); }
 function sfFailureMessage(result) {
   try {

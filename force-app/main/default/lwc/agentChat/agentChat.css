@@ -10,6 +10,13 @@
 .details { display: grid; grid-template-columns: 10rem 1fr; gap: .5rem; }
 .details dt { font-weight: 700; }
 .details dd { margin: 0; overflow-wrap: anywhere; }
+.human-plan { max-width: 60rem; color: #181818; }
+.human-plan h3 { font-size: 1rem; font-weight: 700; margin: 1rem 0 .35rem; }
+.human-plan h3:first-child { margin-top: 0; }
+.human-plan p, .human-plan li { line-height: 1.5; overflow-wrap: anywhere; }
+.human-plan ol, .human-plan ul { margin: .25rem 0 .75rem 1.5rem; }
+.human-plan li { margin-bottom: .35rem; }
+.human-plan .notice { border-left: 3px solid #0176d3; background: #eef4ff; padding: .6rem .75rem; font-weight: 700; }
 pre { max-height: 22rem; overflow: auto; background: #f3f3f3; border: 1px solid #c9c9c9; padding: .75rem; white-space: pre-wrap; overflow-wrap: anywhere; font: .75rem/1.45 monospace; }
 .diff { white-space: pre; }
 code { font-size: .8rem; }

@@ -35,7 +35,30 @@
                     </lightning-accordion-section>
                     <lightning-accordion-section name="metadata" label="Current Salesforce State and Relevant Metadata"><pre>{metadataText}</pre></lightning-accordion-section>
                     <lightning-accordion-section name="dependencies" label="Retrieved Metadata, Dependencies, and Exclusions"><pre>{dependencyText}</pre></lightning-accordion-section>
-                    <lightning-accordion-section name="plan" label="Proposed Implementation, Risks, Assumptions, Tests, and Rollback"><pre>{planText}</pre></lightning-accordion-section>
+                    <lightning-accordion-section name="plan" label="Implementation Plan for Approval">
+                        <div class="human-plan">
+                            <h3>What will be delivered</h3>
+                            <p>{planSummary}</p>
+                            <h3>Implementation steps</h3>
+                            <ol>
+                                <template for:each={implementationSteps} for:item="step"><li key={step.key}>{step.text}</li></template>
+                            </ol>
+                            <h3>Expected outcome</h3>
+                            <p>{expectedOutcome}</p>
+                            <h3>Business impact</h3>
+                            <p>{businessImpact}</p>
+                            <h3>How it will be tested</h3>
+                            <ul><template for:each={testingItems} for:item="item"><li key={item.key}>{item.text}</li></template></ul>
+                            <h3>Risks and assumptions</h3>
+                            <ul><template for:each={riskAndAssumptionItems} for:item="item"><li key={item.key}>{item.text}</li></template></ul>
+                            <h3>Not included</h3>
+                            <ul><template for:each={outOfScopeItems} for:item="item"><li key={item.key}>{item.text}</li></template></ul>
+                            <h3>Rollback</h3>
+                            <p>{rollbackPlan}</p>
+                            <p class="notice">{plan.notice}</p>
+                        </div>
+                    </lightning-accordion-section>
+                    <lightning-accordion-section name="technical" label="Technical Change Details"><pre>{technicalPlanText}</pre></lightning-accordion-section>
                     <lightning-accordion-section name="validation" label="Validation Results"><pre>{validationText}</pre></lightning-accordion-section>
                     <lightning-accordion-section name="diff" label="Git Diff"><pre class="diff">{diffText}</pre></lightning-accordion-section>
                     <lightning-accordion-section name="logs" label="Execution Logs and Audit"><pre>{logsText}</pre></lightning-accordion-section>

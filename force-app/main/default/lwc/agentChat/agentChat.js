@@ -55,7 +55,15 @@ export default class AgentChat extends LightningElement {
     }
     get metadataText() { return this.pretty(this.job?.metadataScope?.primaryMetadata || []); }
     get dependencyText() { return this.pretty(this.job?.metadataScope?.dependencies || []); }
-    get planText() { return this.pretty(this.plan || {}); }
+    get planSummary() { return this.plan?.proposedImplementation || 'The implementation proposal is being prepared.'; }
+    get implementationSteps() { return this.listItems(this.plan?.implementationSteps?.length ? this.plan.implementationSteps : [this.planSummary], 'step'); }
+    get expectedOutcome() { return this.plan?.expectedOutcome || 'The requested Salesforce behavior will be available after validation and separate deployment approval.'; }
+    get businessImpact() { return this.plan?.businessImpact || 'Only the approved requirement is intended to change.'; }
+    get testingItems() { return this.listItems(this.plan?.testingStrategy || [], 'test'); }
+    get riskAndAssumptionItems() { return this.listItems([...(this.plan?.risks || []), ...(this.plan?.assumptions || [])], 'risk'); }
+    get outOfScopeItems() { return this.listItems(this.plan?.outOfScope?.length ? this.plan.outOfScope : ['Unrelated Salesforce behavior and data.'], 'scope'); }
+    get rollbackPlan() { return this.plan?.rollbackPlan || 'Revert the approved change using the captured baseline.'; }
+    get technicalPlanText() { return this.pretty({ filesToCreate: this.plan?.filesToCreate || [], filesToModify: this.plan?.filesToModify || [], dataOperations: this.plan?.dataOperations || [], metadataScopeHash: this.plan?.metadataScopeHash, planHash: this.plan?.planHash }); }
     get validationText() { return this.pretty(this.validation || {}); }
     get logsText() { return (this.job?.logs || []).map((item) => `${item.timestamp} [${item.level}] ${item.message}`).join('\n'); }
     get diffText() { return this.job?.diff || 'No local source differences recorded.'; }
@@ -145,5 +153,6 @@ export default class AgentChat extends LightningElement {
         };
     }
     pretty(value) { return JSON.stringify(value, null, 2); }
+    listItems(values, prefix) { return values.map((text, index) => ({ key: `${prefix}-${index}`, text })); }
     normalizeError(error) { return error?.body?.message || error?.message || 'Unexpected error.'; }
 }
