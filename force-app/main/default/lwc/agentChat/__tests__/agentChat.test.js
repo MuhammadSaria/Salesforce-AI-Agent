@@ -114,6 +114,30 @@ describe('c-agent-chat', () => {
         expect(buttonByLabel(element, 'Approve Deployment')).toBeUndefined();
         expect(buttonByLabel(element, 'Deploy Approved Package')).not.toBeUndefined();
     });
+
+    it('explains a failed validation in human-readable language', async () => {
+        const job = {
+            jobId: 'job-failed', status: 'VALIDATION_FAILED', logs: [], approvals: [],
+            orgContext: { displayName: 'SAPA Sandbox', environment: 'sandbox', expectedOrgId: '00D000000000001', verified: {} },
+            plan: { notice: 'No changes have been deployed.' },
+            implementation: { commitHash: 'commit-1' },
+            validation: { status: 'FAILED', failureReason: 'The Flow email recipient is configured in a format Salesforce does not accept.' },
+            metadataScope: { primaryMetadata: [], dependencies: [] }
+        };
+        getJobs.mockResolvedValue(JSON.stringify({ jobs: [job] }));
+        getAgentJob.mockResolvedValue(JSON.stringify(job));
+
+        const element = createElement('c-agent-chat', { is: AgentChat });
+        document.body.appendChild(element);
+        await flushPromises();
+
+        const failure = element.shadowRoot.querySelector('.validation-failure');
+        expect(failure.textContent).toContain('Why validation failed');
+        expect(failure.textContent).toContain('Flow email recipient');
+        expect(failure.textContent).toContain('Nothing was deployed');
+        expect(element.shadowRoot.querySelector('.milestone--failed').textContent).toContain('Validation failed');
+        expect(buttonByLabel(element, 'Approve Deployment')).toBeUndefined();
+    });
 });
 
 function buttonByLabel(element, label) {

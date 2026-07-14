@@ -14,6 +14,7 @@ import { runSfCommand, verifySelectedOrg } from './sfExecutor.js';
 import { runGit } from './gitExecutor.js';
 import { enrichPlanWithCodex } from './codexExecutor.js';
 import { latestApprovedApproval } from '../domain/approval.js';
+import { humanizeValidationFailure } from '../utils/validationFailure.js';
 
 export async function processAgentJob(message) {
   const job = await requiredJob(message.jobId);
@@ -174,7 +175,7 @@ async function validate(job, actor) {
     await updateJob(current.jobId, { validation });
     await transitionJob(current.jobId, JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL, { actor, reason: 'Validation passed.' });
   } catch (error) {
-    await updateJob(job.jobId, { validation: { status: 'FAILED', error: error.message, timestamp: new Date().toISOString() } });
+    await updateJob(job.jobId, { validation: { status: 'FAILED', error: error.message, failureReason: humanizeValidationFailure(error.message), timestamp: new Date().toISOString() } });
     await transitionJob(job.jobId, JOB_STATES.VALIDATION_FAILED, { actor, reason: 'Validation failed.', error: error.message });
   }
 }

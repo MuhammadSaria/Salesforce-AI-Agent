@@ -14,6 +14,7 @@ import { claimWebhookEvent, parseJiraWebhook, verifyJiraWebhook } from './servic
 import { JOB_STATES } from './domain/jobState.js';
 import { startJiraPoller } from './services/jiraPoller.js';
 import { latestApprovedApproval } from './domain/approval.js';
+import { humanizeValidationFailure } from './utils/validationFailure.js';
 
 export function createApp() {
   const app = express();
@@ -144,7 +145,14 @@ function queueAction(action, states) { return jobRoute(async (req, res, job) => 
 function jobRoute(handler) { return asyncRoute(async (req, res) => { const job = await getJobRecord(req.params.jobId); if (!job) return res.status(404).json({ error: { message: 'Job not found.' } }); return handler(req, res, job); }); }
 function asyncRoute(handler) { return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next); }
 function approvalRecord(job, req, type, extra) { return { approvalId: nanoid(), jobId: job.jobId, jiraIssueKey: job.jiraIssueKey, approvalType: type, planVersion: job.plan?.planVersion, planHash: job.plan?.planHash, metadataScopeHash: job.metadataScope?.hash, orgRegistryId: job.orgContext?.orgRegistryId, salesforceOrganizationId: job.orgContext?.expectedOrgId, environment: job.orgContext?.environment, approverIdentity: req.actor.id, comments: sanitizeUntrustedText(req.body?.comments, 1000), approvalTimestamp: new Date().toISOString(), ...extra }; }
-function publicJob(job) { const safe = { ...job }; delete safe.prompt; return safe; }
+function publicJob(job) {
+  const safe = { ...job };
+  if (safe.validation?.status === 'FAILED') {
+    safe.validation = { ...safe.validation, failureReason: safe.validation.failureReason || humanizeValidationFailure(safe.validation.error || safe.error) };
+  }
+  delete safe.prompt;
+  return safe;
+}
 function safeContext(context) { return { selectedOrgRegistryId: String(context?.selectedOrgRegistryId || ''), customerName: String(context?.customerName || ''), environment: String(context?.environment || '') }; }
 function normalizeIssueKey(value) { const key = String(value || '').trim().toUpperCase(); if (key && !/^[A-Z][A-Z0-9_]{1,19}-[1-9][0-9]{0,9}$/.test(key)) throw Object.assign(new Error('Invalid Jira issue key.'), { statusCode: 422 }); return key; }
 function conflict(res, message) { return res.status(409).json({ error: { message } }); }

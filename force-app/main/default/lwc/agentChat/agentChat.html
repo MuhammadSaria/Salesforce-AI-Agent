@@ -38,6 +38,17 @@
                     </div>
                 </section>
 
+                <template if:true={validationFailed}>
+                    <section class="validation-failure" role="alert" aria-labelledby="validation-failure-title">
+                        <lightning-icon icon-name="utility:error" size="small" alternative-text="Validation failed"></lightning-icon>
+                        <div>
+                            <h2 id="validation-failure-title">Why validation failed</h2>
+                            <p>{validationFailureReason}</p>
+                            <p class="failure-next-step">Nothing was deployed. Correct the proposed implementation and run validation again before requesting deployment approval.</p>
+                        </div>
+                    </section>
+                </template>
+
                 <template if:true={canSelectOrg}>
                     <section class="action-band">
                         <lightning-combobox label="Target Org Selection" options={orgOptions} value={selectedOrgId} onchange={handleValue} data-field="selectedOrgId"></lightning-combobox>

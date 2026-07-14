@@ -13,6 +13,11 @@
 .milestone span { color: #444; font-size: .82rem; line-height: 1.35; }
 .milestone--active { background: #eef4ff; box-shadow: inset 0 3px 0 #0176d3; }
 .milestone--complete { background: #eef8f1; box-shadow: inset 0 3px 0 #2e844a; }
+.milestone--failed { background: #fef1ee; box-shadow: inset 0 3px 0 #ba0517; }
+.validation-failure { display: grid; grid-template-columns: 2rem minmax(0, 1fr); gap: .75rem; align-items: start; background: #fef1ee; border: 1px solid #ea001e; border-left: 4px solid #ba0517; color: #181818; padding: 1rem; margin: .75rem 0; }
+.validation-failure h2 { color: #8e030f; font-size: 1.125rem; font-weight: 700; margin: 0 0 .4rem; }
+.validation-failure p { font-size: 1rem; line-height: 1.5; margin: 0; overflow-wrap: anywhere; }
+.validation-failure .failure-next-step { color: #444; font-size: .875rem; margin-top: .5rem; }
 .action-band, .instruction-band { display: grid; grid-template-columns: minmax(16rem, 1fr) auto; gap: .75rem; align-items: end; padding: .75rem 0; }
 .actions { display: flex; flex-wrap: wrap; gap: .5rem; padding-top: .75rem; border-top: 1px solid #c9c9c9; }
 .details { display: grid; grid-template-columns: 10rem 1fr; gap: .5rem; }

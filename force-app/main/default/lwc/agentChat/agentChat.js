@@ -67,25 +67,28 @@ export default class AgentChat extends LightningElement {
     get rollbackPlan() { return this.plan?.rollbackPlan || 'Revert the approved change using the captured baseline.'; }
     get planNotice() {
         if (this.deploymentComplete) return `Deployment completed successfully in ${this.orgContext.displayName}.`;
+        if (this.validationFailed) return 'Validation failed. Nothing was deployed, and deployment remains blocked until the implementation is corrected and validated again.';
         if (this.validationComplete) return 'Validation passed. No deployment will occur until separate deployment approval is granted.';
         if (this.implementationComplete) return 'Local implementation completed. No Salesforce changes have been deployed yet.';
         return this.plan?.notice || 'No changes have been made yet.';
     }
     get implementationComplete() { return Boolean(this.job?.implementation); }
     get validationComplete() { return this.validation?.status === 'PASSED'; }
+    get validationFailed() { return this.status === 'VALIDATION_FAILED' || this.validation?.status === 'FAILED'; }
+    get validationFailureReason() { return this.validation?.failureReason || 'Salesforce did not accept the proposed change. Review the implementation and run validation again.'; }
     get deploymentComplete() { return this.status === 'COMPLETED' && Boolean(this.job?.deployment); }
     get implementationMilestoneClass() { return this.milestoneClass(this.implementationComplete, this.status === 'IMPLEMENTING'); }
-    get validationMilestoneClass() { return this.milestoneClass(this.validationComplete, this.status === 'VALIDATING'); }
+    get validationMilestoneClass() { return this.validationFailed ? 'milestone milestone--failed' : this.milestoneClass(this.validationComplete, this.status === 'VALIDATING'); }
     get deploymentMilestoneClass() { return this.milestoneClass(this.deploymentComplete, this.status === 'DEPLOYING'); }
     get implementationMilestoneIcon() { return this.milestoneIcon(this.implementationComplete, this.status === 'IMPLEMENTING'); }
-    get validationMilestoneIcon() { return this.milestoneIcon(this.validationComplete, this.status === 'VALIDATING'); }
+    get validationMilestoneIcon() { return this.validationFailed ? 'utility:error' : this.milestoneIcon(this.validationComplete, this.status === 'VALIDATING'); }
     get deploymentMilestoneIcon() { return this.milestoneIcon(this.deploymentComplete, this.status === 'DEPLOYING'); }
     get implementationMilestoneTitle() { return this.implementationComplete ? 'Local implementation completed' : this.status === 'IMPLEMENTING' ? 'Implementation in progress' : 'Implementation pending'; }
-    get validationMilestoneTitle() { return this.validationComplete ? 'Validation passed' : this.status === 'VALIDATING' ? 'Validation in progress' : 'Validation pending'; }
+    get validationMilestoneTitle() { return this.validationFailed ? 'Validation failed' : this.validationComplete ? 'Validation passed' : this.status === 'VALIDATING' ? 'Validation in progress' : 'Validation pending'; }
     get deploymentMilestoneTitle() { return this.deploymentComplete ? 'Deployment completed' : this.status === 'DEPLOYING' ? 'Deployment in progress' : 'Deployment pending'; }
     get implementationMilestoneMessage() { return this.implementationComplete ? 'The approved changes were created locally and committed.' : 'Waiting for implementation approval and local execution.'; }
-    get validationMilestoneMessage() { return this.validationComplete ? `Salesforce validation passed for ${this.orgContext.displayName}.` : 'Validation starts after the local implementation is complete.'; }
-    get deploymentMilestoneMessage() { return this.deploymentComplete ? `Successfully deployed to ${this.orgContext.displayName}. Deployment ID: ${this.job.deployment.deploymentId || 'not returned'}.` : 'A separate deployment approval is required after validation.'; }
+    get validationMilestoneMessage() { return this.validationFailed ? 'Salesforce rejected part of the proposed implementation.' : this.validationComplete ? `Salesforce validation passed for ${this.orgContext.displayName}.` : 'Validation starts after the local implementation is complete.'; }
+    get deploymentMilestoneMessage() { return this.deploymentComplete ? `Successfully deployed to ${this.orgContext.displayName}. Deployment ID: ${this.job.deployment.deploymentId || 'not returned'}.` : this.validationFailed ? 'Deployment is blocked until validation passes.' : 'A separate deployment approval is required after validation.'; }
     get createDisabled() { return this.isBusy || (!this.prompt.trim() && !this.jiraIssueKey.trim()); }
 
     async loadConsole() {
