@@ -104,7 +104,11 @@ export async function transitionJob(jobId, newState, details = {}) {
     record.status = newState;
     record.stateHistory.push(event);
     record.updatedAt = event.timestamp;
-    if (details.error) record.error = details.error;
+    if (details.error) {
+      record.error = details.error;
+    } else if (![JOB_STATES.FAILED, JOB_STATES.VALIDATION_FAILED, JOB_STATES.ORG_VERIFICATION_FAILED].includes(newState)) {
+      record.error = '';
+    }
     await save(record);
     return record;
   });

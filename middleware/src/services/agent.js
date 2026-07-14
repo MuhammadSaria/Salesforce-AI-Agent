@@ -118,7 +118,7 @@ async function implement(job, actor) {
     await appendCommand(job.jobId, result);
     changedFiles.push(operation.path);
   }
-  const sourceHash = stableHash({ planHash: job.plan.planHash, files: job.plan.fileOperations || [], dataOperations: job.plan.dataOperations || [] });
+  const sourceHash = await calculateSourceHash(paths.implementationProject, changedFiles, job.plan);
   let diffResult = { stdout: '', exitCode: 0 };
   let commitHash = baselineResult.stdout.trim();
   if (changedFiles.length) {
@@ -143,7 +143,7 @@ async function validate(job, actor) {
     const current = await requiredJob(job.jobId);
     const paths = await ensureJobWorkspace(current.jobId, current.orgContext.orgRegistryId);
     await verifySelectedOrg(current.orgContext, auditOptions(current, actor));
-    await assertCleanImplementation(paths, current.implementation);
+    await assertCleanImplementation(paths, current.implementation, current.plan);
     const dataOperations = current.plan.dataOperations || [];
     const hasSourceChanges = Boolean((current.plan.fileOperations || []).length || (current.implementation?.changedFiles || []).length);
     if (hasSourceChanges && dataOperations.length) throw new Error('Metadata and record mutations must be split into separate jobs to prevent partial execution.');
@@ -185,7 +185,7 @@ async function deploy(job, actor) {
   assertDeploymentGuard(job, approval);
   const paths = await ensureJobWorkspace(job.jobId, job.orgContext.orgRegistryId);
   await verifySelectedOrg(job.orgContext, auditOptions(job, actor));
-  await assertCleanImplementation(paths, job.implementation);
+  await assertCleanImplementation(paths, job.implementation, job.plan);
   const dataOperations = job.plan.dataOperations || [];
   let result;
   const recordResults = [];
@@ -282,12 +282,21 @@ async function validatePlannedDataOperations(job, paths, actor) {
   }
   return commands;
 }
-async function assertCleanImplementation(paths, implementation) {
+async function assertCleanImplementation(paths, implementation, plan) {
   if (!implementation) throw new Error('A completed local implementation record is required.');
   const status = await runGit('status', { cwd: paths.implementationProject });
   const head = await runGit('rev-parse', { ref: 'HEAD', cwd: paths.implementationProject });
   if (status.exitCode !== 0 || status.stdout.trim()) throw new Error('Implementation worktree contains unapproved or uncommitted changes.');
   if (head.stdout.trim() !== implementation.commitHash) throw new Error('Implementation Git commit no longer matches the approved source.');
+  const actualSourceHash = await calculateSourceHash(paths.implementationProject, implementation.changedFiles || [], plan);
+  if (actualSourceHash !== implementation.sourceHash) throw new Error('Implemented file content no longer matches the recorded source hash.');
+}
+export async function calculateSourceHash(projectRoot, changedFiles, plan) {
+  const files = [];
+  for (const path of [...changedFiles].sort()) {
+    files.push({ path, content: await readFile(join(projectRoot, path), 'utf8') });
+  }
+  return stableHash({ planHash: plan.planHash, files, dataOperations: plan.dataOperations || [] });
 }
 function completionComment(job, deployment) {
   const recordResults = deployment.recordResults || [];
@@ -316,9 +325,21 @@ function planReviewComment(job, plan, orgContext) {
   ].join('\n');
 }
 function noChangeCompletionComment(job, validation) { return [`AI agent job ${job.jobId} completed without deployment.`, `Salesforce org: ${job.orgContext.displayName} (${job.orgContext.expectedOrgId})`, `Validation: ${validation.status} (${validation.validationId})`, `Result: No Salesforce source changes were proposed, so deployment was not required.`].join('\n'); }
-function sfFailureMessage(result) {
+export function sfFailureMessage(result) {
   try {
     const parsed = JSON.parse(result.stdout || '{}');
+    const details = parsed.result?.details || parsed.details || {};
+    const componentFailures = Array.isArray(details.componentFailures)
+      ? details.componentFailures
+      : details.componentFailures ? [details.componentFailures] : [];
+    const testFailures = Array.isArray(details.runTestResult?.failures)
+      ? details.runTestResult.failures
+      : details.runTestResult?.failures ? [details.runTestResult.failures] : [];
+    const failures = [
+      ...componentFailures.map((failure) => failure.problem || failure.message),
+      ...testFailures.map((failure) => failure.message || failure.problem)
+    ].filter(Boolean);
+    if (failures.length) return failures.join('\n').slice(0, 4000);
     if (parsed.message) return parsed.message;
   } catch {
     // Fall through to sanitized CLI output.

@@ -24,7 +24,7 @@ export const config = {
   maxRetrievalOperations: Number(process.env.MAX_RETRIEVAL_OPERATIONS || 5),
   validationExpiryMinutes: Number(process.env.VALIDATION_EXPIRY_MINUTES || 60),
   allowProductionDeployment: process.env.ALLOW_PRODUCTION_DEPLOYMENT === 'true',
-  sfCommandTimeoutMs: Number(process.env.SF_COMMAND_TIMEOUT_MS || 120000),
+  sfCommandTimeoutMs: Number(process.env.SF_COMMAND_TIMEOUT_MS || 600000),
   sfCliNode: process.env.SF_CLI_NODE || '',
   sfCliRun: process.env.SF_CLI_RUN || '',
   codexCommand: process.env.CODEX_COMMAND || 'codex',

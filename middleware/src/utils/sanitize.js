@@ -2,7 +2,7 @@ const SECRET_PATTERNS = [
   /(?<=Authorization:\s*(?:Bearer|Basic)\s+)[^\s]+/gi,
   /\bsk-[a-zA-Z0-9_-]+\b/g,
   /\b(?:access_token|refresh_token|api_token|client_secret|session_id)\b\s*[:=]\s*["']?[^\s,"'}]+/gi,
-  /\b[A-Za-z0-9+/]{40,}={0,2}\b/g
+  /\b(?![a-fA-F0-9]{40,64}\b)[A-Za-z0-9+/]{40,}={0,2}\b/g
 ];
 
 export function sanitizePrompt(prompt, maxLength) {

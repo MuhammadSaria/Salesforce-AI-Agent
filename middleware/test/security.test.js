@@ -55,6 +55,13 @@ test('duplicate Jira webhook event is rejected idempotently', async () => {
   assert.equal(await claimWebhookEvent(id), false);
 });
 
+test('secret masking preserves Git and source hashes used by deployment guards', () => {
+  const gitSha = 'b85ea95ee868752e2750b4706614c9fd8bcc5d0a';
+  const sourceHash = '3ab285999a58a75f3178c6dc1402648a2c2cfe96e89debc3130dc4617bf9aeb0';
+  assert.equal(redactSecrets(gitSha), gitSha);
+  assert.equal(redactSecrets(sourceHash), sourceHash);
+});
+
 test('summary-only Jira tickets remain actionable requirements', () => {
   const requirement = extractRequirement({ summary: 'Create a Donor Account field', description: '' }, 'Analyze Jira issue SAPA-1', []);
   assert.equal(requirement.businessRequirement, 'Create a Donor Account field');
