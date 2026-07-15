@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process';
-import { relative, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { config } from '../config.js';
 import { redactSecrets } from '../utils/sanitize.js';
+import { isPathInside } from '../utils/paths.js';
 
 const ALLOWED = new Set(['status', 'diff', 'worktree-add', 'add', 'commit', 'rev-parse']);
 
@@ -18,7 +19,7 @@ function buildArgs(command, params) {
   if (command === 'worktree-add') {
     if (!/^ai-agent\/[A-Z][A-Z0-9_]+-[0-9]+-[A-Za-z0-9_-]+$/.test(params.branch || '')) throw new Error('Invalid agent branch name.');
     const worktree = resolve(String(params.path || ''));
-    if (relative(resolve(config.workspaceRoot, 'jobs'), worktree).startsWith('..')) throw new Error('Git worktree must stay inside the jobs workspace.');
+    if (!isPathInside(resolve(config.workspaceRoot, 'jobs'), worktree)) throw new Error('Git worktree must stay inside the jobs workspace.');
     return ['worktree', 'add', '-b', params.branch, worktree, 'HEAD'];
   }
   if (command === 'add') return ['add', '--', ...(params.paths || [])];
@@ -28,8 +29,8 @@ function buildArgs(command, params) {
 
 function safeCwd(cwd) {
   const resolved = resolve(cwd || config.projectRoot);
-  const inProject = !relative(resolve(config.projectRoot), resolved).startsWith('..');
-  const inJobs = !relative(resolve(config.workspaceRoot, 'jobs'), resolved).startsWith('..');
+  const inProject = isPathInside(resolve(config.projectRoot), resolved);
+  const inJobs = isPathInside(resolve(config.workspaceRoot, 'jobs'), resolved);
   if (!inProject && !inJobs) throw new Error('Git working directory is outside the project and jobs roots.');
   return resolved;
 }

@@ -4,7 +4,7 @@ import { nanoid } from 'nanoid';
 import { JOB_STATES } from '../domain/jobState.js';
 import { config } from '../config.js';
 import { stableHash } from '../utils/hash.js';
-import { appendCommand, appendLog, getJobRecord, transitionJob, updateJob } from './jobStore.js';
+import { appendAudit, appendCommand, appendLog, getJobRecord, transitionJob, updateJob } from './jobStore.js';
 import { auditEvent } from './auditLog.js';
 import { buildOrgContext, isDataObjectAllowed, selectOrgForJob } from './orgRegistry.js';
 import { ensureJobWorkspace, writeOrgContext } from './jobWorkspace.js';
@@ -225,8 +225,10 @@ async function deploy(job, actor) {
     }
   }
   const deployment = { deploymentId: dataOperations.length ? '' : extractDeployId(result.stdout), targetOrgId: job.orgContext.expectedOrgId, sourceHash: job.validation.sourceHash, packageHash: job.validation.packageHash, commitHash: job.validation.commitHash || '', result: dataOperations.length ? JSON.stringify(recordResults) : result.stdout, recordResults, deployedAt: new Date().toISOString() };
-  await updateJob(job.jobId, { deployment });
-  if (job.jiraIssueKey) await addJiraComment(job.jiraIssueKey, completionComment(job, deployment));
+  const componentSummary = dataOperations.length ? summarizeDataDeployment(job, recordResults) : summarizeMetadataDeployment(job, result.stdout);
+  const finalDeployment = { ...deployment, summary: componentSummary.summary, components: componentSummary.components };
+  await updateJob(job.jobId, { deployment: finalDeployment });
+  if (job.jiraIssueKey) await addJiraComment(job.jiraIssueKey, completionComment(job, finalDeployment));
   await transitionJob(job.jobId, JOB_STATES.COMPLETED, { actor, reason: dataOperations.length ? 'Approved record operations executed and Jira updated.' : 'Approved package deployed and Jira updated.', approvalId: approval.approvalId });
 }
 
@@ -321,7 +323,17 @@ function completionComment(job, deployment) {
   const executionResult = recordResults.length
     ? `Record execution: ${recordResults.map((item) => `${item.operation} ${item.objectApiName} ${item.recordId}`).join(', ')}`
     : `Deployment ID: ${deployment.deploymentId || 'not returned'}`;
-  return [`AI agent job ${job.jobId} completed.`, `Salesforce org: ${job.orgContext.displayName} (${job.orgContext.expectedOrgId})`, `Environment: ${job.orgContext.environment}`, `Validation: ${job.validation.status} (${job.validation.validationId})`, executionResult, `Rollback: ${job.plan.rollbackPlan}`].join('\n');
+  const componentLines = (deployment.components || []).slice(0, 10).map((item) => `- ${item.displayName}${item.apiName ? ` (${item.apiName})` : ''}${item.briefInfo ? `: ${item.briefInfo}` : ''}`);
+  return [
+    `AI agent job ${job.jobId} completed.`,
+    `Salesforce org: ${job.orgContext.displayName} (${job.orgContext.expectedOrgId})`,
+    `Environment: ${job.orgContext.environment}`,
+    `Validation: ${job.validation.status} (${job.validation.validationId})`,
+    executionResult,
+    deployment.summary || 'Deployment completed successfully.',
+    ...(componentLines.length ? ['Deployed items:', ...componentLines] : []),
+    `Rollback: ${job.plan.rollbackPlan}`
+  ].join('\n');
 }
 function planReviewComment(job, plan, orgContext) {
   const steps = (plan.implementationSteps || []).map((step, index) => `${index + 1}. ${step}`);
@@ -343,6 +355,58 @@ function planReviewComment(job, plan, orgContext) {
   ].join('\n');
 }
 function noChangeCompletionComment(job, validation) { return [`AI agent job ${job.jobId} completed without deployment.`, `Salesforce org: ${job.orgContext.displayName} (${job.orgContext.expectedOrgId})`, `Validation: ${validation.status} (${validation.validationId})`, `Result: No Salesforce source changes were proposed, so deployment was not required.`].join('\n'); }
+function summarizeMetadataDeployment(job, stdout) {
+  const parsed = safeParseJson(stdout);
+  const details = parsed?.result?.details || parsed?.details || {};
+  const successes = Array.isArray(details.componentSuccesses) ? details.componentSuccesses : [];
+  const components = successes.length ? successes.map((item) => {
+    const apiName = String(item.fullName || item.name || item.filePath || item.componentName || '').trim();
+    const displayName = String(item.componentType || item.type || item.componentName || 'Metadata component').trim();
+    const briefInfo = compactText(item.problem || item.message || item.filePath || item.content || item.state || 'Deployed successfully');
+    return { displayName, apiName, briefInfo };
+  }) : fallbackMetadataComponents(job);
+  return {
+    summary: components.length
+      ? `Deployed ${components.length} Salesforce metadata component${components.length === 1 ? '' : 's'} successfully.`
+      : 'Deployment completed successfully.',
+    components
+  };
+}
+
+function summarizeDataDeployment(job, recordResults) {
+  const components = recordResults.map((item) => ({
+    displayName: item.operation === 'create' ? 'Create record' : item.operation === 'update' ? 'Update record' : 'Delete record',
+    apiName: item.objectApiName,
+    briefInfo: item.recordId ? `Record ID ${item.recordId}` : 'Executed against the verified target org'
+  }));
+  return {
+    summary: components.length
+      ? `Executed ${components.length} approved Salesforce record operation${components.length === 1 ? '' : 's'} successfully.`
+      : 'Approved Salesforce record operations completed successfully.',
+    components
+  };
+}
+
+function fallbackMetadataComponents(job) {
+  const fileOperations = job.plan?.fileOperations || [];
+  return fileOperations.map((operation) => ({
+    displayName: operation.metadataType || operation.componentType || 'Metadata component',
+    apiName: operation.apiName || operation.fullName || operation.path || '',
+    briefInfo: compactText(operation.description || operation.reason || operation.path || 'Approved metadata change')
+  }));
+}
+
+function safeParseJson(value) {
+  try {
+    return JSON.parse(value || '{}');
+  } catch {
+    return null;
+  }
+}
+
+function compactText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+}
 export function sfFailureMessage(result) {
   try {
     const parsed = JSON.parse(result.stdout || '{}');

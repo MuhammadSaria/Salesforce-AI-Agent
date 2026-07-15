@@ -49,6 +49,29 @@
                     </section>
                 </template>
 
+                <template if:true={deploymentComplete}>
+                    <section class="deployment-summary" aria-labelledby="deployment-summary-title">
+                        <h2 id="deployment-summary-title">Deployment complete</h2>
+                        <p class="deployment-summary-text">{deploymentSummaryText}</p>
+                        <template if:true={hasDeploymentItems}>
+                            <div class="deployment-table">
+                                <div class="deployment-table__header">
+                                    <span>Name</span>
+                                    <span>API Name</span>
+                                    <span>Brief Info</span>
+                                </div>
+                                <template for:each={deploymentItems} for:item="item">
+                                    <div class="deployment-table__row" key={item.key}>
+                                        <span>{item.displayName}</span>
+                                        <span>{item.apiName}</span>
+                                        <span>{item.briefInfo}</span>
+                                    </div>
+                                </template>
+                            </div>
+                        </template>
+                    </section>
+                </template>
+
                 <template if:true={canSelectOrg}>
                     <section class="action-band">
                         <lightning-combobox label="Target Org Selection" options={orgOptions} value={selectedOrgId} onchange={handleValue} data-field="selectedOrgId"></lightning-combobox>
@@ -58,7 +81,7 @@
 
                 <lightning-accordion allow-multiple-sections-open active-section-name="details">
                     <lightning-accordion-section name="details" label="Jira Task Details and Requirement Analysis">
-                        <dl class="details"><dt>Issue</dt><dd>{job.jiraIssueKey}</dd><dt>Summary</dt><dd>{job.requirement.summary}</dd><dt>Acceptance Criteria</dt><dd>{job.requirement.acceptanceCriteria}</dd><dt>Org Verification</dt><dd>{orgContext.verified.verifiedAt}</dd></dl>
+                        <dl class="details"><dt>Issue</dt><dd>{job.jiraIssueKey}</dd><dt>Summary</dt><dd>{job.requirement.summary}</dd><dt>Acceptance Criteria</dt><dd>{job.requirement.acceptanceCriteria}</dd><dt>Org Verification</dt><dd>{verifiedAt}</dd></dl>
                     </lightning-accordion-section>
                     <lightning-accordion-section name="plan" label="Implementation Plan for Approval">
                         <div class="human-plan">
@@ -86,26 +109,22 @@
                 </lightning-accordion>
 
                 <section class="conversation" aria-labelledby="conversation-title">
-                    <h2 id="conversation-title">Conversation and change requests</h2>
-                    <div class="conversation-stream" aria-live="polite">
-                        <template for:each={conversationItems} for:item="item">
-                            <article class={item.className} key={item.key}>
-                                <div class="message-heading"><strong>{item.author}</strong><span>{item.meta}</span></div>
-                                <p>{item.text}</p>
-                            </article>
-                        </template>
-                    </div>
+                    <h2 id="conversation-title">Manual User Instructions</h2>
+                    <p class="conversation-status">Use this area to add a change request or clarification for the current job. This remains available before implementation, after implementation, before deployment, and after deployment.</p>
                     <div class="instruction-band">
                         <lightning-textarea label="Request a change or add an instruction" value={instruction} data-field="instruction" onchange={handleValue} disabled={instructionInputDisabled}></lightning-textarea>
-                        <lightning-button variant="brand" label="Send Instruction" icon-name="utility:send" onclick={handleAddInstruction} disabled={instructionSendDisabled}></lightning-button>
+                        <div class="instruction-actions">
+                            <lightning-button label="Request Changes" icon-name="utility:edit" onclick={handleAddInstruction} disabled={instructionSendDisabled}></lightning-button>
+                            <lightning-button variant="brand" label="Send Instruction" icon-name="utility:send" onclick={handleAddInstruction} disabled={instructionSendDisabled}></lightning-button>
+                        </div>
                     </div>
-                    <template if:false={canAddInstruction}><p class="conversation-note">Change requests are available when the current operation finishes and before deployment begins.</p></template>
+                    <template if:false={canAddInstruction}><p class="conversation-note">Change requests are unavailable only when the job has been cancelled.</p></template>
                 </section>
 
                 <div class="actions">
                     <template if:true={canReviewPlan}>
                         <lightning-button variant="brand" label="Approve Implementation" icon-name="utility:check" onclick={handleApproveImplementation} disabled={isBusy}></lightning-button>
-                        <lightning-button label="Request Changes" icon-name="utility:edit" onclick={handleAddInstruction} disabled={isBusy}></lightning-button>
+                        <lightning-button label="Request Changes" icon-name="utility:edit" onclick={handleAddInstruction} disabled={instructionSendDisabled}></lightning-button>
                         <lightning-button variant="destructive-text" label="Reject" icon-name="utility:close" onclick={handleRejectPlan} disabled={isBusy}></lightning-button>
                     </template>
                     <template if:true={canImplement}><lightning-button variant="brand" label="Implement Locally" icon-name="utility:code_playground" onclick={handleImplement} disabled={isBusy}></lightning-button></template>

@@ -49,8 +49,8 @@ The middleware URL must be HTTPS and reachable from Salesforce. The Apex proxy a
 
 ## Example Flow
 
-1. Jira assigns `READUSA-42` to the agent and sends a signed webhook.
-2. Project/component mapping resolves `read_usa_sandbox`; `sf org display --target-org read-usa-sandbox --json` must match the stored Organization ID and URL.
+1. Jira assigns `TA-42` to the agent and sends a signed webhook.
+2. Project/component mapping resolves `providus_orgfarm_dev`; `sf org display --target-org orgfarm-dev --json` must match the stored Organization ID and URL.
 3. The worker extracts exact metadata names, writes `jobs/<jobId>/manifest/package.xml`, retrieves only that scope, analyzes dependencies, and publishes plan version 1 with “No changes have been made yet.”
 4. A developer clicks **Approve Implementation**, then **Implement Locally**. The worker creates `ai-agent/READUSA-42-<jobId>`, writes only approved files, and records a diff/source hash. It does not deploy.
 5. Validation performs an exact-manifest dry run against the same org. A deployer separately clicks **Approve Deployment** and **Deploy Approved Package**.

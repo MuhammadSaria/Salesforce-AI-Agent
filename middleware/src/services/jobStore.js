@@ -1,6 +1,7 @@
 import { access, mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { nanoid } from 'nanoid';
 import { redis } from '../queue/connection.js';
 import { assertTransition, JOB_STATES } from '../domain/jobState.js';
 import { config } from '../config.js';
@@ -29,6 +30,7 @@ export async function createJobRecord(input) {
     jiraSync: null,
     pendingRevision: false,
     followUpRequired: false,
+    conversation: [],
     metadataScope: null,
     plan: null,
     nextPlanVersion: 1,
@@ -140,6 +142,24 @@ export async function appendCommand(jobId, commandLog) {
   });
 }
 
+export async function appendConversation(jobId, entry) {
+  await withJobLock(jobId, async () => {
+    const record = await requiredJob(jobId);
+    const conversation = [...(record.conversation || []), {
+      conversationId: entry.conversationId || nanoid(),
+      role: entry.role || 'user',
+      kind: entry.kind || 'message',
+      source: entry.source || 'salesforce-ui',
+      text: String(entry.text || '').slice(0, 4000),
+      actor: String(entry.actor || ''),
+      timestamp: entry.timestamp || new Date().toISOString(),
+      responseToMessageId: entry.responseToMessageId || ''
+    }];
+    record.conversation = conversation.slice(-200);
+    await save(record);
+  });
+}
+
 export async function appendAudit(jobId, event) {
   await withJobLock(jobId, async () => {
     const record = await requiredJob(jobId);
@@ -160,7 +180,7 @@ export async function invalidateForPlanChange(jobId, actor) {
 async function invalidate(jobId, selection, actor, reason) {
   return withJobLock(jobId, async () => {
     const record = await requiredJob(jobId);
-    if ([JOB_STATES.COMPLETED, JOB_STATES.CANCELLED, JOB_STATES.DEPLOYING].includes(record.status)) {
+    if ([JOB_STATES.CANCELLED, JOB_STATES.DEPLOYING].includes(record.status)) {
       throw Object.assign(new Error('This job cannot be revised in its current state.'), { statusCode: 409 });
     }
     const now = new Date().toISOString();

@@ -33,6 +33,7 @@ export default class AgentChat extends LightningElement {
     get plan() { return this.job?.plan; }
     get validation() { return this.job?.validation; }
     get orgContext() { return this.job?.orgContext; }
+    get verifiedAt() { return this.orgContext?.verified?.verifiedAt || ''; }
     get status() { return this.job?.status || 'NO_JOB_SELECTED'; }
     get isProduction() { return this.orgContext?.environment === 'production'; }
     get canSelectOrg() { return this.status === 'AWAITING_ORG_SELECTION'; }
@@ -52,7 +53,7 @@ export default class AgentChat extends LightningElement {
     }
     get canRefreshAnalysis() { return ['RECEIVED', 'PLAN_REJECTED', 'ORG_VERIFICATION_FAILED'].includes(this.status); }
     get canCancel() { return !['COMPLETED', 'FAILED', 'CANCELLED', 'DEPLOYING'].includes(this.status); }
-    get canAddInstruction() { return !['IMPLEMENTING', 'VALIDATING', 'DEPLOYING', 'COMPLETED', 'FAILED', 'CANCELLED'].includes(this.status); }
+    get canAddInstruction() { return this.hasJob && this.status !== 'CANCELLED'; }
     get instructionInputDisabled() { return this.isBusy || !this.canAddInstruction; }
     get instructionSendDisabled() { return this.instructionInputDisabled || !this.instruction.trim(); }
     get jobOptions() { return this.jobs.map((item) => ({ label: `${item.jiraIssueKey || 'Manual'} - ${item.status}`, value: item.jobId })); }
@@ -69,6 +70,7 @@ export default class AgentChat extends LightningElement {
     get outOfScopeItems() { return this.listItems(this.plan?.outOfScope?.length ? this.plan.outOfScope : ['Unrelated Salesforce behavior and data.'], 'scope'); }
     get rollbackPlan() { return this.plan?.rollbackPlan || 'Revert the approved change using the captured baseline.'; }
     get planNotice() {
+        if (this.deploymentNotRequired) return 'Validation completed and no deployment was required because there were no Salesforce source changes.';
         if (this.deploymentComplete) return `Deployment completed successfully in ${this.orgContext.displayName}.`;
         if (this.validationFailed) return 'Validation failed. Nothing was deployed, and deployment remains blocked until the implementation is corrected and validated again.';
         if (this.validationComplete) return 'Validation passed. No deployment will occur until separate deployment approval is granted.';
@@ -79,41 +81,27 @@ export default class AgentChat extends LightningElement {
     get validationComplete() { return this.validation?.status === 'PASSED'; }
     get validationFailed() { return this.status === 'VALIDATION_FAILED' || this.validation?.status === 'FAILED'; }
     get validationFailureReason() { return this.validation?.failureReason || 'Salesforce did not accept the proposed change. Review the implementation and run validation again.'; }
-    get deploymentComplete() { return this.status === 'COMPLETED' && Boolean(this.job?.deployment); }
+    get deploymentNotRequired() { return this.status === 'COMPLETED' && Boolean(this.job?.deployment?.notRequired); }
+    get deploymentComplete() { return this.status === 'COMPLETED' && Boolean(this.job?.deployment) && !this.deploymentNotRequired; }
+    get hasDeploymentItems() { return this.deploymentItems.length > 0; }
+    get deploymentItems() { return (this.job?.deployment?.components || []).map((item, index) => ({ key: `deployment-${index}`, displayName: item.displayName || 'Deployment item', apiName: item.apiName || '', briefInfo: item.briefInfo || '' })); }
+    get deploymentSummaryText() { return this.job?.deployment?.summary || ''; }
     get implementationMilestoneClass() { return this.milestoneClass(this.implementationComplete, this.status === 'IMPLEMENTING'); }
     get validationMilestoneClass() { return this.validationFailed ? 'milestone milestone--failed' : this.milestoneClass(this.validationComplete, this.status === 'VALIDATING'); }
-    get deploymentMilestoneClass() { return this.milestoneClass(this.deploymentComplete, this.status === 'DEPLOYING'); }
+    get deploymentMilestoneClass() { return this.milestoneClass(this.deploymentComplete || this.deploymentNotRequired, this.status === 'DEPLOYING'); }
     get implementationMilestoneIcon() { return this.milestoneIcon(this.implementationComplete, this.status === 'IMPLEMENTING'); }
     get validationMilestoneIcon() { return this.validationFailed ? 'utility:error' : this.milestoneIcon(this.validationComplete, this.status === 'VALIDATING'); }
-    get deploymentMilestoneIcon() { return this.milestoneIcon(this.deploymentComplete, this.status === 'DEPLOYING'); }
+    get deploymentMilestoneIcon() { return this.milestoneIcon(this.deploymentComplete || this.deploymentNotRequired, this.status === 'DEPLOYING'); }
     get implementationMilestoneTitle() { return this.implementationComplete ? 'Local implementation completed' : this.status === 'IMPLEMENTING' ? 'Implementation in progress' : 'Implementation pending'; }
     get validationMilestoneTitle() { return this.validationFailed ? 'Validation failed' : this.validationComplete ? 'Validation passed' : this.status === 'VALIDATING' ? 'Validation in progress' : 'Validation pending'; }
-    get deploymentMilestoneTitle() { return this.deploymentComplete ? 'Deployment completed' : this.status === 'DEPLOYING' ? 'Deployment in progress' : 'Deployment pending'; }
+    get deploymentMilestoneTitle() { return this.deploymentNotRequired ? 'Completed without deployment' : this.deploymentComplete ? 'Deployment completed' : this.status === 'DEPLOYING' ? 'Deployment in progress' : 'Deployment pending'; }
     get implementationMilestoneMessage() { return this.implementationComplete ? 'The approved changes were created locally and committed.' : 'Waiting for implementation approval and local execution.'; }
     get validationMilestoneMessage() { return this.validationFailed ? 'Salesforce rejected part of the proposed implementation.' : this.validationComplete ? `Salesforce validation passed for ${this.orgContext.displayName}.` : 'Validation starts after the local implementation is complete.'; }
-    get deploymentMilestoneMessage() { return this.deploymentComplete ? `Successfully deployed to ${this.orgContext.displayName}. Deployment ID: ${this.job.deployment.deploymentId || 'not returned'}.` : this.validationFailed ? 'Deployment is blocked until validation passes.' : 'A separate deployment approval is required after validation.'; }
-    get conversationItems() {
-        const messages = (this.job?.instructions || []).map((item, index) => ({
-            key: item.instructionId || `instruction-${index}`,
-            author: item.source === 'jira-comment' ? 'Jira comment' : 'You',
-            meta: item.timestamp || '',
-            text: item.text,
-            className: 'message message--user'
-        }));
-        messages.push({ key: `agent-${this.status}-${this.plan?.planVersion || 0}`, author: 'Agent', meta: this.status, text: this.agentConversationMessage, className: 'message message--agent' });
-        return messages;
-    }
-    get agentConversationMessage() {
-        if (this.status === 'AWAITING_PLAN_APPROVAL') return `I prepared plan version ${this.plan?.planVersion || 1}. Review it, request another change, or approve its local implementation.`;
-        if (this.status === 'VALIDATION_FAILED') return `${this.validationFailureReason} Send a change request and I will prepare a revised plan, or revalidate after correcting the approved implementation.`;
-        if (this.status === 'AWAITING_DEPLOYMENT_APPROVAL') return 'Validation passed. You can approve deployment or send another change request; a change request will invalidate the current implementation and validation approvals.';
-        if (this.status === 'IMPLEMENTING') return 'I am implementing the approved plan locally. Change requests will be available when this operation finishes.';
-        if (this.status === 'VALIDATING') return 'I am validating the local implementation against the verified Salesforce org.';
-        if (this.status === 'DEPLOYING') return 'The separately approved package is being deployed. It is too late to revise this deployment job.';
-        if (this.status === 'COMPLETED') return 'The approved change was deployed and this job is complete. Create a new job for additional work.';
-        if (this.status === 'AWAITING_ORG_SELECTION') return 'Select the target Salesforce org before I analyze the requirement.';
-        if (['RECEIVED', 'VERIFYING_ORG', 'ANALYZING_JIRA', 'DISCOVERING_METADATA', 'RETRIEVING_RELEVANT_METADATA', 'ANALYZING_DEPENDENCIES'].includes(this.status)) return `I received the request and am preparing plan version ${this.job?.nextPlanVersion || 1}.`;
-        return 'Review the current job status and provide an instruction when change requests are available.';
+    get deploymentMilestoneMessage() {
+        if (this.deploymentNotRequired) return 'The job completed after validation. No deployment was required because there were no Salesforce source changes.';
+        if (this.deploymentComplete) return `Successfully deployed to ${this.orgContext.displayName}. ${this.deploymentSummaryText || `Deployment ID: ${this.job.deployment.deploymentId || 'not returned'}.`}`;
+        if (this.validationFailed) return 'Deployment is blocked until validation passes.';
+        return 'A separate deployment approval is required after validation.';
     }
     get createDisabled() { return this.isBusy || (!this.prompt.trim() && !this.jiraIssueKey.trim()); }
 
@@ -165,7 +153,7 @@ export default class AgentChat extends LightningElement {
 
     async action(action, payload) {
         await this.run(async () => {
-            await performJobAction({ jobId: this.job.jobId, action, payloadJson: JSON.stringify(payload) });
+            const response = this.parse(await performJobAction({ jobId: this.job.jobId, action, payloadJson: JSON.stringify(payload) }));
             await this.refreshJob();
             if (ACTIVE_STATES.has(this.status) || ['IMPLEMENTING', 'AWAITING_DEPLOYMENT_APPROVAL'].includes(this.status)) this.startPolling();
         });
@@ -196,7 +184,15 @@ export default class AgentChat extends LightningElement {
             logs: job?.logs || [],
             orgCandidates: job?.orgCandidates || [],
             requirement: job?.requirement || { summary: '', acceptanceCriteria: '' },
-            orgContext: job?.orgContext || { customerName: '', displayName: '', environment: '', expectedOrgId: '', verified: { verifiedAt: '' } },
+            orgContext: {
+                customerName: '',
+                displayName: '',
+                environment: '',
+                expectedOrgId: '',
+                verified: { verifiedAt: '' },
+                ...(job?.orgContext || {}),
+                verified: { verifiedAt: job?.orgContext?.verified?.verifiedAt || '' }
+            },
             metadataScope: job?.metadataScope || { primaryMetadata: [], dependencies: [] }
         };
     }

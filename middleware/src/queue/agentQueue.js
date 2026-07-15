@@ -23,7 +23,11 @@ export const agentQueue =
 export async function enqueueAgentJob(job, options = {}) {
   if (agentQueue) {
     const safeOptions = options.jobId ? { ...options, jobId: safeQueueJobId(options.jobId) } : options;
-    return agentQueue.add('process-agent-job', job, safeOptions);
+    try {
+      return await agentQueue.add('process-agent-job', job, safeOptions);
+    } catch (error) {
+      logger.warn({ jobId: job.jobId, error: error.message }, 'BullMQ enqueue failed, falling back to in-memory processing');
+    }
   }
 
   setImmediate(async () => {

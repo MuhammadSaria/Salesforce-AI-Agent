@@ -3,6 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import { config } from '../config.js';
 import { redactSecrets } from '../utils/sanitize.js';
+import { isPathInside } from '../utils/paths.js';
 import { auditSalesforceOperation } from './auditLog.js';
 
 const COMMANDS = {
@@ -203,7 +204,7 @@ export async function runSfCommand(command, params = {}, options = {}) {
 function validateManifestPath(manifest) {
   const fullPath = resolve(String(manifest || ''));
   const jobsRoot = resolve(config.workspaceRoot, 'jobs');
-  if (!fullPath.endsWith('.xml') || relative(jobsRoot, fullPath).startsWith('..')) {
+  if (!fullPath.endsWith('.xml') || !isPathInside(jobsRoot, fullPath)) {
     throw new Error('Manifest must be an XML file inside the isolated jobs workspace.');
   }
 }
@@ -211,7 +212,7 @@ function validateManifestPath(manifest) {
 function validateJobOutputPath(path) {
   const fullPath = resolve(String(path || ''));
   const jobsRoot = resolve(config.workspaceRoot, 'jobs');
-  if (relative(jobsRoot, fullPath).startsWith('..')) throw new Error('Output path must stay inside the isolated jobs workspace.');
+  if (!isPathInside(jobsRoot, fullPath)) throw new Error('Output path must stay inside the isolated jobs workspace.');
 }
 
 function validateApiName(value, label) {
@@ -240,7 +241,7 @@ function normalizeMetadataWritePath(path, jobId, localProjectRoot) {
   if (localProjectRoot) {
     const fullRoot = resolve(localProjectRoot);
     const jobsRoot = resolve(config.workspaceRoot, 'jobs');
-    if (relative(jobsRoot, fullRoot).startsWith('..')) throw new Error('Local implementation root must stay inside the jobs workspace.');
+    if (!isPathInside(jobsRoot, fullRoot)) throw new Error('Local implementation root must stay inside the jobs workspace.');
     return relative(config.projectRoot, resolve(fullRoot, relativePath)).replace(/\\/g, '/');
   }
   return `jobs/${jobId}/workspace/${relativePath}`;
@@ -349,9 +350,13 @@ function executeSf(args, timeoutMs, cwd = config.projectRoot) {
 
     let stdout = '';
     let stderr = '';
+    let killTimer;
     const timer = setTimeout(() => {
       child.kill('SIGTERM');
       stderr += `\nCommand timed out after ${timeoutMs}ms.`;
+      // Escalate to SIGKILL if the process ignores SIGTERM, so the job cannot hang forever.
+      killTimer = setTimeout(() => child.kill('SIGKILL'), 5000);
+      killTimer.unref();
     }, timeoutMs);
 
     child.stdout.on('data', (chunk) => {
@@ -362,6 +367,7 @@ function executeSf(args, timeoutMs, cwd = config.projectRoot) {
     });
     child.on('error', (error) => {
       clearTimeout(timer);
+      clearTimeout(killTimer);
       resolve({
         command: invocation.display,
         exitCode: 1,
@@ -371,6 +377,7 @@ function executeSf(args, timeoutMs, cwd = config.projectRoot) {
     });
     child.on('close', (exitCode) => {
       clearTimeout(timer);
+      clearTimeout(killTimer);
       resolve({
         command: invocation.display,
         exitCode,

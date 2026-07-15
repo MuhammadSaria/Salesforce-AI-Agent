@@ -1,7 +1,7 @@
 import { nanoid } from 'nanoid';
 import { JOB_STATES } from '../domain/jobState.js';
 import { claimJiraComment, getJiraComments } from './jira.js';
-import { appendAudit, getJobRecord, invalidateForPlanChange, updateJob } from './jobStore.js';
+import { appendAudit, appendConversation, getJobRecord, invalidateForPlanChange, updateJob } from './jobStore.js';
 
 const REVISION_READY_STATES = new Set([
   JOB_STATES.AWAITING_PLAN_APPROVAL,
@@ -35,6 +35,17 @@ export async function syncJiraComments(job, actor = 'jira-sync') {
     jiraCommentId: comment.id
   }))];
   await updateJob(job.jobId, { instructions, jiraSync });
+  for (const comment of selection) {
+    await appendConversation(job.jobId, {
+      conversationId: comment.id,
+      role: 'user',
+      kind: 'jira-comment',
+      source: 'jira-comment',
+      text: comment.body,
+      actor: comment.authorAccountId || comment.authorDisplayName || 'jira-user',
+      timestamp: comment.created || new Date().toISOString()
+    });
+  }
   await appendAudit(job.jobId, { actor, action: 'JIRA_COMMENTS_SYNCHRONIZED', result: 'accepted', safeMetadata: { commentIds: selection.map((comment) => comment.id), count: selection.length } });
 
   if (job.status === JOB_STATES.RECEIVED) return { added: selection.length, reanalysisRequired: true };

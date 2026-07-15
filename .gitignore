@@ -6,6 +6,7 @@ middleware/.ngrok-url
 middleware/node_modules/
 node_modules/
 middleware/logs/
+middleware/runtime-logs/
 middleware/*.log
 jobs/
 workspaces/

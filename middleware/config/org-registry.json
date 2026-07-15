@@ -9,13 +9,13 @@
       "environment": "developer",
       "instanceUrl": "https://orgfarm-9914d7f2f7-dev-ed.develop.my.salesforce.com",
       "expectedUsername": "saria4505102.8535b64837ad@agentforce.com",
-      "jiraProjectKeys": [],
+      "jiraProjectKeys": ["TA"],
       "jiraComponents": [],
       "jiraCustomFieldMappings": {},
       "repositoryPaths": ["."],
       "localProjectPath": "workspaces/providus_orgfarm_dev/project",
       "authenticationStatus": "connected",
-      "deploymentPermission": "blocked",
+      "deploymentPermission": "allowed",
       "productionApprovalRequired": false,
       "active": true,
       "allowedMetadataTypes": [
@@ -41,7 +41,8 @@
       "allowedOperations": [
         "read",
         "retrieve",
-        "validate"
+        "validate",
+        "deploy"
       ]
     },
     {
@@ -119,7 +120,7 @@
       "environment": "sandbox",
       "instanceUrl": "https://sudaneseamericanphysiciansassociat--devsandbox.sandbox.my.salesforce.com",
       "expectedUsername": "adil@providus.io.devsandbox",
-      "jiraProjectKeys": ["TA"],
+      "jiraProjectKeys": ["SAPA"],
       "jiraComponents": [],
       "jiraCustomFieldMappings": {},
       "repositoryPaths": ["."],

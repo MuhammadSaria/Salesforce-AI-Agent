@@ -3,6 +3,8 @@ import AgentChat from 'c/agentChat';
 import getJobs from '@salesforce/apex/AgentController.getJobs';
 import getOrgs from '@salesforce/apex/AgentController.getOrgs';
 import getAgentJob from '@salesforce/apex/AgentController.getAgentJob';
+import createAgentJob from '@salesforce/apex/AgentController.createAgentJob';
+import performJobAction from '@salesforce/apex/AgentController.performJobAction';
 
 jest.mock('@salesforce/apex/AgentController.getJobs', () => ({ default: jest.fn() }), { virtual: true });
 jest.mock('@salesforce/apex/AgentController.getOrgs', () => ({ default: jest.fn() }), { virtual: true });
@@ -14,6 +16,7 @@ describe('c-agent-chat', () => {
     beforeEach(() => {
         getJobs.mockResolvedValue(JSON.stringify({ jobs: [] }));
         getOrgs.mockResolvedValue(JSON.stringify({ orgs: [] }));
+        createAgentJob.mockResolvedValue(JSON.stringify({ jobId: 'job-1', status: 'RECEIVED' }));
     });
 
     afterEach(() => {
@@ -21,13 +24,14 @@ describe('c-agent-chat', () => {
         jest.clearAllMocks();
     });
 
-    it('renders the supervised job entry controls', async () => {
+    it('renders the supervised job entry controls without chat UI', async () => {
         const element = createElement('c-agent-chat', { is: AgentChat });
         document.body.appendChild(element);
         await flushPromises();
         expect(element.shadowRoot.querySelector('lightning-input')).not.toBeNull();
         expect(element.shadowRoot.querySelector('lightning-textarea')).not.toBeNull();
         expect(buttonByLabel(element, 'Create Job')).not.toBeNull();
+        expect(buttonByLabel(element, 'Send Question')).toBeUndefined();
     });
 
     it('shows production warning and keeps implementation and deployment as separate actions', async () => {
@@ -46,38 +50,14 @@ describe('c-agent-chat', () => {
         expect(buttonByLabel(element, 'Approve Deployment')).toBeUndefined();
     });
 
-    it('hides the deployment action after the job completes', async () => {
+    it('shows completed-without-deployment state distinctly', async () => {
         const job = {
-            jobId: 'job-completed', status: 'COMPLETED', logs: [],
+            jobId: 'job-no-deploy', status: 'COMPLETED', logs: [],
             orgContext: { displayName: 'Sandbox', environment: 'sandbox', expectedOrgId: '00D000000000001', verified: {} },
-            plan: { notice: 'Deployment completed.' },
-            validation: { validationId: 'validation-1' },
-            implementation: { commitHash: 'commit-1' },
-            deployment: { deploymentId: '0Af000000000001' },
-            approvals: [{ approvalType: 'DEPLOYMENT', validationId: 'validation-1', decision: 'APPROVED' }],
-            metadataScope: { primaryMetadata: [], dependencies: [] }
-        };
-        getJobs.mockResolvedValue(JSON.stringify({ jobs: [job] }));
-        getAgentJob.mockResolvedValue(JSON.stringify(job));
-
-        const element = createElement('c-agent-chat', { is: AgentChat });
-        document.body.appendChild(element);
-        await flushPromises();
-
-        expect(buttonByLabel(element, 'Deploy Approved Package')).toBeUndefined();
-        expect(element.shadowRoot.querySelector('.milestones').textContent).toContain('Deployment completed');
-        expect(element.shadowRoot.querySelector('.milestones').textContent).toContain('0Af000000000001');
-        expect(textareaByLabel(element, 'Request a change or add an instruction').disabled).toBe(true);
-    });
-
-    it('clearly reports completed implementation and validation milestones', async () => {
-        const job = {
-            jobId: 'job-validated', status: 'AWAITING_DEPLOYMENT_APPROVAL', logs: [],
-            orgContext: { displayName: 'SAPA Sandbox', environment: 'sandbox', expectedOrgId: '00D000000000001', verified: {} },
-            plan: { notice: 'Separate deployment approval is required.' },
-            implementation: { commitHash: 'commit-1' },
+            plan: { notice: 'No changes were required.' },
             validation: { validationId: 'validation-1', status: 'PASSED' },
-            approvals: [], metadataScope: { primaryMetadata: [], dependencies: [] }
+            deployment: { notRequired: true, reason: 'No source changes were proposed.' },
+            metadataScope: { primaryMetadata: [], dependencies: [] }
         };
         getJobs.mockResolvedValue(JSON.stringify({ jobs: [job] }));
         getAgentJob.mockResolvedValue(JSON.stringify(job));
@@ -87,22 +67,24 @@ describe('c-agent-chat', () => {
         await flushPromises();
 
         const milestones = element.shadowRoot.querySelector('.milestones').textContent;
-        expect(milestones).toContain('Local implementation completed');
-        expect(milestones).toContain('Validation passed');
-        expect(milestones).toContain('Deployment pending');
-        expect(buttonByLabel(element, 'Approve Deployment')).not.toBeUndefined();
-        const sectionLabels = [...element.shadowRoot.querySelectorAll('lightning-accordion-section')].map((section) => section.label);
-        expect(sectionLabels).toEqual(['Jira Task Details and Requirement Analysis', 'Implementation Plan for Approval']);
+        expect(milestones).toContain('Completed without deployment');
+        expect(milestones).toContain('No deployment was required');
+        expect(element.shadowRoot.querySelector('.notice').textContent).toContain('Validation completed and no deployment was required');
     });
 
-    it('replaces deployment approval with one execution action after approval', async () => {
+    it('shows deployment details after completion and keeps instructions available', async () => {
         const job = {
-            jobId: 'job-approved', status: 'AWAITING_DEPLOYMENT_APPROVAL', logs: [],
-            orgContext: { displayName: 'SAPA Sandbox', environment: 'sandbox', expectedOrgId: '00D000000000001', verified: {} },
-            plan: { notice: 'Separate deployment approval is required.' },
-            implementation: { commitHash: 'commit-1' },
+            jobId: 'job-complete', status: 'COMPLETED', logs: [],
+            orgContext: { customerName: 'Customer', displayName: 'Sandbox', environment: 'sandbox', expectedOrgId: '00D000000000001', verified: {} },
+            plan: { notice: 'No changes were required.' },
             validation: { validationId: 'validation-1', status: 'PASSED' },
-            approvals: [{ approvalType: 'DEPLOYMENT', validationId: 'validation-1', decision: 'APPROVED' }],
+            deployment: {
+                summary: 'Deployed 2 Salesforce metadata components successfully.',
+                components: [
+                    { displayName: 'Custom Field', apiName: 'Account.Customer_Reference__c', briefInfo: 'Added an external customer reference field.' },
+                    { displayName: 'Flow', apiName: 'Account_Update_Contact_Flow', briefInfo: 'Updated the account workflow.' }
+                ]
+            },
             metadataScope: { primaryMetadata: [], dependencies: [] }
         };
         getJobs.mockResolvedValue(JSON.stringify({ jobs: [job] }));
@@ -112,8 +94,38 @@ describe('c-agent-chat', () => {
         document.body.appendChild(element);
         await flushPromises();
 
-        expect(buttonByLabel(element, 'Approve Deployment')).toBeUndefined();
-        expect(buttonByLabel(element, 'Deploy Approved Package')).not.toBeUndefined();
+        expect(element.shadowRoot.querySelector('.deployment-summary').textContent).toContain('Deployment complete');
+        expect(element.shadowRoot.querySelector('.deployment-summary').textContent).toContain('Account.Customer_Reference__c');
+        expect(textareaByLabel(element, 'Request a change or add an instruction').disabled).toBe(false);
+        expect(buttonByLabel(element, 'Send Instruction')).not.toBeUndefined();
+    });
+
+    it('submits a drafted instruction when Request Changes is clicked', async () => {
+        const job = {
+            jobId: 'job-instruction', status: 'AWAITING_PLAN_APPROVAL', approvals: [], logs: [],
+            orgContext: { displayName: 'Sandbox', environment: 'sandbox', expectedOrgId: '00D000000000001', verified: {} },
+            plan: { notice: 'Review the plan.' },
+            metadataScope: { primaryMetadata: [], dependencies: [] }
+        };
+        getJobs.mockResolvedValue(JSON.stringify({ jobs: [job] }));
+        getAgentJob.mockResolvedValue(JSON.stringify(job));
+        performJobAction.mockResolvedValue(JSON.stringify({ instructions: [{ instructionId: 'instruction-1', text: 'Please revise the plan.' }] }));
+
+        const element = createElement('c-agent-chat', { is: AgentChat });
+        document.body.appendChild(element);
+        await flushPromises();
+
+        const instructionField = textareaByLabel(element, 'Request a change or add an instruction');
+        instructionField.value = 'Please revise the plan.';
+        instructionField.dispatchEvent(new CustomEvent('change', { detail: { value: 'Please revise the plan.' }, bubbles: true }));
+        buttonByLabel(element, 'Request Changes').click();
+        await flushPromises();
+
+        expect(performJobAction).toHaveBeenCalledWith(expect.objectContaining({
+            jobId: 'job-instruction',
+            action: 'instructions',
+            payloadJson: JSON.stringify({ instruction: 'Please revise the plan.' })
+        }));
     });
 
     it('explains a failed validation in human-readable language', async () => {
@@ -123,7 +135,6 @@ describe('c-agent-chat', () => {
             plan: { notice: 'No changes have been deployed.' },
             implementation: { commitHash: 'commit-1' },
             validation: { status: 'FAILED', failureReason: 'The Flow email recipient is configured in a format Salesforce does not accept.' },
-            instructions: [{ instructionId: 'instruction-1', text: 'Use a direct email address instead of a collection.', timestamp: '2026-07-14T12:00:00Z', source: 'jira-comment' }],
             metadataScope: { primaryMetadata: [], dependencies: [] }
         };
         getJobs.mockResolvedValue(JSON.stringify({ jobs: [job] }));
@@ -139,9 +150,6 @@ describe('c-agent-chat', () => {
         expect(failure.textContent).toContain('Nothing was deployed');
         expect(element.shadowRoot.querySelector('.milestone--failed').textContent).toContain('Validation failed');
         expect(buttonByLabel(element, 'Approve Deployment')).toBeUndefined();
-        expect(element.shadowRoot.querySelector('.conversation-stream').textContent).toContain('Use a direct email address instead of a collection.');
-        expect(element.shadowRoot.querySelector('.conversation-stream').textContent).toContain('Jira comment');
-        expect(element.shadowRoot.querySelector('.conversation-stream').textContent).toContain('Send a change request');
         expect(textareaByLabel(element, 'Request a change or add an instruction').disabled).toBe(false);
         expect(buttonByLabel(element, 'Send Instruction')).not.toBeUndefined();
     });

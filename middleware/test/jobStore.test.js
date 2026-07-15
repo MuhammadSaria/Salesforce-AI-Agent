@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { config } from '../src/config.js';
-import { appendLog, createJobRecord, getJobRecord, invalidateForPlanChange, transitionJob, updateJob } from '../src/services/jobStore.js';
+import { appendConversation, appendLog, createJobRecord, getJobRecord, invalidateForPlanChange, transitionJob, updateJob } from '../src/services/jobStore.js';
 import { JOB_STATES } from '../src/domain/jobState.js';
 
 test('job snapshots survive memory loss and concurrent mutations are serialized', async () => {
@@ -71,6 +71,51 @@ test('a conversational revision archives artifacts and advances the plan version
     assert.equal(revised.revisions.length, 1);
     assert.equal(revised.revisions[0].validation.validationId, 'validation-1');
     assert.equal(revised.revisions[0].approvals.length, 2);
+  } finally {
+    config.workspaceRoot = originalRoot;
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('conversation messages are stored independently from revision instructions', async () => {
+  const originalRoot = config.workspaceRoot;
+  const workspace = await mkdtemp(join(tmpdir(), 'agent-job-store-'));
+  config.workspaceRoot = workspace;
+  const jobId = `conversation-${Date.now()}`;
+
+  try {
+    await createJobRecord({ jobId, userId: 'test-user' });
+    await appendConversation(jobId, { conversationId: 'msg-1', role: 'user', kind: 'question', text: 'What happens next?', actor: 'test-user' });
+    const job = await getJobRecord(jobId);
+    assert.equal(job.conversation.length, 1);
+    assert.equal(job.conversation[0].text, 'What happens next?');
+    assert.equal(job.instructions.length, 0);
+  } finally {
+    config.workspaceRoot = originalRoot;
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('completed jobs can be reopened by a new instruction revision', async () => {
+  const originalRoot = config.workspaceRoot;
+  const workspace = await mkdtemp(join(tmpdir(), 'agent-job-store-'));
+  config.workspaceRoot = workspace;
+  const jobId = `reopen-${Date.now()}`;
+
+  try {
+    await createJobRecord({ jobId, userId: 'test-user' });
+    await updateJob(jobId, {
+      status: JOB_STATES.COMPLETED,
+      orgContext: { orgRegistryId: 'sapa', expectedOrgId: '00DTEST' },
+      plan: { planVersion: 1, planHash: 'plan-1' },
+      deployment: { deploymentId: 'deploy-1' }
+    });
+
+    const revised = await invalidateForPlanChange(jobId, 'reviewer');
+    assert.equal(revised.status, JOB_STATES.RECEIVED);
+    assert.equal(revised.nextPlanVersion, 2);
+    assert.equal(revised.deployment, null);
+    assert.equal(revised.context.selectedOrgRegistryId, 'sapa');
   } finally {
     config.workspaceRoot = originalRoot;
     await rm(workspace, { recursive: true, force: true });

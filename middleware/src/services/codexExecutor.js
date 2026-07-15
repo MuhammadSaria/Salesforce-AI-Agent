@@ -172,11 +172,17 @@ function runCodex(prompt, outputFile, schemaFile, workDir) {
     const commandArgs = process.platform === 'win32' ? ['/d', '/s', '/c', executable, ...args] : args;
     const child = spawn(command, commandArgs, { shell: false, windowsHide: true, cwd: workDir, env: codexEnvironment(), stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = ''; let stderr = '';
-    const timer = setTimeout(() => { child.kill('SIGTERM'); stderr += '\nCodex planning timed out.'; }, config.codexTimeoutMs);
+    let killTimer;
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM'); stderr += '\nCodex planning timed out.';
+      // Escalate to SIGKILL if the process ignores SIGTERM, so planning cannot hang forever.
+      killTimer = setTimeout(() => child.kill('SIGKILL'), 5000);
+      killTimer.unref();
+    }, config.codexTimeoutMs);
     child.stdin.end(prompt);
     child.stdout.on('data', (chunk) => { stdout += chunk; }); child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.on('error', (error) => { clearTimeout(timer); resolve({ exitCode: 1, stdout: '', stderr: redactSecrets(error.message) }); });
-    child.on('close', (exitCode) => { clearTimeout(timer); resolve({ exitCode, stdout: redactSecrets(stdout), stderr: redactSecrets(stderr) }); });
+    child.on('error', (error) => { clearTimeout(timer); clearTimeout(killTimer); resolve({ exitCode: 1, stdout: '', stderr: redactSecrets(error.message) }); });
+    child.on('close', (exitCode) => { clearTimeout(timer); clearTimeout(killTimer); resolve({ exitCode, stdout: redactSecrets(stdout), stderr: redactSecrets(stderr) }); });
   });
 }
 

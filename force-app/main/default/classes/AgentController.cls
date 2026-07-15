@@ -65,6 +65,8 @@ public with sharing class AgentController {
         request.setHeader('Accept', 'application/json');
         request.setHeader('ngrok-skip-browser-warning', 'true');
         request.setHeader('X-Agent-User-Id', UserInfo.getUserId());
+        request.setHeader('X-Agent-Org-Id', UserInfo.getOrganizationId());
+        request.setHeader('X-Agent-Source', 'Salesforce-Apex');
         String agentRole = FeatureManagement.checkPermission('AI_Agent_Admin')
             ? 'admin'
             : (FeatureManagement.checkPermission('AI_Agent_Deploy') ? 'deployer' : 'developer');
@@ -80,7 +82,7 @@ public with sharing class AgentController {
             throw new AuraHandledException('Agent middleware callout failed.');
         }
         if (response.getStatusCode() < 200 || response.getStatusCode() >= 300) {
-            throw new AuraHandledException(extractErrorMessage(response.getBody()));
+            throw new AuraHandledException('Agent middleware returned HTTP ' + response.getStatusCode() + ': ' + extractErrorMessage(response.getBody()));
         }
         return response;
     }
@@ -94,14 +96,27 @@ public with sharing class AgentController {
     }
 
     private static String extractErrorMessage(String body) {
+        if (String.isBlank(body)) {
+            return 'Empty response body.';
+        }
         try {
             Map<String, Object> decoded = (Map<String, Object>) JSON.deserializeUntyped(body);
             Object errorValue = decoded.get('error');
             if (errorValue instanceof Map<String, Object>) {
-                return String.valueOf(((Map<String, Object>) errorValue).get('message'));
+                Object nestedMessage = ((Map<String, Object>) errorValue).get('message');
+                if (nestedMessage != null) return String.valueOf(nestedMessage);
+                Object nestedError = ((Map<String, Object>) errorValue).get('error');
+                if (nestedError != null) return String.valueOf(nestedError);
+            }
+            if (errorValue != null) {
+                return String.valueOf(errorValue);
+            }
+            Object messageValue = decoded.get('message');
+            if (messageValue != null) {
+                return String.valueOf(messageValue);
             }
         } catch (Exception ignored) {
         }
-        return 'Agent middleware returned an error.';
+        return body.length() > 300 ? body.substring(0, 300) + '...' : body;
     }
 }

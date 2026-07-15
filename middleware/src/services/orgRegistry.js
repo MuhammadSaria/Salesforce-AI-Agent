@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { config } from '../config.js';
+import { isPathInside } from '../utils/paths.js';
 
 const VALID_ENVIRONMENTS = new Set(['developer', 'scratch', 'sandbox', 'partial-copy', 'full-copy', 'production']);
 let cachedRegistry;
@@ -76,7 +77,7 @@ export function selectOrgFromRegistry(orgs, job) {
 
   if (context.repositoryPath) {
     const repositoryPath = resolve(String(context.repositoryPath));
-    signals.push({ source: 'repositoryMapping', matches: activeOrgs.filter((org) => org.repositoryPaths.some((path) => repositoryPath.startsWith(resolve(config.projectRoot, path)))) });
+    signals.push({ source: 'repositoryMapping', matches: activeOrgs.filter((org) => org.repositoryPaths.some((path) => isPathInside(resolve(config.projectRoot, path), repositoryPath))) });
   }
 
   if (!signals.length) return selectionResult([], [], activeOrgs);
