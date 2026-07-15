@@ -5,6 +5,7 @@ import { nanoid } from 'nanoid';
 import { redis } from '../queue/connection.js';
 import { assertTransition, JOB_STATES } from '../domain/jobState.js';
 import { config } from '../config.js';
+import { assertWorkItemTransition, selectAffectedSpecialistAgents } from '../domain/specialistAgents.js';
 
 const memoryJobs = new Map();
 const localLocks = new Map();
@@ -33,6 +34,12 @@ export async function createJobRecord(input) {
     conversation: [],
     metadataScope: null,
     plan: null,
+    iteration: 1,
+    orchestration: null,
+    workItems: [],
+    specialistMessages: [],
+    fileOwnership: [],
+    revisionContext: null,
     nextPlanVersion: 1,
     revisions: [],
     instructions: [],
@@ -168,16 +175,67 @@ export async function appendAudit(jobId, event) {
   });
 }
 
+export async function transitionWorkItem(jobId, workItemId, newStatus, details = {}) {
+  return withJobLock(jobId, async () => {
+    const record = await requiredJob(jobId);
+    const index = (record.workItems || []).findIndex((item) => item.workItemId === workItemId);
+    if (index < 0) throw Object.assign(new Error('Specialist work item not found.'), { statusCode: 404, code: 'WORK_ITEM_NOT_FOUND' });
+    const current = record.workItems[index];
+    assertWorkItemTransition(current.status, newStatus);
+    const now = new Date().toISOString();
+    record.workItems[index] = { ...current, ...details, status: newStatus, updatedAt: now };
+    record.updatedAt = now;
+    await save(record);
+    return record.workItems[index];
+  });
+}
+
+export async function appendSpecialistMessage(jobId, message) {
+  return withJobLock(jobId, async () => {
+    const record = await requiredJob(jobId);
+    record.specialistMessages = [...(record.specialistMessages || []), message].slice(-1000);
+    record.updatedAt = new Date().toISOString();
+    await save(record);
+    return message;
+  });
+}
+
+export async function claimFileOwnership(jobId, path, workItemId, owningAgent, baselineHash) {
+  return withJobLock(jobId, async () => {
+    const record = await requiredJob(jobId);
+    const ownership = (record.fileOwnership || []).find((item) => item.path === path);
+    if (!ownership) throw Object.assign(new Error(`No approved file ownership exists for ${path}.`), { code: 'FILE_OWNERSHIP_MISSING' });
+    if (ownership.workItemId !== workItemId || ownership.owningAgent !== owningAgent) throw Object.assign(new Error(`File ownership mismatch for ${path}.`), { code: 'FILE_OWNERSHIP_CONFLICT' });
+    if (ownership.lockStatus === 'LOCKED') throw Object.assign(new Error(`${path} is already locked by a specialist agent.`), { statusCode: 409, code: 'FILE_ALREADY_LOCKED' });
+    Object.assign(ownership, { lockStatus: 'LOCKED', baselineHash, currentHash: '', updatedAt: new Date().toISOString() });
+    record.updatedAt = ownership.updatedAt;
+    await save(record);
+    return ownership;
+  });
+}
+
+export async function releaseFileOwnership(jobId, path, workItemId, currentHash) {
+  return withJobLock(jobId, async () => {
+    const record = await requiredJob(jobId);
+    const ownership = (record.fileOwnership || []).find((item) => item.path === path);
+    if (!ownership || ownership.workItemId !== workItemId || ownership.lockStatus !== 'LOCKED') throw Object.assign(new Error(`Active file ownership was not found for ${path}.`), { code: 'FILE_OWNERSHIP_CONFLICT' });
+    Object.assign(ownership, { lockStatus: 'RELEASED', currentHash, updatedAt: new Date().toISOString() });
+    record.updatedAt = ownership.updatedAt;
+    await save(record);
+    return ownership;
+  });
+}
+
 export async function invalidateForOrgChange(jobId, selection, actor) {
-  return invalidate(jobId, selection, actor, 'Target org changed; plan, approvals, validation, hashes, and deployment package invalidated.');
+  return invalidate(jobId, selection, actor, 'Target org changed; plan, approvals, validation, hashes, and deployment package invalidated.', { orgChanged: true });
 }
 
-export async function invalidateForPlanChange(jobId, actor) {
+export async function invalidateForPlanChange(jobId, actor, options = {}) {
   const record = await requiredJob(jobId);
-  return invalidate(jobId, record.orgContext?.orgRegistryId || record.context?.selectedOrgRegistryId || '', actor, 'Requirements changed; plan, approvals, validation, hashes, and deployment package invalidated.');
+  return invalidate(jobId, record.orgContext?.orgRegistryId || record.context?.selectedOrgRegistryId || '', actor, 'Requirements changed; plan, approvals, validation, hashes, and deployment package invalidated.', options);
 }
 
-async function invalidate(jobId, selection, actor, reason) {
+async function invalidate(jobId, selection, actor, reason, options = {}) {
   return withJobLock(jobId, async () => {
     const record = await requiredJob(jobId);
     if ([JOB_STATES.CANCELLED, JOB_STATES.DEPLOYING].includes(record.status)) {
@@ -199,11 +257,30 @@ async function invalidate(jobId, selection, actor, reason) {
         implementation: record.implementation,
         validation: record.validation,
         deployment: record.deployment,
-        diff: record.diff
+        diff: record.diff,
+        iteration: record.iteration,
+        orchestration: record.orchestration,
+        workItems: record.workItems,
+        specialistMessages: record.specialistMessages,
+        fileOwnership: record.fileOwnership
       });
     }
+    const affectedAgentIds = options.orgChanged
+      ? (record.workItems || []).map((item) => item.assignedSpecialistAgent)
+      : (options.instruction
+          ? selectAffectedSpecialistAgents(options.instruction)
+          : (record.workItems || []).map((item) => item.assignedSpecialistAgent));
+    const affected = new Set(affectedAgentIds);
+    const preservedWorkItems = options.orgChanged ? [] : (record.workItems || []).filter((item) => item.status === 'COMPLETED' && !affected.has(item.assignedSpecialistAgent));
+    const revisionContext = options.orgChanged ? null : {
+      previousPlanVersion: record.plan?.planVersion || currentPlanVersion,
+      previousMaterialChangeHash: record.plan?.materialChangeHash || '',
+      previousApprovals: record.approvals || [],
+      affectedAgentIds,
+      preservedWorkItems
+    };
     record.stateHistory.push({ previousState: record.status, newState: JOB_STATES.RECEIVED, timestamp: now, actor, reason, approvalId: '', orgId: '' });
-    Object.assign(record, { status: JOB_STATES.RECEIVED, context: { ...record.context, selectedOrgRegistryId: selection }, orgContext: null, orgCandidates: [], orgRoutingEvidence: [], metadataScope: null, plan: null, nextPlanVersion: Math.max(1, currentPlanVersion + 1), revisions, approvals: [], validation: null, deployment: null, implementation: null, diff: '', pendingRevision: false, followUpRequired: false, error: '', updatedAt: now });
+    Object.assign(record, { status: JOB_STATES.RECEIVED, context: { ...record.context, selectedOrgRegistryId: selection }, orgContext: null, orgCandidates: [], orgRoutingEvidence: [], metadataScope: null, plan: null, nextPlanVersion: Math.max(1, currentPlanVersion + 1), iteration: Math.max(1, currentPlanVersion + 1), orchestration: null, workItems: preservedWorkItems, specialistMessages: [], fileOwnership: [], revisionContext, revisions, approvals: [], validation: null, deployment: null, implementation: null, diff: '', pendingRevision: false, followUpRequired: false, error: '', updatedAt: now });
     await save(record);
     return record;
   });

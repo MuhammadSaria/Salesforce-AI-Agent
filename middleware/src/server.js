@@ -6,7 +6,7 @@ import { nanoid } from 'nanoid';
 import { config } from './config.js';
 import { logger } from './logger.js';
 import { enqueueAgentJob } from './queue/agentQueue.js';
-import { appendAudit, createJobRecord, getJobRecord, invalidateForOrgChange, invalidateForPlanChange, listJobRecords, transitionJob, updateJob } from './services/jobStore.js';
+import { appendAudit, appendConversation, createJobRecord, getJobRecord, invalidateForOrgChange, invalidateForPlanChange, listJobRecords, transitionJob, updateJob } from './services/jobStore.js';
 import { sanitizePrompt, sanitizeUntrustedText } from './utils/sanitize.js';
 import { requireApiAuth, requireRole } from './middleware/auth.js';
 import { getRegisteredOrg, listPublicOrgs } from './services/orgRegistry.js';
@@ -15,6 +15,8 @@ import { JOB_STATES } from './domain/jobState.js';
 import { startJiraPoller } from './services/jiraPoller.js';
 import { latestApprovedApproval } from './domain/approval.js';
 import { humanizeValidationFailure } from './utils/validationFailure.js';
+import { approveSpecialistWorkItems, overallSpecialistStatus } from './services/orchestrator.js';
+import { WORK_ITEM_STATUSES } from './domain/specialistAgents.js';
 
 export function createApp() {
   const app = express();
@@ -52,6 +54,8 @@ export function createApp() {
   app.get('/api/jobs/:jobId/diff', jobRoute((req, res, job) => res.type('text/plain').send(job.diff || '')));
   app.get('/api/jobs/:jobId/logs', jobRoute((req, res, job) => res.json({ logs: job.logs, commands: job.commands })));
   app.get('/api/jobs/:jobId/audit', jobRoute((req, res, job) => res.json({ stateHistory: job.stateHistory, audit: job.audit })));
+  app.get('/api/jobs/:jobId/work-items', jobRoute((req, res, job) => res.json({ overallStatus: overallSpecialistStatus(job.workItems || []), workItems: job.workItems || [] })));
+  app.get('/api/jobs/:jobId/specialist-messages', jobRoute((req, res, job) => res.json({ messages: job.specialistMessages || [] })));
 
   app.post('/api/jobs/:jobId/select-org', requireRole('developer', 'deployer', 'admin'), jobRoute(async (req, res, job) => {
     const org = await getRegisteredOrg(String(req.body?.orgRegistryId || ''));
@@ -84,7 +88,7 @@ export function createApp() {
       await appendAudit(job.jobId, { actor: req.actor.id, action: 'USER_INSTRUCTION_ADDED', result: 'queued', safeMetadata: { instructionLength: text.length, currentStatus: job.status } });
       return res.status(202).json({ instructions, status: job.status, nextPlanVersion: revised.nextPlanVersion, message: 'Instruction accepted. It will be applied after the current operation finishes.' });
     }
-    if (![JOB_STATES.RECEIVED, JOB_STATES.AWAITING_ORG_SELECTION].includes(job.status)) revised = await invalidateForPlanChange(job.jobId, req.actor.id);
+    if (![JOB_STATES.RECEIVED, JOB_STATES.AWAITING_ORG_SELECTION].includes(job.status)) revised = await invalidateForPlanChange(job.jobId, req.actor.id, { instruction: text });
     await appendAudit(job.jobId, { actor: req.actor.id, action: 'USER_INSTRUCTION_ADDED', result: 'accepted', safeMetadata: { instructionLength: text.length, nextPlanVersion: revised.nextPlanVersion } });
     if (revised.status === JOB_STATES.RECEIVED) {
       await enqueueAgentJob({ jobId: job.jobId, action: 'analyze', actor: req.actor.id }, { jobId: `${job.jobId}:analyze:instruction:${Date.now()}` });
@@ -97,7 +101,7 @@ export function createApp() {
     if (job.status !== JOB_STATES.AWAITING_PLAN_APPROVAL) return conflict(res, 'Job is not awaiting implementation approval.');
     if (Number(req.body?.planVersion) !== job.plan?.planVersion) return conflict(res, 'Approval must identify the current plan version.');
     const approval = approvalRecord(job, req, 'IMPLEMENTATION', { decision: 'APPROVED' });
-    await updateJob(job.jobId, { approvals: [...job.approvals, approval] });
+    await updateJob(job.jobId, { approvals: [...job.approvals, approval], workItems: approveSpecialistWorkItems(job.workItems || [], approval.approvalId) });
     await transitionJob(job.jobId, JOB_STATES.IMPLEMENTING, { actor: req.actor.id, reason: 'Explicit implementation approval recorded.', approvalId: approval.approvalId });
     await enqueueAgentJob({ jobId: job.jobId, action: 'implement', actor: req.actor.id }, { jobId: `${job.jobId}:implement:${Date.now()}` });
     res.status(201).json({ approval });
@@ -105,7 +109,10 @@ export function createApp() {
   app.post('/api/jobs/:jobId/reject-plan', requireRole('developer', 'deployer', 'admin'), jobRoute(async (req, res, job) => {
     if (job.status !== JOB_STATES.AWAITING_PLAN_APPROVAL) return conflict(res, 'Job is not awaiting plan review.');
     const approval = approvalRecord(job, req, 'IMPLEMENTATION', { decision: 'REJECTED' });
-    await updateJob(job.jobId, { approvals: [...job.approvals, approval] });
+    await updateJob(job.jobId, {
+      approvals: [...job.approvals, approval],
+      workItems: (job.workItems || []).map((item) => [WORK_ITEM_STATUSES.COMPLETED, WORK_ITEM_STATUSES.CANCELLED].includes(item.status) ? item : { ...item, status: WORK_ITEM_STATUSES.CHANGES_REQUIRED, updatedAt: new Date().toISOString() })
+    });
     await transitionJob(job.jobId, JOB_STATES.PLAN_REJECTED, { actor: req.actor.id, reason: 'Plan rejected.', approvalId: approval.approvalId });
     res.status(201).json({ approval });
   }));
@@ -162,9 +169,10 @@ async function jiraWebhook(req, res, next) {
 function queueAction(action, states) { return jobRoute(async (req, res, job) => { if (!states.includes(job.status)) return conflict(res, `Job is not ready to ${action}.`); await enqueueAgentJob({ jobId: job.jobId, action, actor: req.actor.id }, { jobId: `${job.jobId}:${action}:${Date.now()}` }); res.status(202).json({ jobId: job.jobId, message: `${action} queued.` }); }); }
 function jobRoute(handler) { return asyncRoute(async (req, res) => { const job = await getJobRecord(req.params.jobId); if (!job) return res.status(404).json({ error: { message: 'Job not found.' } }); return handler(req, res, job); }); }
 function asyncRoute(handler) { return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next); }
-function approvalRecord(job, req, type, extra) { return { approvalId: nanoid(), jobId: job.jobId, jiraIssueKey: job.jiraIssueKey, approvalType: type, planVersion: job.plan?.planVersion, planHash: job.plan?.planHash, metadataScopeHash: job.metadataScope?.hash, orgRegistryId: job.orgContext?.orgRegistryId, salesforceOrganizationId: job.orgContext?.expectedOrgId, environment: job.orgContext?.environment, approverIdentity: req.actor.id, comments: sanitizeUntrustedText(req.body?.comments, 1000), approvalTimestamp: new Date().toISOString(), ...extra }; }
+function approvalRecord(job, req, type, extra) { return { approvalId: nanoid(), jobId: job.jobId, jiraIssueKey: job.jiraIssueKey, approvalType: type, planVersion: job.plan?.planVersion, planHash: job.plan?.planHash, materialChangeHash: job.plan?.materialChangeHash || '', metadataScopeHash: job.metadataScope?.hash, orgRegistryId: job.orgContext?.orgRegistryId, salesforceOrganizationId: job.orgContext?.expectedOrgId, environment: job.orgContext?.environment, approverIdentity: req.actor.id, comments: sanitizeUntrustedText(req.body?.comments, 1000), approvalTimestamp: new Date().toISOString(), ...extra }; }
 function publicJob(job) {
   const safe = { ...job };
+  safe.specialistOverallStatus = overallSpecialistStatus(job.workItems || []);
   safe.revisions = (job.revisions || []).map((revision) => ({
     revisionNumber: revision.revisionNumber,
     invalidatedAt: revision.invalidatedAt,

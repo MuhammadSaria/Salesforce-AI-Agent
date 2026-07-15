@@ -86,6 +86,23 @@ export default class AgentChat extends LightningElement {
     get hasDeploymentItems() { return this.deploymentItems.length > 0; }
     get deploymentItems() { return (this.job?.deployment?.components || []).map((item, index) => ({ key: `deployment-${index}`, displayName: item.displayName || 'Deployment item', apiName: item.apiName || '', briefInfo: item.briefInfo || '' })); }
     get deploymentSummaryText() { return this.job?.deployment?.summary || ''; }
+    get hasSpecialistWorkItems() { return this.specialistWorkItems.length > 0; }
+    get specialistWorkItems() {
+        return (this.job?.workItems || []).map((item) => ({
+            key: item.workItemId,
+            agentName: item.agentName,
+            status: item.status.replaceAll('_', ' '),
+            statusClass: `specialist-status specialist-status--${item.status.toLowerCase().replaceAll('_', '-')}`,
+            responsibility: item.outputs?.analysisSummary || 'Specialist analysis is being prepared.',
+            proposedWork: (item.outputs?.proposedChanges || []).join(' '),
+            preserved: Boolean(item.preservedFromIteration),
+            preservedText: item.preservedFromIteration ? `Preserved from iteration ${item.preservedFromIteration}` : ''
+        }));
+    }
+    get specialistOverallStatus() { return (this.job?.specialistOverallStatus || 'PENDING').replaceAll('_', ' '); }
+    get orchestrationIteration() { return this.job?.iteration || this.plan?.planVersion || 1; }
+    get deploymentHowItWorks() { return this.job?.deployment?.specialistSummary?.howItWorks || this.expectedOutcome; }
+    get deploymentValidationSummary() { return this.job?.deployment?.specialistSummary?.validationResult || ''; }
     get implementationMilestoneClass() { return this.milestoneClass(this.implementationComplete, this.status === 'IMPLEMENTING'); }
     get validationMilestoneClass() { return this.validationFailed ? 'milestone milestone--failed' : this.milestoneClass(this.validationComplete, this.status === 'VALIDATING'); }
     get deploymentMilestoneClass() { return this.milestoneClass(this.deploymentComplete || this.deploymentNotRequired, this.status === 'DEPLOYING'); }
@@ -193,7 +210,8 @@ export default class AgentChat extends LightningElement {
                 ...(job?.orgContext || {}),
                 verified: { verifiedAt: job?.orgContext?.verified?.verifiedAt || '' }
             },
-            metadataScope: job?.metadataScope || { primaryMetadata: [], dependencies: [] }
+            metadataScope: job?.metadataScope || { primaryMetadata: [], dependencies: [] },
+            workItems: job?.workItems || []
         };
     }
     listItems(values, prefix) { return values.map((text, index) => ({ key: `${prefix}-${index}`, text })); }

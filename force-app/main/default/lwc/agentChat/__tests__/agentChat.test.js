@@ -100,6 +100,33 @@ describe('c-agent-chat', () => {
         expect(buttonByLabel(element, 'Send Instruction')).not.toBeUndefined();
     });
 
+    it('shows one unified specialist progress view without separate agent approvals', async () => {
+        const job = {
+            jobId: 'job-specialists', status: 'AWAITING_PLAN_APPROVAL', approvals: [], logs: [], iteration: 2, specialistOverallStatus: 'PROPOSAL_COMPLETE',
+            orgContext: { customerName: 'Customer', displayName: 'Sandbox', environment: 'sandbox', expectedOrgId: '00D000000000001', verified: {} },
+            plan: { planVersion: 2, proposedImplementation: 'Add and automate Donor Status.' },
+            workItems: [
+                { workItemId: 'object-item', agentName: 'Object and Field Agent', status: 'PROPOSAL_COMPLETE', outputs: { analysisSummary: 'Owns the Contact field change.', proposedChanges: ['Create Donor Status.'] } },
+                { workItemId: 'flow-item', agentName: 'Flow Agent', status: 'WAITING_FOR_DEPENDENCY', outputs: { analysisSummary: 'Owns the Contact automation.', proposedChanges: ['Set Donor Status automatically.'] } }
+            ],
+            metadataScope: { primaryMetadata: [], dependencies: [] }
+        };
+        getJobs.mockResolvedValue(JSON.stringify({ jobs: [job] }));
+        getAgentJob.mockResolvedValue(JSON.stringify(job));
+
+        const element = createElement('c-agent-chat', { is: AgentChat });
+        document.body.appendChild(element);
+        await flushPromises();
+
+        const progress = element.shadowRoot.querySelector('.specialist-progress');
+        expect(progress.textContent).toContain('Iteration 2');
+        expect(progress.textContent).toContain('Object and Field Agent');
+        expect(progress.textContent).toContain('Flow Agent');
+        expect(progress.textContent).toContain('WAITING FOR DEPENDENCY');
+        expect(buttonByLabel(element, 'Approve Implementation')).not.toBeNull();
+        expect([...element.shadowRoot.querySelectorAll('lightning-button')].filter((button) => button.label?.includes('Agent Approval'))).toHaveLength(0);
+    });
+
     it('submits a drafted instruction when Request Changes is clicked', async () => {
         const job = {
             jobId: 'job-instruction', status: 'AWAITING_PLAN_APPROVAL', approvals: [], logs: [],

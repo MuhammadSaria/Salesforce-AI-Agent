@@ -38,6 +38,33 @@
                     </div>
                 </section>
 
+                <template if:true={hasSpecialistWorkItems}>
+                    <section class="specialist-progress" aria-labelledby="specialist-progress-title">
+                        <div class="specialist-progress__heading">
+                            <div>
+                                <h2 id="specialist-progress-title">Specialist agent progress</h2>
+                                <p>Iteration {orchestrationIteration}. The Orchestrator Agent combines these results into one plan and one approval.</p>
+                            </div>
+                            <lightning-badge label={specialistOverallStatus}></lightning-badge>
+                        </div>
+                        <div class="specialist-list">
+                            <template for:each={specialistWorkItems} for:item="item">
+                                <article class="specialist-row" key={item.key}>
+                                    <div class="specialist-row__identity">
+                                        <strong>{item.agentName}</strong>
+                                        <span class={item.statusClass}>{item.status}</span>
+                                    </div>
+                                    <div>
+                                        <p>{item.responsibility}</p>
+                                        <p class="specialist-row__work">{item.proposedWork}</p>
+                                        <template if:true={item.preserved}><span class="specialist-row__preserved">{item.preservedText}</span></template>
+                                    </div>
+                                </article>
+                            </template>
+                        </div>
+                    </section>
+                </template>
+
                 <template if:true={validationFailed}>
                     <section class="validation-failure" role="alert" aria-labelledby="validation-failure-title">
                         <lightning-icon icon-name="utility:error" size="small" alternative-text="Validation failed"></lightning-icon>
@@ -53,6 +80,8 @@
                     <section class="deployment-summary" aria-labelledby="deployment-summary-title">
                         <h2 id="deployment-summary-title">Deployment complete</h2>
                         <p class="deployment-summary-text">{deploymentSummaryText}</p>
+                        <p class="deployment-summary-detail"><strong>How it works:</strong> {deploymentHowItWorks}</p>
+                        <p class="deployment-summary-detail"><strong>Validation:</strong> {deploymentValidationSummary}</p>
                         <template if:true={hasDeploymentItems}>
                             <div class="deployment-table">
                                 <div class="deployment-table__header">

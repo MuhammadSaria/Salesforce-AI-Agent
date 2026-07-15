@@ -15,6 +15,8 @@ All `/api/*` routes except the Jira webhook require `Authorization: Bearer <MIDD
 - `POST /api/jobs/:jobId/implement`: execute only approved local file operations.
 - `POST /api/jobs/:jobId/validate`, `GET /api/jobs/:jobId/validation`.
 - `GET /api/jobs/:jobId/diff`, `GET /api/jobs/:jobId/logs`, `GET /api/jobs/:jobId/audit`.
+- `GET /api/jobs/:jobId/work-items`: sanitized specialist work items plus the calculated overall specialist status.
+- `GET /api/jobs/:jobId/specialist-messages`: structured internal dependency, conflict, correction, and completion messages. Hidden reasoning and raw prompts are never returned.
 - `POST /api/jobs/:jobId/approve-deployment`, `POST /api/jobs/:jobId/reject-deployment`: the durable second approval used for metadata deployment or allowlisted record execution. The LWC labels this as data execution when the plan contains record operations.
 - `POST /api/jobs/:jobId/deploy`: queues only a matching, unexpired validated package.
 - `POST /api/jobs/:jobId/cancel`.
@@ -32,3 +34,5 @@ Deployment approval body:
 ```
 
 Errors use `{ "error": { "code": "...", "message": "..." } }`. Secrets, raw Authorization headers, and Jira credentials are never returned.
+
+The standard `GET /api/jobs/:jobId` response also contains `iteration`, `orchestration`, `workItems`, `specialistOverallStatus`, and file-ownership hashes. The Salesforce LWC displays specialist names, responsibilities, and statuses while preserving one implementation approval and one deployment approval.

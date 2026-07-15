@@ -2,7 +2,18 @@
 
 The existing database is Redis. The upgrade retains it and stores each job as an aggregate under `agent-job:<jobId>`, indexed by `agent-jobs:index`. BullMQ stores asynchronous execution records separately. This avoids a second source of truth while the project remains small.
 
-The aggregate contains logical models for Jira issue, job, state history, metadata scope/components, versioned plan, user instructions, approvals, validation run, command executions, Git changes, deployment run, and audit events. Child records carry `jobId`; approvals also carry the exact plan/scope/org hashes; validations and deployments carry source/package hashes. These references are checked transactionally by the service, but Redis does not provide SQL foreign-key constraints.
+The aggregate contains logical models for Jira issue, job, state history, metadata scope/components, versioned plan, specialist work items, structured specialist messages, file ownership, user instructions, approvals, validation run, command executions, Git changes, deployment run, and audit events. Child records carry `jobId`; approvals also carry the exact plan/scope/org hashes; validations and deployments carry source/package hashes. These references are checked transactionally by the service, but Redis does not provide SQL foreign-key constraints.
+
+Specialist fields are stored directly in the job aggregate:
+
+- `iteration`: current multi-agent implementation iteration.
+- `orchestration`: selected agents, dependency execution order, material-change hash, and orchestration hash.
+- `workItems`: specialist scope, dependencies, status, structured inputs/outputs, files, validation requirements, and risk.
+- `specialistMessages`: bounded structured communication records.
+- `fileOwnership`: one owner and lock/hash record per approved file.
+- `revisionContext`: affected agents and completed unaffected work carried into the next iteration.
+
+Work-item and file-ownership mutations use the existing local/Redis job lock. The single worker executes the dependency graph serially in the current version, preventing stale concurrent filesystem edits.
 
 Webhook idempotency keys use `jira-webhook:<eventId>` with a seven-day TTL. Audit events are stored in the job aggregate and duplicated to `jobs/<jobId>/logs/audit.jsonl` as an append-only operational copy.
 

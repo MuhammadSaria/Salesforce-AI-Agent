@@ -150,12 +150,27 @@ function componentFromPath(path) {
   if ((match = value.match(/\/classes\/([^/]+)\.cls$/))) return { type: 'ApexClass', apiName: match[1] };
   if ((match = value.match(/\/triggers\/([^/]+)\.trigger$/))) return { type: 'ApexTrigger', apiName: match[1] };
   if ((match = value.match(/\/lwc\/([^/]+)\//))) return { type: 'LightningComponentBundle', apiName: match[1] };
+  if ((match = value.match(/\/aura\/([^/]+)\//))) return { type: 'AuraDefinitionBundle', apiName: match[1] };
   if ((match = value.match(/\/flows\/([^/]+)\.flow-meta\.xml$/))) return { type: 'Flow', apiName: match[1] };
+  if ((match = value.match(/\/objects\/([^/]+)\/compactLayouts\/([^/]+)\.compactLayout-meta\.xml$/))) return { type: 'CompactLayout', apiName: `${match[1]}.${match[2]}` };
   if ((match = value.match(/\/objects\/([^/]+)\/fields\/([^/]+)\.field-meta\.xml$/))) return { type: 'CustomField', apiName: `${match[1]}.${match[2]}` };
+  if ((match = value.match(/\/objects\/([^/]+)\/recordTypes\/([^/]+)\.recordType-meta\.xml$/))) return { type: 'RecordType', apiName: `${match[1]}.${match[2]}` };
   if ((match = value.match(/\/objects\/([^/]+)\/[^/]+\.object-meta\.xml$/))) return { type: 'CustomObject', apiName: match[1] };
   if ((match = value.match(/\/permissionsets\/([^/]+)\.permissionset-meta\.xml$/))) return { type: 'PermissionSet', apiName: match[1] };
+  if ((match = value.match(/\/permissionsetgroups\/([^/]+)\.permissionsetgroup-meta\.xml$/))) return { type: 'PermissionSetGroup', apiName: match[1] };
+  if ((match = value.match(/\/mutingpermissionsets\/([^/]+)\.mutingpermissionset-meta\.xml$/))) return { type: 'MutingPermissionSet', apiName: match[1] };
+  if ((match = value.match(/\/profiles\/([^/]+)\.profile-meta\.xml$/))) return { type: 'Profile', apiName: match[1] };
+  if ((match = value.match(/\/customPermissions\/([^/]+)\.customPermission-meta\.xml$/))) return { type: 'CustomPermission', apiName: match[1] };
   if ((match = value.match(/\/flexipages\/([^/]+)\.flexipage-meta\.xml$/))) return { type: 'FlexiPage', apiName: match[1] };
   if ((match = value.match(/\/layouts\/([^/]+)\.layout-meta\.xml$/))) return { type: 'Layout', apiName: match[1] };
+  if ((match = value.match(/\/tabs\/([^/]+)\.tab-meta\.xml$/))) return { type: 'CustomTab', apiName: match[1] };
+  if ((match = value.match(/\/applications\/([^/]+)\.app-meta\.xml$/))) return { type: 'CustomApplication', apiName: match[1] };
+  if ((match = value.match(/\/namedCredentials\/([^/]+)\.namedCredential-meta\.xml$/))) return { type: 'NamedCredential', apiName: match[1] };
+  if ((match = value.match(/\/externalCredentials\/([^/]+)\.externalCredential-meta\.xml$/))) return { type: 'ExternalCredential', apiName: match[1] };
+  if ((match = value.match(/\/remoteSiteSettings\/([^/]+)\.remoteSite-meta\.xml$/))) return { type: 'RemoteSiteSetting', apiName: match[1] };
+  if ((match = value.match(/\/authproviders\/([^/]+)\.authprovider-meta\.xml$/))) return { type: 'AuthProvider', apiName: match[1] };
+  if ((match = value.match(/\/connectedApps\/([^/]+)\.connectedApp-meta\.xml$/))) return { type: 'ConnectedApp', apiName: match[1] };
+  if ((match = value.match(/\/customMetadata\/([^/]+)\.md-meta\.xml$/))) return { type: 'CustomMetadata', apiName: match[1] };
   return null;
 }
 function escapeXml(value) { return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }

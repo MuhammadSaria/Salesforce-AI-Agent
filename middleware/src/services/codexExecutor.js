@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { config } from '../config.js';
 import { stableHash } from '../utils/hash.js';
 import { redactSecrets, sanitizeUntrustedText } from '../utils/sanitize.js';
+import { SPECIALIST_AGENTS, selectSpecialistAgents } from '../domain/specialistAgents.js';
 
 const PROPOSAL_SCHEMA = {
   type: 'object',
@@ -62,8 +63,9 @@ const PROPOSAL_SCHEMA = {
 };
 
 // Codex can only propose source as structured output. The worker applies it after approval.
-export async function enrichPlanWithCodex(plan, requirement, metadataScope, orgContext) {
+export async function enrichPlanWithCodex(plan, requirement, metadataScope, orgContext, orchestrationContext = {}) {
   if (config.agentBackend !== 'codex') return plan;
+  const selectedAgentIds = selectSpecialistAgents(requirement, metadataScope, plan);
   const workDir = await mkdtemp(join(tmpdir(), 'sf-agent-plan-'));
   const outputFile = join(workDir, 'plan.json');
   const schemaFile = join(workDir, 'proposal-schema.json');
@@ -73,10 +75,14 @@ export async function enrichPlanWithCodex(plan, requirement, metadataScope, orgC
     'Do not include credentials, arbitrary shell commands, deletes, destructive changes, or deployment authorization.',
     'You may propose structured Salesforce record create, update, or delete operations only when the requirement explicitly requests them. A delete must identify one exact record ID, use empty fieldValues, and clearly describe the business impact. Never invent record IDs or secret fields.',
     'Propose only task-relevant create or modify operations under force-app/main/default. No changes are applied during this run.',
+    'Act as a planning service for the listed Salesforce specialist agents. Keep every proposed file within its owning specialist boundary. Specialists return proposals only; they never deploy or bypass either approval.',
+    orchestrationContext.revisionContext ? 'This is a revision. Propose work only for affected specialists and preserve completed, unaffected specialist work.' : '',
     'Write proposedImplementation, implementationSteps, expectedOutcome, businessImpact, outOfScope, testingStrategy, risks, and assumptions in plain language for a business user reviewing the approval. Explain observable behavior and the sequence of work. Do not put XML, source code, file paths, or metadata syntax in those human-readable fields.',
     JSON.stringify({
       requirement: sanitizeUntrustedText(JSON.stringify(requirement), config.maxPromptLength),
       metadataScope,
+      specialistAgents: selectedAgentIds.map((agentId) => ({ id: agentId, name: SPECIALIST_AGENTS[agentId].name, role: SPECIALIST_AGENTS[agentId].role, pathRoots: SPECIALIST_AGENTS[agentId].pathRoots })),
+      revisionContext: orchestrationContext.revisionContext || null,
       orgPolicy: {
         environment: orgContext.environment,
         allowedMetadataTypes: orgContext.allowedMetadataTypes,
@@ -89,7 +95,7 @@ export async function enrichPlanWithCodex(plan, requirement, metadataScope, orgC
         maximumDeleteOperations: orgContext.maximumDeleteOperations
       }
     })
-  ].join('\n');
+  ].filter(Boolean).join('\n');
   try {
     await writeFile(schemaFile, JSON.stringify(PROPOSAL_SCHEMA), 'utf8');
     const result = await runCodex(prompt, outputFile, schemaFile, workDir);

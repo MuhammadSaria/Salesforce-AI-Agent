@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { config } from '../src/config.js';
-import { appendConversation, appendLog, createJobRecord, getJobRecord, invalidateForPlanChange, transitionJob, updateJob } from '../src/services/jobStore.js';
+import { appendConversation, appendLog, claimFileOwnership, createJobRecord, getJobRecord, invalidateForPlanChange, releaseFileOwnership, transitionJob, updateJob } from '../src/services/jobStore.js';
 import { JOB_STATES } from '../src/domain/jobState.js';
 
 test('job snapshots survive memory loss and concurrent mutations are serialized', async () => {
@@ -120,4 +120,42 @@ test('completed jobs can be reopened by a new instruction revision', async () =>
     config.workspaceRoot = originalRoot;
     await rm(workspace, { recursive: true, force: true });
   }
+});
+
+test('a specialist revision preserves completed work outside the affected agent boundary', async () => {
+  const jobId = `job-specialist-revision-${Date.now()}`;
+  await createJobRecord({ jobId, userId: 'user-1' });
+  await updateJob(jobId, {
+    orgContext: { orgRegistryId: 'org-1', expectedOrgId: '00D000000000001AAA' },
+    plan: { planVersion: 1, materialChangeHash: 'material-1' },
+    nextPlanVersion: 1,
+    workItems: [
+      { workItemId: 'object-item', assignedSpecialistAgent: 'OBJECT_FIELD', status: 'COMPLETED', iteration: 1 },
+      { workItemId: 'lwc-item', assignedSpecialistAgent: 'LWC', status: 'COMPLETED', iteration: 1 },
+      { workItemId: 'testing-item', assignedSpecialistAgent: 'TESTING', status: 'COMPLETED', iteration: 1 }
+    ]
+  });
+
+  const revised = await invalidateForPlanChange(jobId, 'user-1', { instruction: 'Also display the field in the LWC.' });
+  assert.deepEqual(revised.revisionContext.affectedAgentIds.sort(), ['DOCUMENTATION_EXPLANATION', 'LWC', 'TESTING', 'VALIDATION_DEPLOYMENT'].sort());
+  assert.deepEqual(revised.workItems.map((item) => item.assignedSpecialistAgent), ['OBJECT_FIELD']);
+  assert.equal(revised.workItems[0].status, 'COMPLETED');
+  assert.equal(revised.nextPlanVersion, 2);
+});
+
+test('file ownership permits only the approved specialist lock holder', async () => {
+  const jobId = `job-file-owner-${Date.now()}`;
+  const path = 'force-app/main/default/flows/Test.flow-meta.xml';
+  await createJobRecord({ jobId, userId: 'user-1' });
+  await updateJob(jobId, {
+    fileOwnership: [{ path, owningAgent: 'FLOW', workItemId: 'flow-item', lockStatus: 'PLANNED', baselineHash: '', currentHash: '' }]
+  });
+
+  const claimed = await claimFileOwnership(jobId, path, 'flow-item', 'FLOW', 'baseline-hash');
+  assert.equal(claimed.lockStatus, 'LOCKED');
+  await assert.rejects(() => claimFileOwnership(jobId, path, 'other-item', 'APEX', 'baseline-hash'), /ownership mismatch|already locked/i);
+  const released = await releaseFileOwnership(jobId, path, 'flow-item', 'current-hash');
+  assert.equal(released.lockStatus, 'RELEASED');
+  assert.equal(released.baselineHash, 'baseline-hash');
+  assert.equal(released.currentHash, 'current-hash');
 });

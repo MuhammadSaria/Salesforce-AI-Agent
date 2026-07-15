@@ -8,9 +8,11 @@ const REVISION_READY_STATES = new Set([
   JOB_STATES.PLAN_REJECTED,
   JOB_STATES.ORG_VERIFICATION_FAILED,
   JOB_STATES.VALIDATION_FAILED,
-  JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL
+  JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL,
+  JOB_STATES.COMPLETED,
+  JOB_STATES.FAILED
 ]);
-const TERMINAL_OR_DEPLOYING_STATES = new Set([JOB_STATES.DEPLOYING, JOB_STATES.COMPLETED, JOB_STATES.FAILED, JOB_STATES.CANCELLED]);
+const TERMINAL_OR_DEPLOYING_STATES = new Set([JOB_STATES.DEPLOYING, JOB_STATES.CANCELLED]);
 
 export async function syncJiraComments(job, actor = 'jira-sync') {
   if (!job.jiraIssueKey) return { added: 0, reanalysisRequired: false };
@@ -50,7 +52,7 @@ export async function syncJiraComments(job, actor = 'jira-sync') {
 
   if (job.status === JOB_STATES.RECEIVED) return { added: selection.length, reanalysisRequired: true };
   if (REVISION_READY_STATES.has(job.status)) {
-    await invalidateForPlanChange(job.jobId, actor);
+    await invalidateForPlanChange(job.jobId, actor, { instruction: selection.map((comment) => comment.body).join('\n') });
     return { added: selection.length, reanalysisRequired: true };
   }
   if (TERMINAL_OR_DEPLOYING_STATES.has(job.status)) {
@@ -69,7 +71,8 @@ export async function activatePendingJiraRevision(jobId, actor = 'jira-sync') {
   const job = await getJobRecord(jobId);
   if (!job?.pendingRevision || !REVISION_READY_STATES.has(job.status)) return false;
   await updateJob(jobId, { pendingRevision: false });
-  await invalidateForPlanChange(jobId, actor);
+  const latestInstruction = (job.instructions || []).at(-1)?.text || '';
+  await invalidateForPlanChange(jobId, actor, { instruction: latestInstruction });
   return true;
 }
 
