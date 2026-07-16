@@ -4,6 +4,7 @@ import { redis } from '../queue/connection.js';
 import { sanitizeUntrustedText } from '../utils/sanitize.js';
 import { prepareProvidusNexusComment } from './jiraCommunication.js';
 import { readJiraAttachments } from './jiraAttachments.js';
+import { runJiraRequest } from './jiraRequest.js';
 
 const memoryEvents = new Set();
 
@@ -51,11 +52,15 @@ export function parseJiraWebhook(payload) {
 export async function getJiraIssue(issueKey) {
   validateIssueKey(issueKey);
   assertConfigured();
-  const response = await fetch(`${config.jiraBaseUrl.replace(/\/$/, '')}/rest/api/3/issue/${encodeURIComponent(issueKey)}?expand=renderedFields,names`, {
-    headers: { Accept: 'application/json', Authorization: `Basic ${Buffer.from(`${config.jiraEmail}:${config.jiraApiToken}`).toString('base64')}` }
+  const result = await runJiraRequest(async (signal) => {
+    const response = await fetch(`${config.jiraBaseUrl.replace(/\/$/, '')}/rest/api/3/issue/${encodeURIComponent(issueKey)}?expand=renderedFields,names`, {
+      headers: { Accept: 'application/json', Authorization: `Basic ${Buffer.from(`${config.jiraEmail}:${config.jiraApiToken}`).toString('base64')}` },
+      signal
+    });
+    return { ok: response.ok, status: response.status, payload: response.ok ? await response.json() : null };
   });
-  if (!response.ok) throw new Error(`Jira issue retrieval failed with status ${response.status}.`);
-  const issue = normalizeIssue(await response.json());
+  if (!result.ok) throw new Error(`Jira issue retrieval failed with status ${result.status}.`);
+  const issue = normalizeIssue(result.payload);
   enforceAllowedIssue(issue);
   const attachmentAnalysis = await readJiraAttachments(issue.attachments);
   return { ...issue, ...attachmentAnalysis };
@@ -64,23 +69,30 @@ export async function getJiraIssue(issueKey) {
 export async function getJiraComments(issueKey) {
   validateIssueKey(issueKey);
   assertConfigured();
-  const response = await fetch(`${config.jiraBaseUrl.replace(/\/$/, '')}/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment?maxResults=100`, {
-    headers: { Accept: 'application/json', Authorization: `Basic ${Buffer.from(`${config.jiraEmail}:${config.jiraApiToken}`).toString('base64')}` }
+  const result = await runJiraRequest(async (signal) => {
+    const response = await fetch(`${config.jiraBaseUrl.replace(/\/$/, '')}/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment?maxResults=100`, {
+      headers: { Accept: 'application/json', Authorization: `Basic ${Buffer.from(`${config.jiraEmail}:${config.jiraApiToken}`).toString('base64')}` },
+      signal
+    });
+    return { ok: response.ok, status: response.status, payload: response.ok ? await response.json() : null };
   });
-  if (!response.ok) throw new Error(`Jira comment retrieval failed with status ${response.status}.`);
-  const payload = await response.json();
-  return (payload.comments || []).map(normalizeComment).filter((comment) => comment.id && comment.body);
+  if (!result.ok) throw new Error(`Jira comment retrieval failed with status ${result.status}.`);
+  return (result.payload.comments || []).map(normalizeComment).filter((comment) => comment.id && comment.body);
 }
 
 export async function addJiraComment(issueKey, body) {
   validateIssueKey(issueKey);
   assertConfigured();
-  const response = await fetch(`${config.jiraBaseUrl.replace(/\/$/, '')}/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Basic ${Buffer.from(`${config.jiraEmail}:${config.jiraApiToken}`).toString('base64')}` },
-    body: JSON.stringify({ body: adfDocument(prepareProvidusNexusComment(body)) })
+  const result = await runJiraRequest(async (signal) => {
+    const response = await fetch(`${config.jiraBaseUrl.replace(/\/$/, '')}/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Basic ${Buffer.from(`${config.jiraEmail}:${config.jiraApiToken}`).toString('base64')}` },
+      body: JSON.stringify({ body: adfDocument(prepareProvidusNexusComment(body)) }),
+      signal
+    });
+    return { ok: response.ok, status: response.status };
   });
-  if (!response.ok) throw new Error(`Jira comment update failed with status ${response.status}.`);
+  if (!result.ok) throw new Error(`Jira comment update failed with status ${result.status}.`);
 }
 
 function normalizeIssue(issue) {

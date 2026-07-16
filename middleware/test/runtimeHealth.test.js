@@ -62,3 +62,34 @@ test('memory queue mode is ready without a separate worker', async () => {
   assert.equal(result.checks.queue.ok, true);
   assert.equal(result.checks.worker.ok, true);
 });
+
+test('readiness reports a failed Jira connectivity check instead of configuration-only success', async () => {
+  const result = await runtimeReadiness({
+    redisClient: null,
+    jiraStatus: { ok: false },
+    configValue: { queueDriver: 'memory', jiraBaseUrl: 'x', jiraEmail: 'x', jiraApiToken: 'x', jiraAgentAccountId: 'x', apiAuthToken: 'x', agentBackend: 'codex' }
+  });
+
+  assert.equal(result.ready, false);
+  assert.equal(result.checks.jira.ok, false);
+});
+
+test('webhook-only readiness requires the Jira webhook secret', async () => {
+  const baseConfig = {
+    queueDriver: 'memory',
+    jiraBaseUrl: 'https://example.atlassian.net',
+    jiraEmail: 'developer@example.com',
+    jiraApiToken: 'secret',
+    jiraAgentAccountId: 'account-id',
+    jiraPollIntervalSeconds: 0,
+    apiAuthToken: 'middleware-secret',
+    agentBackend: 'codex'
+  };
+
+  const missingSecret = await runtimeReadiness({ redisClient: null, configValue: baseConfig });
+  const configured = await runtimeReadiness({ redisClient: null, configValue: { ...baseConfig, jiraWebhookSecret: 'webhook-secret' } });
+
+  assert.equal(missingSecret.checks.jira.ok, false);
+  assert.equal(missingSecret.ready, false);
+  assert.equal(configured.checks.jira.ok, true);
+});

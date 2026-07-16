@@ -30,7 +30,7 @@ Providus Nexus is a supervised Salesforce development service. Jira supplies req
 - Codex: produces constrained structured proposals; it cannot execute shell or Salesforce commands directly.
 - Salesforce CLI service: executes allowlisted commands with an explicit verified target org.
 
-`GET /health` is a liveness check. `GET /ready` requires the durable queue, a fresh worker heartbeat, Jira configuration, middleware authentication, and the configured Codex backend. Readiness responses contain booleans only and never expose secrets or connection strings.
+`GET /health` is a liveness check. `GET /ready` requires the durable queue, a fresh worker heartbeat, middleware authentication, and the configured Codex backend. When Jira polling is enabled it also requires a successful assignment poll; webhook-only mode requires the Jira webhook secret instead of waiting for a disabled poll. Jira requests use a bounded timeout so a stalled Atlassian connection cannot block later polls. Readiness responses contain booleans only and never expose secrets or connection strings.
 
 ## History and Audit
 

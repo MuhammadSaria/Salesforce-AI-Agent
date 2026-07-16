@@ -12,7 +12,7 @@ import { requireApiAuth, requireRole } from './middleware/auth.js';
 import { getRegisteredOrg, listPublicOrgs } from './services/orgRegistry.js';
 import { claimWebhookEvent, parseJiraWebhook, verifyJiraWebhook } from './services/jira.js';
 import { JOB_STATES } from './domain/jobState.js';
-import { startJiraPoller } from './services/jiraPoller.js';
+import { jiraPollerReadiness, startJiraPoller } from './services/jiraPoller.js';
 import { latestApprovedApproval } from './domain/approval.js';
 import { humanizeValidationFailure } from './utils/validationFailure.js';
 import { approveSpecialistWorkItems, overallSpecialistStatus } from './services/orchestrator.js';
@@ -20,7 +20,7 @@ import { WORK_ITEM_STATUSES } from './domain/specialistAgents.js';
 import { publicImplementationReport, readImplementationReportArtifact } from './services/implementationReport.js';
 import { assertPlanActionable } from './domain/planActionability.js';
 import { runtimeReadiness } from './services/runtimeHealth.js';
-import { paginateJobSummaries } from './services/jobPresentation.js';
+import { paginateJobSummaries, publicCurrentActivity } from './services/jobPresentation.js';
 
 export function createApp() {
   const app = express();
@@ -31,7 +31,7 @@ export function createApp() {
 
   app.get('/health', (req, res) => res.json({ ok: true, service: 'providus-nexus-middleware' }));
   app.get('/ready', asyncRoute(async (req, res) => {
-    const readiness = await runtimeReadiness();
+    const readiness = await runtimeReadiness({ jiraStatus: jiraPollerReadiness() });
     res.status(readiness.ready ? 200 : 503).json(readiness);
   }));
   app.post('/api/webhooks/jira', jiraWebhook);
@@ -187,6 +187,7 @@ function asyncRoute(handler) { return (req, res, next) => Promise.resolve(handle
 function approvalRecord(job, req, type, extra) { return { approvalId: nanoid(), jobId: job.jobId, jiraIssueKey: job.jiraIssueKey, approvalType: type, planVersion: job.plan?.planVersion, planHash: job.plan?.planHash, materialChangeHash: job.plan?.materialChangeHash || '', metadataScopeHash: job.metadataScope?.hash, orgRegistryId: job.orgContext?.orgRegistryId, salesforceOrganizationId: job.orgContext?.expectedOrgId, environment: job.orgContext?.environment, approverIdentity: req.actor.id, comments: sanitizeUntrustedText(req.body?.comments, 1000), approvalTimestamp: new Date().toISOString(), ...extra }; }
 function publicJob(job) {
   const safe = { ...job };
+  safe.currentActivity = publicCurrentActivity(job);
   if (safe.jira) {
     safe.jira = {
       ...safe.jira,

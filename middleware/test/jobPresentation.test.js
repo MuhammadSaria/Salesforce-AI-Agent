@@ -29,6 +29,14 @@ test('job summaries contain selector data but exclude heavy and private artifact
   for (const key of ['jira', 'plan', 'logs', 'audit', 'diff', 'workItems', 'attachmentContents']) assert.equal(key in summary, false, key);
 });
 
+test('job summaries suppress stale activity after analysis has finished', () => {
+  const completed = publicJobSummary(record(1));
+  const analyzing = publicJobSummary({ ...record(1), status: 'ANALYZING_DEPENDENCIES', currentActivity: 'Preparing implementation plan' });
+
+  assert.equal(completed.currentActivity, '');
+  assert.equal(analyzing.currentActivity, 'Preparing implementation plan');
+});
+
 test('job summary pagination is stable and bounded', () => {
   const records = Array.from({ length: 75 }, (_, index) => record(index));
   const first = paginateJobSummaries(records, { limit: 25 });

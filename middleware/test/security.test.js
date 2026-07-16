@@ -7,7 +7,7 @@ import { claimJiraComment, claimWebhookEvent, parseJiraWebhook, verifyJiraWebhoo
 import { redactSecrets } from '../src/utils/sanitize.js';
 import { stableHash } from '../src/utils/hash.js';
 import { runSfCommand } from '../src/services/sfExecutor.js';
-import { buildAssignedIssuesJql } from '../src/services/jiraPoller.js';
+import { buildAssignedIssuesJql, jiraPollerReadiness, pollAssignedJiraIssues } from '../src/services/jiraPoller.js';
 import { isAgentGeneratedComment, selectNewUserComments, shouldResumeReceivedRevision } from '../src/services/jiraSync.js';
 
 test('secret masking removes authorization, API keys, and token fields', () => {
@@ -123,6 +123,91 @@ test('Jira select-list custom fields are normalized for trusted org routing', ()
 
 test('Jira polling is restricted to configured projects and the agent account', () => {
   assert.equal(buildAssignedIssuesJql(['TA'], 'agent-account-id'), 'project IN (TA) AND assignee = "agent-account-id" ORDER BY updated DESC');
+});
+
+test('webhook-only Jira mode does not wait for a polling check that is disabled', () => {
+  const originalInterval = config.jiraPollIntervalSeconds;
+  config.jiraPollIntervalSeconds = 0;
+  try {
+    assert.equal(jiraPollerReadiness(), undefined);
+  } finally {
+    config.jiraPollIntervalSeconds = originalInterval;
+  }
+});
+
+test('Jira polling aborts a stalled Atlassian request and releases the polling cycle', async () => {
+  const originalFetch = globalThis.fetch;
+  const original = {
+    jiraBaseUrl: config.jiraBaseUrl,
+    jiraEmail: config.jiraEmail,
+    jiraApiToken: config.jiraApiToken,
+    jiraAgentAccountId: config.jiraAgentAccountId,
+    jiraAllowedProjectKeys: config.jiraAllowedProjectKeys,
+    jiraRequestTimeoutMs: config.jiraRequestTimeoutMs
+  };
+  Object.assign(config, {
+    jiraBaseUrl: 'https://example.atlassian.net',
+    jiraEmail: 'developer@example.com',
+    jiraApiToken: 'secret',
+    jiraAgentAccountId: 'agent-account-id',
+    jiraAllowedProjectKeys: ['TA'],
+    jiraRequestTimeoutMs: 10
+  });
+  globalThis.fetch = async (_url, options) => new Promise((_resolve, reject) => {
+    if (!options.signal) return reject(new Error('Missing Jira timeout signal.'));
+    options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+  });
+
+  try {
+    await assert.rejects(() => pollAssignedJiraIssues(), /Jira request timed out/i);
+    await assert.rejects(() => pollAssignedJiraIssues(), /Jira request timed out/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+    Object.assign(config, original);
+  }
+});
+
+test('Jira readiness retains the last successful result while the next poll is in progress', async () => {
+  const originalFetch = globalThis.fetch;
+  const original = {
+    jiraBaseUrl: config.jiraBaseUrl,
+    jiraEmail: config.jiraEmail,
+    jiraApiToken: config.jiraApiToken,
+    jiraAgentAccountId: config.jiraAgentAccountId,
+    jiraAllowedProjectKeys: config.jiraAllowedProjectKeys
+  };
+  Object.assign(config, {
+    jiraBaseUrl: 'https://example.atlassian.net',
+    jiraEmail: 'developer@example.com',
+    jiraApiToken: 'secret',
+    jiraAgentAccountId: 'agent-account-id',
+    jiraAllowedProjectKeys: ['TA']
+  });
+  const successfulResponse = { ok: true, status: 200, json: async () => ({ issues: [] }) };
+  globalThis.fetch = async () => successfulResponse;
+
+  try {
+    await pollAssignedJiraIssues();
+    assert.equal(jiraPollerReadiness().ok, true);
+
+    let releaseRequest;
+    let notifyStarted;
+    const requestStarted = new Promise((resolve) => { notifyStarted = resolve; });
+    globalThis.fetch = async () => new Promise((resolve) => {
+      releaseRequest = () => resolve(successfulResponse);
+      notifyStarted();
+    });
+    const pendingPoll = pollAssignedJiraIssues();
+    await requestStarted;
+    const inProgressReadiness = jiraPollerReadiness();
+    releaseRequest();
+    await pendingPoll;
+
+    assert.equal(inProgressReadiness.ok, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+    Object.assign(config, original);
+  }
 });
 
 test('Salesforce operations are blocked when the org registry does not allow them', async () => {

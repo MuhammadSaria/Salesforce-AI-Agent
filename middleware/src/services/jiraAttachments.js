@@ -2,6 +2,7 @@ import { extname } from 'node:path';
 import { URL } from 'node:url';
 import { config } from '../config.js';
 import { sanitizeUntrustedText } from '../utils/sanitize.js';
+import { runJiraRequest } from './jiraRequest.js';
 
 const TEXT_EXTENSIONS = new Set(['.txt', '.md', '.markdown', '.csv', '.json', '.xml']);
 const DOCX_EXTENSION = '.docx';
@@ -15,6 +16,7 @@ export async function readJiraAttachments(attachments = [], options = {}) {
     maxAttachments: options.maxAttachments ?? config.maxJiraAttachments,
     maxAttachmentBytes: options.maxAttachmentBytes ?? config.maxJiraAttachmentBytes,
     maxAttachmentText: options.maxAttachmentText ?? config.maxJiraAttachmentText,
+    requestTimeoutMs: options.requestTimeoutMs ?? config.jiraRequestTimeoutMs,
     fetchImpl: options.fetchImpl || fetch,
     docxParser: options.docxParser,
     pdfParser: options.pdfParser
@@ -32,17 +34,20 @@ export async function readJiraAttachments(attachments = [], options = {}) {
     try {
       validateAttachment(attachment, settings.maxAttachmentBytes);
       const endpoint = attachmentEndpoint(settings.jiraBaseUrl, attachment.id);
-      const response = await settings.fetchImpl(endpoint, {
-        headers: {
-          Accept: '*/*',
-          Authorization: `Basic ${Buffer.from(`${settings.jiraEmail}:${settings.jiraApiToken}`).toString('base64')}`
-        },
-        redirect: 'follow'
-      });
-      if (!response.ok) throw new Error(`Jira returned HTTP ${response.status}.`);
-      const declaredLength = Number(response.headers.get('content-length') || 0);
-      if (declaredLength > settings.maxAttachmentBytes) throw new Error(`Attachment exceeds the ${settings.maxAttachmentBytes}-byte limit.`);
-      const buffer = Buffer.from(await response.arrayBuffer());
+      const buffer = await runJiraRequest(async (signal) => {
+        const response = await settings.fetchImpl(endpoint, {
+          headers: {
+            Accept: '*/*',
+            Authorization: `Basic ${Buffer.from(`${settings.jiraEmail}:${settings.jiraApiToken}`).toString('base64')}`
+          },
+          redirect: 'follow',
+          signal
+        });
+        if (!response.ok) throw new Error(`Jira returned HTTP ${response.status}.`);
+        const declaredLength = Number(response.headers.get('content-length') || 0);
+        if (declaredLength > settings.maxAttachmentBytes) throw new Error(`Attachment exceeds the ${settings.maxAttachmentBytes}-byte limit.`);
+        return Buffer.from(await response.arrayBuffer());
+      }, { timeoutMs: settings.requestTimeoutMs });
       if (buffer.byteLength > settings.maxAttachmentBytes) throw new Error(`Attachment exceeds the ${settings.maxAttachmentBytes}-byte limit.`);
       attachmentContents.push(await extractAttachmentText(attachment, buffer, settings));
     } catch (error) {

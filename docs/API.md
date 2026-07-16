@@ -5,7 +5,7 @@ All `/api/*` routes except the Jira webhook require `Authorization: Bearer <MIDD
 ## Routes
 
 - `GET /health`: unauthenticated process liveness with no dependency or secret details.
-- `GET /ready`: unauthenticated sanitized readiness booleans for the durable queue, worker heartbeat, Jira, middleware authentication, and Codex backend. Returns `503` until all checks pass.
+- `GET /ready`: unauthenticated sanitized readiness booleans for the durable queue, worker heartbeat, Jira, middleware authentication, and Codex backend. When Jira polling is enabled, the Jira check reflects the latest completed poll; webhook-only mode checks configuration. Returns `503` until all checks pass.
 - `POST /api/webhooks/jira`: Jira event authenticated by a constant-time checked hidden webhook token or HMAC signature, fast `202`, idempotent async processing.
 - `GET /api/orgs`, `GET /api/orgs/:orgId`: public policy fields for active registry orgs.
 - `POST /api/jobs`, `GET /api/jobs?limit=50&cursor=<opaque>`, `GET /api/jobs/:jobId`: create, paginate compact summaries, and read one detailed job. The list response also contains `nextCursor` and `total`.

@@ -44,10 +44,13 @@ export async function runtimeReadiness(options = {}) {
     }
   }
 
+  const jiraApiConfigured = Boolean(configValue.jiraBaseUrl && configValue.jiraEmail && configValue.jiraApiToken && configValue.jiraAgentAccountId);
+  const jiraPollingEnabled = Number(configValue.jiraPollIntervalSeconds ?? 60) > 0;
+  const jiraIngressConfigured = jiraPollingEnabled || Boolean(configValue.jiraWebhookSecret);
   const checks = {
     queue: { ok: queueOk },
     worker: { ok: workerOk },
-    jira: { ok: Boolean(configValue.jiraBaseUrl && configValue.jiraEmail && configValue.jiraApiToken && configValue.jiraAgentAccountId) },
+    jira: { ok: jiraApiConfigured && jiraIngressConfigured && (options.jiraStatus === undefined || options.jiraStatus?.ok === true) },
     authentication: { ok: Boolean(configValue.apiAuthToken) },
     agentBackend: { ok: configValue.agentBackend === 'codex' || (configValue.nodeEnv === 'test' && configValue.agentBackend === 'disabled') }
   };

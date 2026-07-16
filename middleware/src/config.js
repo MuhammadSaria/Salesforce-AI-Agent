@@ -21,6 +21,7 @@ export const config = {
   jiraWebhookSecret: process.env.JIRA_WEBHOOK_SECRET || '',
   jiraAllowedProjectKeys: String(process.env.JIRA_ALLOWED_PROJECT_KEYS || '').split(',').map((value) => value.trim().toUpperCase()).filter(Boolean),
   jiraPollIntervalSeconds: Number(process.env.JIRA_POLL_INTERVAL_SECONDS || 60),
+  jiraRequestTimeoutMs: Number(process.env.JIRA_REQUEST_TIMEOUT_MS || 15000),
   maxJiraAttachments: Number(process.env.MAX_JIRA_ATTACHMENTS || 10),
   maxJiraAttachmentBytes: Number(process.env.MAX_JIRA_ATTACHMENT_BYTES || 5000000),
   maxJiraAttachmentText: Number(process.env.MAX_JIRA_ATTACHMENT_TEXT || 50000),

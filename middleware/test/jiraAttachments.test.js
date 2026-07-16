@@ -76,6 +76,26 @@ test('rejects invalid attachment IDs and oversized documents before download', a
   assert.equal(result.attachmentFailures.length, 2);
 });
 
+test('aborts a stalled Jira attachment download within the configured timeout', async () => {
+  const result = await readJiraAttachments(
+    [{ id: '17450', filename: 'requirements.txt', mimeType: 'text/plain', size: 12 }],
+    {
+      jiraBaseUrl: 'https://example.atlassian.net',
+      jiraEmail: 'developer@example.com',
+      jiraApiToken: 'secret',
+      requestTimeoutMs: 10,
+      fetchImpl: async (_url, options) => new Promise((_resolve, reject) => {
+        if (!options.signal) return reject(new Error('Missing Jira timeout signal.'));
+        options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+      })
+    }
+  );
+
+  assert.equal(result.attachmentContents.length, 0);
+  assert.equal(result.attachmentFailures.length, 1);
+  assert.match(result.attachmentFailures[0].reason, /Jira request timed out/i);
+});
+
 function response(body, status = 200, headers = {}) {
   return {
     ok: status >= 200 && status < 300,

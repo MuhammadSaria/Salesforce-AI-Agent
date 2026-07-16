@@ -27,7 +27,7 @@ Use a dedicated Atlassian account for Jira integration and set its display name 
 
 1. Create a least-privilege Jira service account and record its account ID.
 2. Set `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_AGENT_ACCOUNT_ID`, `JIRA_WEBHOOK_SECRET`, and `JIRA_ALLOWED_PROJECT_KEYS` only in the middleware secret store.
-3. Set `JIRA_POLL_INTERVAL_SECONDS=60` to discover assigned issues when an admin-managed webhook is unavailable. Set it to `0` only after webhook delivery is confirmed.
+3. Set `JIRA_POLL_INTERVAL_SECONDS=60` to discover assigned issues when an admin-managed webhook is unavailable. Set `JIRA_REQUEST_TIMEOUT_MS=15000` to bound Jira issue, comment, polling, and attachment requests. Set polling to `0` only after webhook delivery is confirmed.
 4. Set `MAX_JIRA_ATTACHMENTS`, `MAX_JIRA_ATTACHMENT_BYTES`, and `MAX_JIRA_ATTACHMENT_TEXT` to bound DOCX, PDF, Markdown, text, CSV, JSON, and XML requirement ingestion. Unsupported binaries are retained as metadata only.
 5. Register a Jira admin webhook for `jira:issue_created` and `jira:issue_updated`, filtered to the allowed project, and set its URL to `POST /api/webhooks/jira`. Set the webhook `secret` to `JIRA_WEBHOOK_SECRET`; Jira sends the resulting HMAC in `X-Hub-Signature`.
 6. New Jira comments on an existing, assigned issue are synchronized as untrusted conversation input. Providus Nexus answers questions and scheduling requests without changing the plan. Requirement changes, implementation constraints, and bug reports create a supervised revision. Providus Nexus comments are ignored to prevent loops. Comments never count as implementation or deployment approval.

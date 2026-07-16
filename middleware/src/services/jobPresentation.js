@@ -7,7 +7,7 @@ export function publicJobSummary(job) {
     jiraSummary: job.jira?.summary || job.requirement?.summary || '',
     source: job.source || '',
     status: job.status,
-    currentActivity: job.currentActivity || '',
+    currentActivity: publicCurrentActivity(job),
     customerName: job.orgContext?.customerName || job.context?.customerName || '',
     targetOrgDisplayName: job.orgContext?.displayName || '',
     environment: job.orgContext?.environment || job.context?.environment || '',
@@ -18,6 +18,10 @@ export function publicJobSummary(job) {
     createdAt: job.createdAt || '',
     updatedAt: job.updatedAt || ''
   };
+}
+
+export function publicCurrentActivity(job) {
+  return job.status === 'ANALYZING_DEPENDENCIES' ? job.currentActivity || '' : '';
 }
 
 export function paginateJobSummaries(records, options = {}) {

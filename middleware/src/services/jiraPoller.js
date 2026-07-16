@@ -3,8 +3,10 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { enqueueAgentJob } from '../queue/agentQueue.js';
 import { createJobRecord, listJobRecords } from './jobStore.js';
+import { runJiraRequest } from './jiraRequest.js';
 
 let polling = false;
+let latestPoll = { ok: null, attemptedAt: '', completedAt: '' };
 
 export function startJiraPoller() {
   if (!isConfigured() || config.jiraPollIntervalSeconds <= 0) return null;
@@ -19,6 +21,7 @@ export function startJiraPoller() {
 export async function pollAssignedJiraIssues() {
   if (polling || !isConfigured()) return [];
   polling = true;
+  latestPoll = { ...latestPoll, attemptedAt: new Date().toISOString(), completedAt: '' };
   try {
     const existingByKey = new Map((await listJobRecords()).filter((job) => job.jiraIssueKey).map((job) => [job.jiraIssueKey, job]));
     const issues = await searchAssignedIssues();
@@ -35,10 +38,19 @@ export async function pollAssignedJiraIssues() {
       created.push({ jobId: job.jobId, jiraIssueKey: issue.key });
     }
     if (created.length) logger.info({ created }, 'Assigned Jira issues queued by polling fallback');
+    latestPoll = { ...latestPoll, ok: true, completedAt: new Date().toISOString() };
     return created;
+  } catch (error) {
+    latestPoll = { ...latestPoll, ok: false, completedAt: new Date().toISOString() };
+    throw error;
   } finally {
     polling = false;
   }
+}
+
+export function jiraPollerReadiness() {
+  if (config.jiraPollIntervalSeconds <= 0) return undefined;
+  return { ok: isConfigured() && latestPoll.ok === true };
 }
 
 export function buildAssignedIssuesJql(projectKeys = config.jiraAllowedProjectKeys, accountId = config.jiraAgentAccountId) {
@@ -51,10 +63,12 @@ async function searchAssignedIssues() {
   const base = config.jiraBaseUrl.replace(/\/$/, '');
   const url = `${base}/rest/api/3/search/jql?jql=${encodeURIComponent(buildAssignedIssuesJql())}&maxResults=50&fields=key,updated`;
   const authorization = Buffer.from(`${config.jiraEmail}:${config.jiraApiToken}`).toString('base64');
-  const response = await fetch(url, { headers: { Accept: 'application/json', Authorization: `Basic ${authorization}` } });
-  if (!response.ok) throw new Error(`Jira polling failed with status ${response.status}.`);
-  const payload = await response.json();
-  return (payload.issues || []).map((issue) => ({ key: String(issue.key || '').toUpperCase(), updated: String(issue.fields?.updated || '') })).filter((issue) => /^[A-Z][A-Z0-9_]{1,19}-[1-9][0-9]{0,9}$/.test(issue.key));
+  const result = await runJiraRequest(async (signal) => {
+    const response = await fetch(url, { headers: { Accept: 'application/json', Authorization: `Basic ${authorization}` }, signal });
+    return { ok: response.ok, status: response.status, payload: response.ok ? await response.json() : null };
+  });
+  if (!result.ok) throw new Error(`Jira polling failed with status ${result.status}.`);
+  return (result.payload.issues || []).map((issue) => ({ key: String(issue.key || '').toUpperCase(), updated: String(issue.fields?.updated || '') })).filter((issue) => /^[A-Z][A-Z0-9_]{1,19}-[1-9][0-9]{0,9}$/.test(issue.key));
 }
 
 function isConfigured() {
