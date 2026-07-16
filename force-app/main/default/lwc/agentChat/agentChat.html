@@ -1,6 +1,21 @@
 <template>
-    <lightning-card title="Salesforce In-Org AI Agent" icon-name="utility:einstein">
-        <template if:true={isBusy}><lightning-spinner alternative-text="Working" size="small"></lightning-spinner></template>
+    <section class="nexus-shell" aria-labelledby="nexus-title">
+        <header class="nexus-header">
+            <div class="nexus-brand">
+                <span class="nexus-brand__icon">
+                    <lightning-icon icon-name="standard:work_order" size="small" alternative-text="Providus Nexus"></lightning-icon>
+                </span>
+                <div>
+                    <h1 id="nexus-title" class="nexus-brand__name">Providus Nexus</h1>
+                    <p class="nexus-brand__subtitle">Salesforce delivery workspace</p>
+                </div>
+            </div>
+            <div class="nexus-header__status">
+                <template if:true={hasJob}><lightning-badge label={statusDisplay}></lightning-badge></template>
+                <lightning-button-icon icon-name="utility:refresh" alternative-text="Refresh workspace" title="Refresh workspace" onclick={handleReload} disabled={isBusy}></lightning-button-icon>
+            </div>
+        </header>
+        <template if:true={isBusy}><lightning-spinner alternative-text="Providus Nexus is working" size="small"></lightning-spinner></template>
         <div class="console">
             <template if:true={errorMessage}><div class="error" role="alert">{errorMessage}</div></template>
 
@@ -11,9 +26,19 @@
                 <lightning-button variant="brand" label="Create Job" icon-name="utility:add" onclick={handleCreate} disabled={createDisabled}></lightning-button>
             </section>
 
+            <template if:false={hasJob}>
+                <section class="empty-state" aria-labelledby="empty-state-title">
+                    <lightning-icon icon-name="utility:task" size="small" alternative-text="Select a Jira task"></lightning-icon>
+                    <div>
+                        <h2 id="empty-state-title">Start with a Jira task</h2>
+                        <p>Select an assigned Jira task or provide a Jira key and instruction to begin.</p>
+                    </div>
+                </section>
+            </template>
+
             <template if:true={hasJob}>
                 <div class="identity-bar">
-                    <div><span class="label">Status</span><lightning-badge label={status}></lightning-badge></div>
+                    <div><span class="label">Status</span><lightning-badge label={statusDisplay}></lightning-badge></div>
                     <div><span class="label">Customer</span><strong>{orgContext.customerName}</strong></div>
                     <div><span class="label">Target Org</span><strong>{orgContext.displayName}</strong></div>
                     <div><span class="label">Environment</span><strong>{orgContext.environment}</strong></div>
@@ -23,45 +48,53 @@
                 <template if:true={hasDataOperations}><div class="production-warning" role="alert">This plan contains Salesforce record changes. Review every object, record ID, field, and value before granting the separate execution approval.</div></template>
                 <template if:true={hasDeleteOperations}><div class="production-warning" role="alert">Destructive action: this plan will delete an existing Salesforce record. Confirm the exact object and record ID. Recovery depends on Salesforce Recycle Bin support and retention.</div></template>
 
-                <section class="milestones" aria-label="Job progress">
-                    <div class={implementationMilestoneClass}>
-                        <lightning-icon icon-name={implementationMilestoneIcon} size="small" alternative-text={implementationMilestoneTitle}></lightning-icon>
-                        <div><strong>{implementationMilestoneTitle}</strong><span>{implementationMilestoneMessage}</span></div>
-                    </div>
-                    <div class={validationMilestoneClass}>
-                        <lightning-icon icon-name={validationMilestoneIcon} size="small" alternative-text={validationMilestoneTitle}></lightning-icon>
-                        <div><strong>{validationMilestoneTitle}</strong><span>{validationMilestoneMessage}</span></div>
-                    </div>
-                    <div class={deploymentMilestoneClass}>
-                        <lightning-icon icon-name={deploymentMilestoneIcon} size="small" alternative-text={deploymentMilestoneTitle}></lightning-icon>
-                        <div><strong>{deploymentMilestoneTitle}</strong><span>{deploymentMilestoneMessage}</span></div>
+                <ol class="milestones workflow-progress" aria-label="Delivery progress">
+                    <template for:each={workflowStages} for:item="stage">
+                        <li class={stage.className} key={stage.key} aria-current={stage.ariaCurrent}>
+                            <lightning-icon icon-name={stage.iconName} size="x-small" alternative-text={stage.label}></lightning-icon>
+                            <div><strong>{stage.label}</strong><span>{stage.detail}</span></div>
+                        </li>
+                    </template>
+                </ol>
+
+                <section class={currentActionClass} aria-labelledby="current-action-title" aria-live="polite">
+                    <lightning-icon icon-name={currentAction.iconName} size="small" alternative-text={currentAction.title}></lightning-icon>
+                    <div>
+                        <span class="current-action__eyebrow">Current action</span>
+                        <h2 id="current-action-title">{currentAction.title}</h2>
+                        <p>{currentAction.message}</p>
                     </div>
                 </section>
 
                 <template if:true={hasSpecialistWorkItems}>
                     <section class="specialist-progress" aria-labelledby="specialist-progress-title">
                         <div class="specialist-progress__heading">
-                            <div>
-                                <h2 id="specialist-progress-title">Specialist agent progress</h2>
-                                <p>Iteration {orchestrationIteration}. The Orchestrator Agent combines these results into one plan and one approval.</p>
+                            <div class="specialist-progress__summary">
+                                <h2 id="specialist-progress-title">Specialist delivery progress</h2>
+                                <p>{specialistProgressSummary}. Providus Nexus combines these results into one implementation plan and one approval.</p>
                             </div>
-                            <lightning-badge label={specialistOverallStatus}></lightning-badge>
+                            <div class="specialist-progress__controls">
+                                <lightning-badge label={specialistOverallStatus}></lightning-badge>
+                                <lightning-button-icon icon-name={specialistToggleIcon} alternative-text={specialistToggleTitle} title={specialistToggleTitle} aria-expanded={specialistsExpanded} onclick={handleToggleSpecialists}></lightning-button-icon>
+                            </div>
                         </div>
-                        <div class="specialist-list">
-                            <template for:each={specialistWorkItems} for:item="item">
-                                <article class="specialist-row" key={item.key}>
-                                    <div class="specialist-row__identity">
-                                        <strong>{item.agentName}</strong>
-                                        <span class={item.statusClass}>{item.status}</span>
-                                    </div>
-                                    <div>
-                                        <p>{item.responsibility}</p>
-                                        <p class="specialist-row__work">{item.proposedWork}</p>
-                                        <template if:true={item.preserved}><span class="specialist-row__preserved">{item.preservedText}</span></template>
-                                    </div>
-                                </article>
-                            </template>
-                        </div>
+                        <template if:true={specialistsExpanded}>
+                            <div class="specialist-list">
+                                <template for:each={specialistWorkItems} for:item="item">
+                                    <article class="specialist-row" key={item.key}>
+                                        <div class="specialist-row__identity">
+                                            <strong>{item.agentName}</strong>
+                                            <span class={item.statusClass}>{item.status}</span>
+                                        </div>
+                                        <div>
+                                            <p>{item.responsibility}</p>
+                                            <p class="specialist-row__work">{item.proposedWork}</p>
+                                            <template if:true={item.preserved}><span class="specialist-row__preserved">{item.preservedText}</span></template>
+                                        </div>
+                                    </article>
+                                </template>
+                            </div>
+                        </template>
                     </section>
                 </template>
 
@@ -98,6 +131,35 @@
                                 </template>
                             </div>
                         </template>
+                    </section>
+                </template>
+
+                <template if:true={hasImplementationReports}>
+                    <section class="implementation-reports" aria-labelledby="implementation-reports-title">
+                        <div class="implementation-reports__heading">
+                            <lightning-icon icon-name="utility:success" size="small" alternative-text="Implementation reports ready"></lightning-icon>
+                            <div>
+                                <h2 id="implementation-reports-title">Implementation Reports</h2>
+                                <p>Consultant-quality documentation is available for every successful deployment.</p>
+                            </div>
+                        </div>
+                        <div class="implementation-report-list">
+                            <template for:each={implementationReportVersions} for:item="report">
+                                <article class="implementation-report-row" key={report.key}>
+                                    <div class="implementation-report-row__details">
+                                        <strong>Implementation Report Ready</strong>
+                                        <span>{report.versionLabel}</span>
+                                        <span>{report.reportLabel}</span>
+                                        <span>{report.generatedLabel}</span>
+                                    </div>
+                                    <div class="implementation-report-row__actions">
+                                        <lightning-button label="Download PDF" icon-name="utility:download" data-version={report.deploymentVersion} data-format="pdf" onclick={handleReportDownload} disabled={isBusy}></lightning-button>
+                                        <lightning-button label="Download Word" icon-name="utility:download" data-version={report.deploymentVersion} data-format="docx" onclick={handleReportDownload} disabled={isBusy}></lightning-button>
+                                        <lightning-button label="Download Markdown" icon-name="utility:download" data-version={report.deploymentVersion} data-format="markdown" onclick={handleReportDownload} disabled={isBusy}></lightning-button>
+                                    </div>
+                                </article>
+                            </template>
+                        </div>
                     </section>
                 </template>
 
@@ -168,5 +230,5 @@
                 </div>
             </template>
         </div>
-    </lightning-card>
+    </section>
 </template>

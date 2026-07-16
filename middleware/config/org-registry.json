@@ -16,6 +16,12 @@
       "localProjectPath": "workspaces/providus_orgfarm_dev/project",
       "authenticationStatus": "connected",
       "deploymentPermission": "allowed",
+      "dataMutationPermission": "allowed",
+      "recordDeletionPermission": "allowed",
+      "allowedDataObjects": ["*"],
+      "restrictedDataObjects": ["User", "UserRole", "Profile", "PermissionSet", "PermissionSetAssignment", "PermissionSetGroup", "PermissionSetGroupComponent", "SetupEntityAccess", "Group", "GroupMember", "QueueSobject", "AuthSession", "LoginHistory", "OauthToken", "ConnectedApplication", "ExternalDataUserAuth"],
+      "maximumDataOperations": 25,
+      "maximumDeleteOperations": 5,
       "productionApprovalRequired": false,
       "active": true,
       "allowedMetadataTypes": [
@@ -42,7 +48,10 @@
         "read",
         "retrieve",
         "validate",
-        "deploy"
+        "deploy",
+        "data-create",
+        "data-update",
+        "data-delete"
       ]
     },
     {
