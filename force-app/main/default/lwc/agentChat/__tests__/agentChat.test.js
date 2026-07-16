@@ -5,12 +5,14 @@ import getOrgs from '@salesforce/apex/AgentController.getOrgs';
 import getAgentJob from '@salesforce/apex/AgentController.getAgentJob';
 import createAgentJob from '@salesforce/apex/AgentController.createAgentJob';
 import performJobAction from '@salesforce/apex/AgentController.performJobAction';
+import getImplementationReport from '@salesforce/apex/AgentController.getImplementationReport';
 
 jest.mock('@salesforce/apex/AgentController.getJobs', () => ({ default: jest.fn() }), { virtual: true });
 jest.mock('@salesforce/apex/AgentController.getOrgs', () => ({ default: jest.fn() }), { virtual: true });
 jest.mock('@salesforce/apex/AgentController.getAgentJob', () => ({ default: jest.fn() }), { virtual: true });
 jest.mock('@salesforce/apex/AgentController.createAgentJob', () => ({ default: jest.fn() }), { virtual: true });
 jest.mock('@salesforce/apex/AgentController.performJobAction', () => ({ default: jest.fn() }), { virtual: true });
+jest.mock('@salesforce/apex/AgentController.getImplementationReport', () => ({ default: jest.fn() }), { virtual: true });
 
 describe('c-agent-chat', () => {
     beforeEach(() => {
@@ -32,6 +34,41 @@ describe('c-agent-chat', () => {
         expect(element.shadowRoot.querySelector('lightning-textarea')).not.toBeNull();
         expect(buttonByLabel(element, 'Create Job')).not.toBeNull();
         expect(buttonByLabel(element, 'Send Question')).toBeUndefined();
+    });
+
+    it('brands the workspace as Providus Nexus', async () => {
+        const element = createElement('c-agent-chat', { is: AgentChat });
+        document.body.appendChild(element);
+        await flushPromises();
+
+        expect(element.shadowRoot.querySelector('.nexus-brand__name').textContent).toBe('Providus Nexus');
+        expect(element.shadowRoot.textContent).not.toContain('Salesforce In-Org AI Agent');
+        expect(element.shadowRoot.querySelector('.empty-state').textContent).toContain('Select an assigned Jira task');
+    });
+
+    it('shows a five-stage workflow with the current stage emphasized', async () => {
+        const job = {
+            jobId: 'job-progress', status: 'AWAITING_PLAN_APPROVAL', approvals: [], logs: [],
+            orgContext: { customerName: 'Providus', displayName: 'Developer Org', environment: 'developer', expectedOrgId: '00D000000000001', verified: { verifiedAt: '2026-07-16T10:00:00Z' } },
+            plan: { planVersion: 1 }, metadataScope: { primaryMetadata: [], dependencies: [] }
+        };
+        getJobs.mockResolvedValue(JSON.stringify({ jobs: [job] }));
+        getAgentJob.mockResolvedValue(JSON.stringify(job));
+
+        const element = createElement('c-agent-chat', { is: AgentChat });
+        document.body.appendChild(element);
+        await flushPromises();
+
+        const stages = [...element.shadowRoot.querySelectorAll('.workflow-stage')];
+        expect(stages).toHaveLength(5);
+        expect(stages.map((stage) => stage.textContent)).toEqual(expect.arrayContaining([
+            expect.stringContaining('Analysis'),
+            expect.stringContaining('Plan'),
+            expect.stringContaining('Implementation'),
+            expect.stringContaining('Validation'),
+            expect.stringContaining('Deployment')
+        ]));
+        expect(element.shadowRoot.querySelector('.workflow-stage--active').textContent).toContain('Plan');
     });
 
     it('shows production warning and keeps implementation and deployment as separate actions', async () => {
@@ -100,7 +137,7 @@ describe('c-agent-chat', () => {
         expect(buttonByLabel(element, 'Send Instruction')).not.toBeUndefined();
     });
 
-    it('shows one unified specialist progress view without separate agent approvals', async () => {
+    it('keeps one unified specialist progress view collapsed until requested', async () => {
         const job = {
             jobId: 'job-specialists', status: 'AWAITING_PLAN_APPROVAL', approvals: [], logs: [], iteration: 2, specialistOverallStatus: 'PROPOSAL_COMPLETE',
             orgContext: { customerName: 'Customer', displayName: 'Sandbox', environment: 'sandbox', expectedOrgId: '00D000000000001', verified: {} },
@@ -120,11 +157,73 @@ describe('c-agent-chat', () => {
 
         const progress = element.shadowRoot.querySelector('.specialist-progress');
         expect(progress.textContent).toContain('Iteration 2');
-        expect(progress.textContent).toContain('Object and Field Agent');
-        expect(progress.textContent).toContain('Flow Agent');
-        expect(progress.textContent).toContain('WAITING FOR DEPENDENCY');
+        expect(element.shadowRoot.querySelector('.specialist-list')).toBeNull();
+        expect(buttonByTitle(element, 'Show specialist details').getAttribute('aria-expanded')).toBe('false');
+
+        buttonByTitle(element, 'Show specialist details').click();
+        await flushPromises();
+
+        expect(element.shadowRoot.querySelector('.specialist-list').textContent).toContain('Object and Field Agent');
+        expect(element.shadowRoot.querySelector('.specialist-list').textContent).toContain('Flow Agent');
+        expect(element.shadowRoot.querySelector('.specialist-list').textContent).toContain('WAITING FOR DEPENDENCY');
+        expect(buttonByTitle(element, 'Hide specialist details').getAttribute('aria-expanded')).toBe('true');
         expect(buttonByLabel(element, 'Approve Implementation')).not.toBeNull();
         expect([...element.shadowRoot.querySelectorAll('lightning-button')].filter((button) => button.label?.includes('Agent Approval'))).toHaveLength(0);
+    });
+
+    it('shows the current supervised action for plan review', async () => {
+        const job = {
+            jobId: 'job-current-action', status: 'AWAITING_PLAN_APPROVAL', approvals: [], logs: [],
+            orgContext: { customerName: 'Customer', displayName: 'Sandbox', environment: 'sandbox', expectedOrgId: '00D000000000001', verified: {} },
+            plan: { planVersion: 1, notice: 'Review the plan.' },
+            metadataScope: { primaryMetadata: [], dependencies: [] }
+        };
+        getJobs.mockResolvedValue(JSON.stringify({ jobs: [job] }));
+        getAgentJob.mockResolvedValue(JSON.stringify(job));
+
+        const element = createElement('c-agent-chat', { is: AgentChat });
+        document.body.appendChild(element);
+        await flushPromises();
+
+        expect(element.shadowRoot.querySelector('.current-action').textContent).toContain('Review the implementation plan');
+        expect(element.shadowRoot.querySelector('.current-action').textContent).toContain('Implementation approval does not authorize deployment');
+    });
+
+    it('refreshes the workspace without triggering a job action', async () => {
+        const job = {
+            jobId: 'job-refresh', status: 'AWAITING_PLAN_APPROVAL', approvals: [], logs: [],
+            orgContext: { customerName: 'Customer', displayName: 'Sandbox', environment: 'sandbox', expectedOrgId: '00D000000000001', verified: {} },
+            plan: { planVersion: 1 }, metadataScope: { primaryMetadata: [], dependencies: [] }
+        };
+        getJobs.mockResolvedValue(JSON.stringify({ jobs: [job] }));
+        getAgentJob.mockResolvedValue(JSON.stringify(job));
+
+        const element = createElement('c-agent-chat', { is: AgentChat });
+        document.body.appendChild(element);
+        await flushPromises();
+
+        buttonByTitle(element, 'Refresh workspace').click();
+        await flushPromises();
+
+        expect(getJobs).toHaveBeenCalledTimes(2);
+        expect(getAgentJob).toHaveBeenCalledTimes(2);
+        expect(performJobAction).not.toHaveBeenCalled();
+    });
+
+    it('shows the current planning activity instead of a misleading dependency status', async () => {
+        const job = {
+            jobId: 'job-planning', status: 'ANALYZING_DEPENDENCIES', currentActivity: 'Preparing implementation plan', logs: [],
+            orgContext: { displayName: 'Sandbox', environment: 'sandbox', expectedOrgId: '00D000000000001', verified: {} },
+            metadataScope: { primaryMetadata: [], dependencies: [] }
+        };
+        getJobs.mockResolvedValue(JSON.stringify({ jobs: [job] }));
+        getAgentJob.mockResolvedValue(JSON.stringify(job));
+
+        const element = createElement('c-agent-chat', { is: AgentChat });
+        document.body.appendChild(element);
+        await flushPromises();
+
+        expect(element.shadowRoot.querySelector('lightning-badge').label).toBe('Preparing implementation plan');
     });
 
     it('submits a drafted instruction when Request Changes is clicked', async () => {
@@ -180,6 +279,44 @@ describe('c-agent-chat', () => {
         expect(textareaByLabel(element, 'Request a change or add an instruction').disabled).toBe(false);
         expect(buttonByLabel(element, 'Send Instruction')).not.toBeUndefined();
     });
+
+    it('keeps versioned implementation reports available and downloads the selected format', async () => {
+        const job = {
+            jobId: 'job-reports', status: 'AWAITING_PLAN_APPROVAL', logs: [], approvals: [], deployment: null,
+            orgContext: { displayName: 'Developer Org', environment: 'developer', expectedOrgId: '00D000000000001', verified: {} },
+            plan: { planVersion: 3, notice: 'A follow-up proposal is being reviewed.' },
+            metadataScope: { primaryMetadata: [], dependencies: [] },
+            implementationReports: [
+                { reportId: 'implementation-report-v1', status: 'READY', deploymentVersion: 1, generatedAt: '2026-07-15T10:00:00Z' },
+                { reportId: 'implementation-report-v2', status: 'READY', deploymentVersion: 2, generatedAt: '2026-07-16T10:00:00Z' }
+            ]
+        };
+        getJobs.mockResolvedValue(JSON.stringify({ jobs: [job] }));
+        getAgentJob.mockResolvedValue(JSON.stringify(job));
+        getImplementationReport.mockResolvedValue(JSON.stringify({ fileName: 'Implementation-Report-TA-6-V1.pdf', contentType: 'application/pdf', contentBase64: 'JVBERg==' }));
+        window.URL.createObjectURL = jest.fn(() => 'blob:implementation-report');
+        window.URL.revokeObjectURL = jest.fn();
+        const anchorClick = jest.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+
+        const element = createElement('c-agent-chat', { is: AgentChat });
+        document.body.appendChild(element);
+        await flushPromises();
+
+        const reports = element.shadowRoot.querySelector('.implementation-reports');
+        expect(reports.textContent).toContain('Implementation Report Ready');
+        expect(reports.textContent).toContain('Deployment Version 1');
+        expect(reports.textContent).toContain('Deployment Version 2');
+        expect([...element.shadowRoot.querySelectorAll('lightning-button')].filter((button) => button.label?.startsWith('Download'))).toHaveLength(6);
+
+        const firstPdf = [...element.shadowRoot.querySelectorAll('lightning-button')].find((button) => button.label === 'Download PDF' && button.dataset.version === '1');
+        firstPdf.click();
+        await flushPromises();
+
+        expect(getImplementationReport).toHaveBeenCalledWith({ jobId: 'job-reports', deploymentVersion: 1, format: 'pdf' });
+        expect(window.URL.createObjectURL).toHaveBeenCalled();
+        expect(anchorClick).toHaveBeenCalled();
+        anchorClick.mockRestore();
+    });
 });
 
 function buttonByLabel(element, label) {
@@ -188,6 +325,10 @@ function buttonByLabel(element, label) {
 
 function textareaByLabel(element, label) {
     return [...element.shadowRoot.querySelectorAll('lightning-textarea')].find((textarea) => textarea.label === label);
+}
+
+function buttonByTitle(element, title) {
+    return [...element.shadowRoot.querySelectorAll('lightning-button-icon')].find((button) => button.title === title);
 }
 
 function flushPromises() {

@@ -4,9 +4,17 @@ import getJobs from '@salesforce/apex/AgentController.getJobs';
 import getAgentJob from '@salesforce/apex/AgentController.getAgentJob';
 import getOrgs from '@salesforce/apex/AgentController.getOrgs';
 import performJobAction from '@salesforce/apex/AgentController.performJobAction';
+import getImplementationReport from '@salesforce/apex/AgentController.getImplementationReport';
 
 const POLL_INTERVAL_MS = 3000;
 const ACTIVE_STATES = new Set(['RECEIVED', 'VERIFYING_ORG', 'ANALYZING_JIRA', 'DISCOVERING_METADATA', 'RETRIEVING_RELEVANT_METADATA', 'ANALYZING_DEPENDENCIES', 'IMPLEMENTING', 'VALIDATING', 'DEPLOYING']);
+const WORKFLOW_STAGES = [
+    { key: 'analysis', label: 'Analysis' },
+    { key: 'plan', label: 'Plan' },
+    { key: 'implementation', label: 'Implementation' },
+    { key: 'validation', label: 'Validation' },
+    { key: 'deployment', label: 'Deployment' }
+];
 
 export default class AgentChat extends LightningElement {
     prompt = '';
@@ -18,6 +26,7 @@ export default class AgentChat extends LightningElement {
     job;
     errorMessage = '';
     isBusy = false;
+    specialistsExpanded = false;
     pollTimer;
 
     connectedCallback() {
@@ -35,6 +44,113 @@ export default class AgentChat extends LightningElement {
     get orgContext() { return this.job?.orgContext; }
     get verifiedAt() { return this.orgContext?.verified?.verifiedAt || ''; }
     get status() { return this.job?.status || 'NO_JOB_SELECTED'; }
+    get statusDisplay() {
+        if (this.status === 'ANALYZING_DEPENDENCIES' && this.job?.currentActivity) return this.job.currentActivity;
+        return this.status.replaceAll('_', ' ');
+    }
+    get currentAction() {
+        const actions = {
+            AWAITING_ORG_SELECTION: {
+                title: 'Select the target Salesforce org',
+                message: 'Choose one verified org before analysis can continue.',
+                iconName: 'utility:company',
+                tone: 'attention'
+            },
+            AWAITING_PLAN_APPROVAL: {
+                title: 'Review the implementation plan',
+                message: 'Review the scope, tests, and rollback plan. Implementation approval does not authorize deployment.',
+                iconName: 'utility:approval',
+                tone: 'attention'
+            },
+            IMPLEMENTING: {
+                title: 'Applying the approved changes locally',
+                message: 'Providus Nexus is updating only the approved files. Nothing is being deployed yet.',
+                iconName: 'utility:settings',
+                tone: 'active'
+            },
+            VALIDATING: {
+                title: 'Validating the implementation',
+                message: 'Salesforce validation and relevant tests are running against the verified target org.',
+                iconName: 'utility:test',
+                tone: 'active'
+            },
+            VALIDATION_FAILED: {
+                title: 'Validation needs attention',
+                message: this.validationFailureReason,
+                iconName: 'utility:error',
+                tone: 'error'
+            },
+            AWAITING_DEPLOYMENT_APPROVAL: {
+                title: this.hasDeploymentApproval ? 'Approved deployment is ready' : 'Review validation and approve deployment',
+                message: this.hasDeploymentApproval
+                    ? 'The validated package can now be deployed to the exact approved org.'
+                    : 'Implementation approval does not authorize deployment. Review the validation result before deciding.',
+                iconName: 'utility:upload',
+                tone: 'attention'
+            },
+            DEPLOYING: {
+                title: 'Deploying the approved package',
+                message: 'Providus Nexus is deploying only the validated components to the verified target org.',
+                iconName: 'utility:upload',
+                tone: 'active'
+            },
+            COMPLETED: {
+                title: this.deploymentNotRequired ? 'Work completed without deployment' : 'Deployment completed',
+                message: this.deploymentNotRequired
+                    ? 'Validation confirmed that no Salesforce deployment was required.'
+                    : this.deploymentSummaryText,
+                iconName: 'utility:success',
+                tone: 'success'
+            }
+        };
+        return actions[this.status] || {
+            title: this.statusDisplay,
+            message: 'Providus Nexus is preparing the next supervised step.',
+            iconName: 'utility:clock',
+            tone: this.failedWorkflowStage ? 'error' : 'active'
+        };
+    }
+    get currentActionClass() { return `current-action current-action--${this.currentAction.tone}`; }
+    get workflowStageIndex() {
+        if (['DEPLOYING', 'COMPLETED'].includes(this.status)) return 4;
+        if (['VALIDATING', 'VALIDATION_FAILED', 'AWAITING_DEPLOYMENT_APPROVAL'].includes(this.status)) return 3;
+        if (this.status === 'IMPLEMENTING') return 2;
+        if (['AWAITING_PLAN_APPROVAL', 'PLAN_REJECTED'].includes(this.status)) return 1;
+        return 0;
+    }
+    get failedWorkflowStage() {
+        if (this.status === 'ORG_VERIFICATION_FAILED') return 'analysis';
+        if (this.status === 'PLAN_REJECTED') return 'plan';
+        if (this.status === 'VALIDATION_FAILED') return 'validation';
+        if (this.status !== 'FAILED') return '';
+        if (this.job?.deployment) return 'deployment';
+        if (this.validation) return 'validation';
+        if (this.implementationComplete) return 'implementation';
+        return 'analysis';
+    }
+    get workflowStages() {
+        const activeIndex = this.workflowStageIndex;
+        return WORKFLOW_STAGES.map((stage, index) => {
+            const failed = this.failedWorkflowStage === stage.key;
+            const complete = !failed && (this.status === 'COMPLETED' || index < activeIndex);
+            const active = !failed && this.status !== 'COMPLETED' && index === activeIndex;
+            const stateClass = failed
+                ? ' workflow-stage--failed milestone--failed'
+                : complete
+                    ? ' workflow-stage--complete milestone--complete'
+                    : active
+                        ? ' workflow-stage--active milestone--active'
+                        : '';
+            return {
+                ...stage,
+                label: this.workflowStageLabel(stage.key, stage.label),
+                detail: this.workflowStageDetail(stage.key),
+                iconName: failed ? 'utility:error' : complete ? 'utility:success' : active ? 'utility:sync' : 'utility:clock',
+                className: `workflow-stage milestone${stateClass}`,
+                ariaCurrent: active ? 'step' : null
+            };
+        });
+    }
     get isProduction() { return this.orgContext?.environment === 'production'; }
     get canSelectOrg() { return this.status === 'AWAITING_ORG_SELECTION'; }
     get canReviewPlan() { return this.status === 'AWAITING_PLAN_APPROVAL'; }
@@ -51,12 +167,12 @@ export default class AgentChat extends LightningElement {
         const latest = [...(this.job?.approvals || [])].reverse().find((item) => item.approvalType === 'DEPLOYMENT' && item.validationId === this.validation?.validationId);
         return latest?.decision === 'APPROVED';
     }
-    get canRefreshAnalysis() { return ['RECEIVED', 'PLAN_REJECTED', 'ORG_VERIFICATION_FAILED'].includes(this.status); }
+    get canRefreshAnalysis() { return ['RECEIVED', 'PLAN_REJECTED', 'ORG_VERIFICATION_FAILED', 'FAILED'].includes(this.status); }
     get canCancel() { return !['COMPLETED', 'FAILED', 'CANCELLED', 'DEPLOYING'].includes(this.status); }
     get canAddInstruction() { return this.hasJob && this.status !== 'CANCELLED'; }
     get instructionInputDisabled() { return this.isBusy || !this.canAddInstruction; }
     get instructionSendDisabled() { return this.instructionInputDisabled || !this.instruction.trim(); }
-    get jobOptions() { return this.jobs.map((item) => ({ label: `${item.jiraIssueKey || 'Manual'} - ${item.status}`, value: item.jobId })); }
+    get jobOptions() { return this.jobs.map((item) => ({ label: `${item.jiraIssueKey || 'Manual'} - ${item.status === 'ANALYZING_DEPENDENCIES' && item.currentActivity ? item.currentActivity : item.status}`, value: item.jobId })); }
     get orgOptions() {
         const candidates = this.job?.orgCandidates?.length ? this.job.orgCandidates : this.orgs;
         return candidates.map((item) => ({ label: `${item.displayName} (${item.environment})`, value: item.orgRegistryId }));
@@ -101,8 +217,24 @@ export default class AgentChat extends LightningElement {
     }
     get specialistOverallStatus() { return (this.job?.specialistOverallStatus || 'PENDING').replaceAll('_', ' '); }
     get orchestrationIteration() { return this.job?.iteration || this.plan?.planVersion || 1; }
+    get specialistToggleIcon() { return this.specialistsExpanded ? 'utility:chevronup' : 'utility:chevrondown'; }
+    get specialistToggleTitle() { return this.specialistsExpanded ? 'Hide specialist details' : 'Show specialist details'; }
+    get specialistProgressSummary() { return `${this.specialistWorkItems.length} specialists | Iteration ${this.orchestrationIteration}`; }
     get deploymentHowItWorks() { return this.job?.deployment?.specialistSummary?.howItWorks || this.expectedOutcome; }
     get deploymentValidationSummary() { return this.job?.deployment?.specialistSummary?.validationResult || ''; }
+    get hasImplementationReports() { return this.implementationReportVersions.length > 0; }
+    get implementationReportVersions() {
+        return [...(this.job?.implementationReports || [])]
+            .filter((report) => report.status === 'READY')
+            .sort((left, right) => right.deploymentVersion - left.deploymentVersion)
+            .map((report) => ({
+                ...report,
+                key: report.reportId || `implementation-report-v${report.deploymentVersion}`,
+                versionLabel: `Deployment Version ${report.deploymentVersion}`,
+                reportLabel: `Implementation Report V${report.deploymentVersion}`,
+                generatedLabel: report.generatedAt ? new Date(report.generatedAt).toLocaleString() : ''
+            }));
+    }
     get implementationMilestoneClass() { return this.milestoneClass(this.implementationComplete, this.status === 'IMPLEMENTING'); }
     get validationMilestoneClass() { return this.validationFailed ? 'milestone milestone--failed' : this.milestoneClass(this.validationComplete, this.status === 'VALIDATING'); }
     get deploymentMilestoneClass() { return this.milestoneClass(this.deploymentComplete || this.deploymentNotRequired, this.status === 'DEPLOYING'); }
@@ -122,6 +254,40 @@ export default class AgentChat extends LightningElement {
     }
     get createDisabled() { return this.isBusy || (!this.prompt.trim() && !this.jiraIssueKey.trim()); }
 
+    workflowStageLabel(stageKey, defaultLabel) {
+        if (stageKey === 'deployment' && this.deploymentNotRequired) return 'Completed without deployment';
+        if (stageKey === 'deployment' && this.deploymentComplete) return 'Deployment completed';
+        if (stageKey === 'validation' && this.validationFailed) return 'Validation failed';
+        return defaultLabel;
+    }
+
+    workflowStageDetail(stageKey) {
+        if (stageKey === 'analysis') {
+            return this.workflowStageIndex === 0 ? this.statusDisplay : 'Requirement and relevant metadata reviewed.';
+        }
+        if (stageKey === 'plan') {
+            if (this.status === 'PLAN_REJECTED') return 'The proposal needs revision.';
+            if (this.workflowStageIndex === 1) return 'Implementation plan ready for review.';
+            return this.workflowStageIndex > 1 || this.status === 'COMPLETED' ? 'Implementation plan approved.' : 'Prepared after analysis.';
+        }
+        if (stageKey === 'implementation') {
+            if (this.implementationComplete) return 'Approved local changes completed.';
+            if (this.status === 'IMPLEMENTING') return 'Applying approved changes locally.';
+            return 'Starts after implementation approval.';
+        }
+        if (stageKey === 'validation') {
+            if (this.validationFailed) return this.validationFailureReason;
+            if (this.validationComplete) return 'Salesforce validation passed.';
+            if (this.status === 'VALIDATING') return 'Running Salesforce validation and tests.';
+            return 'Runs after local implementation.';
+        }
+        if (this.deploymentNotRequired) return 'No deployment was required after validation.';
+        if (this.deploymentComplete) return this.deploymentSummaryText || 'Approved components were deployed successfully.';
+        if (this.status === 'DEPLOYING') return 'Deploying the approved package.';
+        if (this.status === 'AWAITING_DEPLOYMENT_APPROVAL') return 'Separate deployment approval is required.';
+        return 'Available after successful validation.';
+    }
+
     async loadConsole() {
         this.isBusy = true;
         try {
@@ -137,6 +303,7 @@ export default class AgentChat extends LightningElement {
     }
 
     handleValue(event) { this[event.target.dataset.field] = event.detail?.value ?? event.target.value; }
+    handleToggleSpecialists() { this.specialistsExpanded = !this.specialistsExpanded; }
     async handleJobSelection(event) { await this.selectJob(event.detail.value); }
 
     async handleCreate() {
@@ -159,6 +326,12 @@ export default class AgentChat extends LightningElement {
         this.instruction = '';
     }
     async handleRefreshAnalysis() { await this.action('analyze', {}); }
+    async handleReload() {
+        await this.run(async () => {
+            await this.refreshJobs();
+            if (this.hasJob) await this.refreshJob();
+        });
+    }
     async handleApproveImplementation() { await this.action('approve-implementation', { planVersion: this.plan.planVersion, comments: 'Approved in Salesforce agent console.' }); }
     async handleRejectPlan() { await this.action('reject-plan', { comments: 'Rejected in Salesforce agent console.' }); }
     async handleImplement() { await this.action('implement', {}); }
@@ -167,6 +340,14 @@ export default class AgentChat extends LightningElement {
     async handleRejectDeployment() { await this.action('reject-deployment', { comments: 'Deployment rejected in Salesforce agent console.' }); }
     async handleDeploy() { await this.action('deploy', {}); }
     async handleCancel() { await this.action('cancel', { reason: 'Cancelled in Salesforce agent console.' }); }
+    async handleReportDownload(event) {
+        const deploymentVersion = Number(event.currentTarget.dataset.version);
+        const format = event.currentTarget.dataset.format;
+        await this.run(async () => {
+            const payload = this.parse(await getImplementationReport({ jobId: this.job.jobId, deploymentVersion, format }));
+            this.downloadFile(payload);
+        });
+    }
 
     async action(action, payload) {
         await this.run(async () => {
@@ -178,6 +359,7 @@ export default class AgentChat extends LightningElement {
 
     async selectJob(jobId) {
         this.stopPolling();
+        this.specialistsExpanded = false;
         this.job = this.normalizeJob(this.parse(await getAgentJob({ jobId })));
         this.selectedOrgId = this.orgContext?.orgRegistryId || '';
         if (ACTIVE_STATES.has(this.status)) this.startPolling();
@@ -211,8 +393,22 @@ export default class AgentChat extends LightningElement {
                 verified: { verifiedAt: job?.orgContext?.verified?.verifiedAt || '' }
             },
             metadataScope: job?.metadataScope || { primaryMetadata: [], dependencies: [] },
-            workItems: job?.workItems || []
+            workItems: job?.workItems || [],
+            implementationReports: job?.implementationReports || []
         };
+    }
+    downloadFile(payload) {
+        const binary = window.atob(payload.contentBase64 || '');
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+        const url = window.URL.createObjectURL(new Blob([bytes], { type: payload.contentType }));
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = payload.fileName;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.setTimeout(() => window.URL.revokeObjectURL(url), 0);
     }
     listItems(values, prefix) { return values.map((text, index) => ({ key: `${prefix}-${index}`, text })); }
     milestoneClass(complete, active) { return `milestone${complete ? ' milestone--complete' : active ? ' milestone--active' : ''}`; }
