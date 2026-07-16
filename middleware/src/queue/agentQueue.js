@@ -5,6 +5,7 @@ import { redisConnection } from './connection.js';
 import { processAgentJob } from '../services/agent.js';
 import { appendLog, getJobRecord, transitionJob } from '../services/jobStore.js';
 import { JOB_STATES } from '../domain/jobState.js';
+import { buildQueueJobOptions } from '../services/runtimeHealth.js';
 
 export const AGENT_QUEUE_NAME = 'salesforce-agent-jobs';
 
@@ -12,11 +13,7 @@ export const agentQueue =
   config.queueDriver === 'redis'
     ? new Queue(AGENT_QUEUE_NAME, {
         connection: redisConnection,
-        defaultJobOptions: {
-          attempts: 1,
-          removeOnComplete: false,
-          removeOnFail: false
-        }
+        defaultJobOptions: buildQueueJobOptions(config)
       })
     : null;
 
@@ -26,7 +23,8 @@ export async function enqueueAgentJob(job, options = {}) {
     try {
       return await agentQueue.add('process-agent-job', job, safeOptions);
     } catch (error) {
-      logger.warn({ jobId: job.jobId, error: error.message }, 'BullMQ enqueue failed, falling back to in-memory processing');
+      logger.error({ jobId: job.jobId, error: error.message }, 'BullMQ enqueue failed');
+      throw Object.assign(new Error('The durable job queue is unavailable. Try again after middleware readiness is restored.'), { statusCode: 503, code: 'QUEUE_UNAVAILABLE' });
     }
   }
 

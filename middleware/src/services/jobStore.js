@@ -6,6 +6,7 @@ import { redis } from '../queue/connection.js';
 import { assertTransition, JOB_STATES } from '../domain/jobState.js';
 import { config } from '../config.js';
 import { assertWorkItemTransition, selectAffectedSpecialistAgents } from '../domain/specialistAgents.js';
+import { preservableCompletedWorkItems } from './correctionRouting.js';
 
 const memoryJobs = new Map();
 const localLocks = new Map();
@@ -20,6 +21,7 @@ export async function createJobRecord(input) {
     jiraIssueKey: input.jiraIssueKey || '',
     source: input.source || 'manual',
     status: JOB_STATES.RECEIVED,
+    currentActivity: 'Queued for analysis',
     prompt: input.prompt || '',
     orgId: input.orgId || '',
     userId: input.userId || '',
@@ -29,6 +31,7 @@ export async function createJobRecord(input) {
     orgRoutingEvidence: [],
     jira: input.jira || null,
     jiraSync: null,
+    jiraCommunication: {},
     pendingRevision: false,
     followUpRequired: false,
     conversation: [],
@@ -46,6 +49,8 @@ export async function createJobRecord(input) {
     approvals: [],
     validation: null,
     deployment: null,
+    deploymentHistory: [],
+    implementationReports: [],
     diff: '',
     logs: [{ timestamp: now, level: 'info', message: 'Job received.' }],
     commands: [],
@@ -271,7 +276,7 @@ async function invalidate(jobId, selection, actor, reason, options = {}) {
           ? selectAffectedSpecialistAgents(options.instruction)
           : (record.workItems || []).map((item) => item.assignedSpecialistAgent));
     const affected = new Set(affectedAgentIds);
-    const preservedWorkItems = options.orgChanged ? [] : (record.workItems || []).filter((item) => item.status === 'COMPLETED' && !affected.has(item.assignedSpecialistAgent));
+    const preservedWorkItems = options.orgChanged ? [] : preservableCompletedWorkItems(record, affected);
     const revisionContext = options.orgChanged ? null : {
       previousPlanVersion: record.plan?.planVersion || currentPlanVersion,
       previousMaterialChangeHash: record.plan?.materialChangeHash || '',
@@ -280,7 +285,7 @@ async function invalidate(jobId, selection, actor, reason, options = {}) {
       preservedWorkItems
     };
     record.stateHistory.push({ previousState: record.status, newState: JOB_STATES.RECEIVED, timestamp: now, actor, reason, approvalId: '', orgId: '' });
-    Object.assign(record, { status: JOB_STATES.RECEIVED, context: { ...record.context, selectedOrgRegistryId: selection }, orgContext: null, orgCandidates: [], orgRoutingEvidence: [], metadataScope: null, plan: null, nextPlanVersion: Math.max(1, currentPlanVersion + 1), iteration: Math.max(1, currentPlanVersion + 1), orchestration: null, workItems: preservedWorkItems, specialistMessages: [], fileOwnership: [], revisionContext, revisions, approvals: [], validation: null, deployment: null, implementation: null, diff: '', pendingRevision: false, followUpRequired: false, error: '', updatedAt: now });
+    Object.assign(record, { status: JOB_STATES.RECEIVED, currentActivity: 'Queued for revised analysis', context: { ...record.context, selectedOrgRegistryId: selection }, orgContext: null, orgCandidates: [], orgRoutingEvidence: [], metadataScope: null, plan: null, nextPlanVersion: Math.max(1, currentPlanVersion + 1), iteration: Math.max(1, currentPlanVersion + 1), orchestration: null, workItems: preservedWorkItems, specialistMessages: [], fileOwnership: [], revisionContext, revisions, approvals: [], validation: null, deployment: null, implementation: null, diff: '', pendingRevision: false, followUpRequired: false, error: '', updatedAt: now });
     await save(record);
     return record;
   });

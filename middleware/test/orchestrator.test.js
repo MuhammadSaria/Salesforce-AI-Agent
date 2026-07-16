@@ -5,7 +5,8 @@ import {
   WORK_ITEM_STATUSES,
   ownerForFile,
   selectAffectedSpecialistAgents,
-  selectSpecialistAgents
+  selectSpecialistAgents,
+  workItemCompletionPath
 } from '../src/domain/specialistAgents.js';
 import {
   approveSpecialistWorkItems,
@@ -71,14 +72,26 @@ test('one unified approval approves all proposed specialist work without creatin
   assert.equal(overallSpecialistStatus(approved), 'PENDING');
 });
 
-test('specialist path boundaries reject unowned metadata and distinguish compact layouts', () => {
+test('specialist completion uses the required intermediate state after implementation', () => {
+  assert.deepEqual(
+    workItemCompletionPath(WORK_ITEM_STATUSES.IMPLEMENTING),
+    [WORK_ITEM_STATUSES.IMPLEMENTATION_COMPLETE, WORK_ITEM_STATUSES.COMPLETED]
+  );
+  assert.deepEqual(
+    workItemCompletionPath(WORK_ITEM_STATUSES.APPROVED),
+    [WORK_ITEM_STATUSES.COMPLETED]
+  );
+});
+
+test('specialist path boundaries reject unsafe metadata and distinguish compact layouts', () => {
   assert.equal(ownerForFile('force-app/main/default/objects/Contact/fields/Donor_Status__c.field-meta.xml'), SPECIALIST_AGENT_IDS.OBJECT_FIELD);
   assert.equal(ownerForFile('force-app/main/default/objects/Contact/compactLayouts/Contact.compactLayout-meta.xml'), SPECIALIST_AGENT_IDS.UI_METADATA);
+  assert.equal(ownerForFile('force-app/main/default/reports/Test.report-meta.xml'), SPECIALIST_AGENT_IDS.GENERAL_METADATA);
   assert.throws(() => buildSpecialistOrchestration(
     { jobId: 'job-2', jiraIssueKey: 'TA-2', orgContext },
     { summary: 'Change an unsupported metadata file.' },
     { primaryMetadata: [], dependencies: [], hash: 'scope-2' },
-    basePlan([{ operation: 'create', path: 'force-app/main/default/reports/Test.report-meta.xml', content: '<Report/>', reason: 'Create report' }])
+    basePlan([{ operation: 'create', path: 'force-app/main/default/scripts/deploy.ps1', content: 'blocked', reason: 'Unsafe script' }])
   ), /No specialist is allowed/);
 });
 

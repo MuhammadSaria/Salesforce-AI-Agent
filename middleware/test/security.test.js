@@ -72,6 +72,7 @@ test('Jira comment synchronization ignores agent comments and keeps new user fee
   const selected = selectNewUserComments({ jiraSync: { commentIds: ['1'] }, instructions: [] }, comments);
   assert.deepEqual(selected.map((comment) => comment.id), ['3']);
   assert.equal(isAgentGeneratedComment('AI agent job job-1 completed.\nDeployment ID: 0Af'), true);
+  assert.equal(isAgentGeneratedComment('Providus Nexus: Everything looks good. The changes are ready for deployment.'), true);
 });
 
 test('legacy jobs do not reprocess Jira comments already used during analysis', () => {

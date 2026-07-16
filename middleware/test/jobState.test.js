@@ -15,3 +15,9 @@ test('invalid transition cannot bypass implementation and deployment approvals',
 test('a validated no-change plan can complete without deployment', () => {
   assert.doesNotThrow(() => assertTransition(JOB_STATES.VALIDATING, JOB_STATES.COMPLETED));
 });
+
+test('incomplete requirements block approval until revised analysis is requested', () => {
+  assert.doesNotThrow(() => assertTransition(JOB_STATES.ANALYZING_DEPENDENCIES, JOB_STATES.AWAITING_REQUIREMENTS));
+  assert.doesNotThrow(() => assertTransition(JOB_STATES.AWAITING_REQUIREMENTS, JOB_STATES.ANALYZING_JIRA));
+  assert.throws(() => assertTransition(JOB_STATES.AWAITING_REQUIREMENTS, JOB_STATES.IMPLEMENTING), /Invalid job transition/);
+});

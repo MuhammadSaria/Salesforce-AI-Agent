@@ -56,6 +56,12 @@ export default class AgentChat extends LightningElement {
                 iconName: 'utility:company',
                 tone: 'attention'
             },
+            AWAITING_REQUIREMENTS: {
+                title: 'Provide the missing implementation details',
+                message: 'The request cannot be approved yet because Providus Nexus could not produce a concrete, safe Salesforce implementation from the available information.',
+                iconName: 'utility:warning',
+                tone: 'attention'
+            },
             AWAITING_PLAN_APPROVAL: {
                 title: 'Review the implementation plan',
                 message: 'Review the scope, tests, and rollback plan. Implementation approval does not authorize deployment.',
@@ -153,7 +159,7 @@ export default class AgentChat extends LightningElement {
     }
     get isProduction() { return this.orgContext?.environment === 'production'; }
     get canSelectOrg() { return this.status === 'AWAITING_ORG_SELECTION'; }
-    get canReviewPlan() { return this.status === 'AWAITING_PLAN_APPROVAL'; }
+    get canReviewPlan() { return this.status === 'AWAITING_PLAN_APPROVAL' && this.plan?.actionability?.actionable !== false; }
     get canImplement() { return this.status === 'VALIDATION_FAILED' && !this.job?.implementation; }
     get canValidate() { return this.status === 'VALIDATION_FAILED' && Boolean(this.job?.implementation); }
     get canApproveDeployment() { return this.status === 'AWAITING_DEPLOYMENT_APPROVAL' && !this.hasDeploymentApproval; }
@@ -167,7 +173,7 @@ export default class AgentChat extends LightningElement {
         const latest = [...(this.job?.approvals || [])].reverse().find((item) => item.approvalType === 'DEPLOYMENT' && item.validationId === this.validation?.validationId);
         return latest?.decision === 'APPROVED';
     }
-    get canRefreshAnalysis() { return ['RECEIVED', 'PLAN_REJECTED', 'ORG_VERIFICATION_FAILED', 'FAILED'].includes(this.status); }
+    get canRefreshAnalysis() { return ['RECEIVED', 'AWAITING_REQUIREMENTS', 'PLAN_REJECTED', 'ORG_VERIFICATION_FAILED', 'FAILED'].includes(this.status); }
     get canCancel() { return !['COMPLETED', 'FAILED', 'CANCELLED', 'DEPLOYING'].includes(this.status); }
     get canAddInstruction() { return this.hasJob && this.status !== 'CANCELLED'; }
     get instructionInputDisabled() { return this.isBusy || !this.canAddInstruction; }
@@ -178,6 +184,12 @@ export default class AgentChat extends LightningElement {
         return candidates.map((item) => ({ label: `${item.displayName} (${item.environment})`, value: item.orgRegistryId }));
     }
     get planSummary() { return this.plan?.proposedImplementation || 'The implementation proposal is being prepared.'; }
+    get requirementsBlocked() { return this.status === 'AWAITING_REQUIREMENTS' || this.plan?.actionability?.actionable === false; }
+    get missingRequirementItems() { return this.listItems(this.plan?.actionability?.missingInformation || this.plan?.missingInformation || [], 'missing'); }
+    get hasAttachmentFailures() { return Boolean(this.plan?.actionability?.attachmentFailures?.length); }
+    get attachmentFailureItems() {
+        return this.listItems((this.plan?.actionability?.attachmentFailures || []).map((item) => `${item.fileName || 'Jira attachment'}: ${item.reason || 'The content could not be read.'}`), 'attachment');
+    }
     get implementationSteps() { return this.listItems(this.plan?.implementationSteps?.length ? this.plan.implementationSteps : [this.planSummary], 'step'); }
     get expectedOutcome() { return this.plan?.expectedOutcome || 'The requested Salesforce behavior will be available after validation and separate deployment approval.'; }
     get businessImpact() { return this.plan?.businessImpact || 'Only the approved requirement is intended to change.'; }
@@ -186,6 +198,7 @@ export default class AgentChat extends LightningElement {
     get outOfScopeItems() { return this.listItems(this.plan?.outOfScope?.length ? this.plan.outOfScope : ['Unrelated Salesforce behavior and data.'], 'scope'); }
     get rollbackPlan() { return this.plan?.rollbackPlan || 'Revert the approved change using the captured baseline.'; }
     get planNotice() {
+        if (this.requirementsBlocked) return 'Implementation approval is blocked until the missing information is supplied and a concrete plan is generated.';
         if (this.deploymentNotRequired) return 'Validation completed and no deployment was required because there were no Salesforce source changes.';
         if (this.deploymentComplete) return `Deployment completed successfully in ${this.orgContext.displayName}.`;
         if (this.validationFailed) return 'Validation failed. Nothing was deployed, and deployment remains blocked until the implementation is corrected and validated again.';

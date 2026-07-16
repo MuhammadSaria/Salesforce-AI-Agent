@@ -7,6 +7,57 @@ services:
     volumes:
       - ./redis.conf:/usr/local/etc/redis/redis.conf:ro
       - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: ..
+      dockerfile: middleware/Dockerfile
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      REDIS_URL: redis://redis:6379
+      PROJECT_ROOT: /workspace
+      WORKSPACE_ROOT: /workspace
+      SALESFORCE_ORG_REGISTRY_PATH: /workspace/middleware/config/org-registry.json
+    command: ["node", "src/server.js"]
+    ports:
+      - "3000:3000"
+    volumes:
+      - ../:/workspace
+      - codex-home:/root/.codex
+      - salesforce-home:/root/.sf
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ..
+      dockerfile: middleware/Dockerfile
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      REDIS_URL: redis://redis:6379
+      PROJECT_ROOT: /workspace
+      WORKSPACE_ROOT: /workspace
+      SALESFORCE_ORG_REGISTRY_PATH: /workspace/middleware/config/org-registry.json
+    command: ["node", "src/worker.js"]
+    volumes:
+      - ../:/workspace
+      - codex-home:/root/.codex
+      - salesforce-home:/root/.sf
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   redis-data:
+  codex-home:
+  salesforce-home:

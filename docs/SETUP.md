@@ -23,13 +23,23 @@ All configured routing signals must agree. Zero or multiple matches put the job 
 
 ## Jira
 
+Use a dedicated Atlassian account for Jira integration and set its display name to **Providus Nexus**. Jira uses the account behind `JIRA_EMAIL` and `JIRA_API_TOKEN` as the visible comment author; the REST API cannot override the author name per comment.
+
 1. Create a least-privilege Jira service account and record its account ID.
 2. Set `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_AGENT_ACCOUNT_ID`, `JIRA_WEBHOOK_SECRET`, and `JIRA_ALLOWED_PROJECT_KEYS` only in the middleware secret store.
 3. Set `JIRA_POLL_INTERVAL_SECONDS=60` to discover assigned issues when an admin-managed webhook is unavailable. Set it to `0` only after webhook delivery is confirmed.
-4. Register a Jira admin webhook for `jira:issue_created` and `jira:issue_updated`, filtered to the allowed project, and set its URL to `POST /api/webhooks/jira`. Set the webhook `secret` to `JIRA_WEBHOOK_SECRET`; Jira sends the resulting HMAC in `X-Hub-Signature`.
-5. New Jira comments on an existing, assigned issue are synchronized as untrusted change requests. Before deployment, they archive the current artifacts, invalidate approvals, increment the plan version, and queue revised analysis. Middleware-generated plan and completion comments are ignored to prevent loops. Comments never count as implementation or deployment approval.
-6. The middleware verifies the raw-body HMAC, allowed project, and configured assignee before accepting an event. Jira Automation remains an optional fallback using a hidden `X-Agent-Webhook-Token` header.
-7. Jira transition automation is intentionally disabled by default; successful deployment adds a comment but does not close the issue.
+4. Set `MAX_JIRA_ATTACHMENTS`, `MAX_JIRA_ATTACHMENT_BYTES`, and `MAX_JIRA_ATTACHMENT_TEXT` to bound DOCX, PDF, Markdown, text, CSV, JSON, and XML requirement ingestion. Unsupported binaries are retained as metadata only.
+5. Register a Jira admin webhook for `jira:issue_created` and `jira:issue_updated`, filtered to the allowed project, and set its URL to `POST /api/webhooks/jira`. Set the webhook `secret` to `JIRA_WEBHOOK_SECRET`; Jira sends the resulting HMAC in `X-Hub-Signature`.
+6. New Jira comments on an existing, assigned issue are synchronized as untrusted conversation input. Providus Nexus answers questions and scheduling requests without changing the plan. Requirement changes, implementation constraints, and bug reports create a supervised revision. Providus Nexus comments are ignored to prevent loops. Comments never count as implementation or deployment approval.
+
+## Implementation Reports
+
+1. Leave `IMPLEMENTATION_REPORT_LOGO_PATH` empty to use the Providus Nexus text cover, or point it to a PNG/JPEG inside `PROJECT_ROOT`.
+2. Keep `MAX_IMPLEMENTATION_REPORT_BYTES=1000000` unless the Apex heap and callout response limits have been reviewed for a larger value.
+3. Back up `jobs/<jobId>/deployment/reports/` or configure production-grade versioned object storage. Local disk is the development storage provider.
+4. The existing `AgentController` Apex class and `agentChat` LWC must be deployed together to enable downloads.
+
+The middleware verifies the raw-body HMAC, allowed project, and configured assignee before accepting an event. Jira Automation remains an optional fallback using a hidden `X-Agent-Webhook-Token` header. Jira transition automation is intentionally disabled by default; successful deployment adds a comment but does not close the issue.
 
 For local testing, set `NGROK_AUTHTOKEN` in the middleware secret store and run `npm run tunnel`. The launcher relies on ngrok's environment-based authentication so the token is not exposed in process arguments.
 
@@ -51,16 +61,31 @@ The middleware URL must be HTTPS and reachable from Salesforce. The Apex proxy a
 
 1. Jira assigns `TA-42` to the agent and sends a signed webhook.
 2. Project/component mapping resolves `providus_orgfarm_dev`; `sf org display --target-org orgfarm-dev --json` must match the stored Organization ID and URL.
-3. The worker extracts exact metadata names, writes `jobs/<jobId>/manifest/package.xml`, retrieves only that scope, analyzes dependencies, and publishes plan version 1 with “No changes have been made yet.”
+3. The worker extracts exact metadata names, writes `jobs/<jobId>/manifest/package.xml`, retrieves only that scope, analyzes dependencies, and publishes plan version 1 with "No changes have been made yet."
 4. A developer clicks **Approve Implementation**, then **Implement Locally**. The worker creates `ai-agent/READUSA-42-<jobId>`, writes only approved files, and records a diff/source hash. It does not deploy.
 5. Validation performs an exact-manifest dry run against the same org. A deployer separately clicks **Approve Deployment** and **Deploy Approved Package**.
 6. The worker reverifies identity and hashes, then deploys the exact manifest or executes only the approved structured record operations. It records deployment or record IDs and comments on Jira.
 
 ## Remaining Manual Steps
 
-- Initialize or restore the Git repository; the current `.git` directory is empty, so implementation correctly fails closed at branch creation.
 - Configure real org registry entries and authenticate each alias on the worker host.
 - Configure HTTPS, gateway authentication, request throttling, centralized logs, backups, and a production-grade secret manager.
 - Configure the Named Credential/External Credential principal and permission sets in Salesforce.
 - Configure the Jira webhook HMAC gateway and service-account permissions.
 - Install the Codex CLI on the middleware worker and run `codex login`. The middleware uses an ephemeral, read-only Codex execution with schema-constrained output; it does not require or expose an OpenAI API key. Keep `AGENT_BACKEND=codex`.
+
+## Managed Runtime
+
+The API, worker, and Redis must run continuously for Salesforce callouts, Jira events, retries, and polling. Local ngrok is a development tunnel and is not an availability solution.
+
+The included Compose file builds pinned Salesforce CLI and Codex CLI versions and runs separate API and worker services with a shared repository workspace and shared authentication volumes:
+
+```powershell
+cd middleware
+docker compose build
+docker compose up -d redis api worker
+docker compose exec api codex login --device-auth
+docker compose exec api sf org login device --alias orgfarm-dev
+```
+
+The API and worker share the `codex-home` and `salesforce-home` volumes. Confirm `GET /ready` returns HTTP 200 before configuring the Salesforce Named Credential or Jira webhook. For production, place the API behind a stable TLS hostname and identity-aware gateway, use managed Redis, mount encrypted persistent workspace storage, send logs to centralized monitoring, back up deployment reports and job snapshots, and manage all `.env` values in a secret manager. Docker is not installed in the current local workspace, so the image must be built and smoke-tested on the target host or CI runner before shared use.

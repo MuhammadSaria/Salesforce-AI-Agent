@@ -55,6 +55,13 @@
 .validation-failure h2 { color: #8e030f; font-size: 1.125rem; font-weight: 700; margin: 0 0 .4rem; }
 .validation-failure p { font-size: 1rem; line-height: 1.5; margin: 0; overflow-wrap: anywhere; }
 .validation-failure .failure-next-step { color: #444; font-size: .875rem; margin-top: .5rem; }
+.requirements-blocked { display: grid; grid-template-columns: 2rem minmax(0, 1fr); gap: .75rem; align-items: start; background: #fff8e8; border: 1px solid #dd7a01; border-left: 4px solid #b85d00; color: #181818; padding: 1rem; margin: .75rem 0; }
+.requirements-blocked h2 { color: #6f3a00; font-size: 1.125rem; font-weight: 700; margin: 0 0 .4rem; }
+.requirements-blocked h3 { color: #444; font-size: .9375rem; font-weight: 700; margin: .75rem 0 .25rem; }
+.requirements-blocked p, .requirements-blocked li { font-size: .9375rem; line-height: 1.5; overflow-wrap: anywhere; }
+.requirements-blocked p { margin: 0; }
+.requirements-blocked ul { margin: .5rem 0 0 1.25rem; }
+.requirements-blocked__next { color: #444; margin-top: .75rem !important; font-weight: 700; }
 .deployment-summary { background: #eef8f1; border: 1px solid #cde5d2; border-left: 4px solid #2e844a; padding: 1rem; margin: .75rem 0; }
 .deployment-summary h2 { color: #194d2b; font-size: 1.125rem; font-weight: 700; margin: 0 0 .4rem; }
 .deployment-summary-text { color: #181818; font-size: 1rem; line-height: 1.55; margin: 0 0 .75rem; overflow-wrap: anywhere; }

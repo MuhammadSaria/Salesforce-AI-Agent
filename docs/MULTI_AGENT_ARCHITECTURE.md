@@ -15,7 +15,7 @@ User or Jira
   -> Validation and Deployment Agent
   -> separate deployment approval
   -> deployment to the exact verified org
-  -> Documentation and Explanation Agent
+  -> Documentation Agent
   -> one LWC and Jira summary
 ```
 
@@ -37,7 +37,7 @@ The registry includes:
 - Data Agent
 - Testing Agent
 - Validation and Deployment Agent
-- Documentation and Explanation Agent
+- Documentation Agent
 
 The orchestrator selects only agents relevant to the requirement. Testing, validation/deployment, and explanation are common review stages. A field task also selects UI and security specialists because a new field is not usable until placement and least-privilege access are considered.
 
@@ -90,7 +90,7 @@ Deployment remains a different approval tied to the successful validation ID, va
 
 An instruction creates a new iteration. Revision impact analysis identifies affected specialists separately from initial requirement analysis, so mentioning an existing field does not reopen the Object and Field Agent unless the instruction asks to change that field.
 
-Completed, unaffected work items are carried forward. Affected work items and the Testing, Validation/Deployment, and Explanation stages are recreated. Selective metadata retrieval is filtered to affected specialist boundaries. Existing parent-job artifacts remain archived in `revisions`.
+Completed, unaffected work items are carried forward. Affected work items and the Testing, Validation/Deployment, and Documentation stages are recreated. Selective metadata retrieval is filtered to affected specialist boundaries. Existing parent-job artifacts remain archived in `revisions`. Successful deployment reports remain in append-only deployment history and are never invalidated by a later plan revision.
 
 Instructions received during implementation, validation, or deployment are queued and activated at the next safe parent state. Instructions after deployment reopen the completed job as a new supervised iteration.
 
@@ -99,4 +99,3 @@ Instructions received during implementation, validation, or deployment are queue
 Specialist communication uses fixed message types and fields: sender, recipient, parent job, work item, type, metadata, request, dependency, risk, and timestamp. Free-form internal commands are not accepted.
 
 Dependency discovery, specialist proposals, status changes, implementation start/completion/failure, validation failure, file ownership, and final results are stored as concise audit events. The audit contains decisions and evidence, not hidden reasoning or model chain-of-thought.
-

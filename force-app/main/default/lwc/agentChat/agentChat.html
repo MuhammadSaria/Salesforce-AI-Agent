@@ -66,6 +66,26 @@
                     </div>
                 </section>
 
+                <template if:true={requirementsBlocked}>
+                    <section class="requirements-blocked" role="alert" aria-labelledby="requirements-blocked-title">
+                        <lightning-icon icon-name="utility:warning" size="small" alternative-text="More information required"></lightning-icon>
+                        <div>
+                            <h2 id="requirements-blocked-title">More information is required</h2>
+                            <p>Providus Nexus has not made or approved any Salesforce changes for this request.</p>
+                            <ul>
+                                <template for:each={missingRequirementItems} for:item="item"><li key={item.key}>{item.text}</li></template>
+                            </ul>
+                            <template if:true={hasAttachmentFailures}>
+                                <h3>Attachment issues</h3>
+                                <ul>
+                                    <template for:each={attachmentFailureItems} for:item="item"><li key={item.key}>{item.text}</li></template>
+                                </ul>
+                            </template>
+                            <p class="requirements-blocked__next">Add the missing details below, or correct the Jira attachment and select Refresh Analysis.</p>
+                        </div>
+                    </section>
+                </template>
+
                 <template if:true={hasSpecialistWorkItems}>
                     <section class="specialist-progress" aria-labelledby="specialist-progress-title">
                         <div class="specialist-progress__heading">

@@ -189,6 +189,38 @@ describe('c-agent-chat', () => {
         expect(element.shadowRoot.querySelector('.current-action').textContent).toContain('Implementation approval does not authorize deployment');
     });
 
+    it('explains missing requirements and blocks implementation approval', async () => {
+        const job = {
+            jobId: 'job-requirements', status: 'AWAITING_REQUIREMENTS', approvals: [], logs: [],
+            orgContext: { customerName: 'Providus', displayName: 'Developer Org', environment: 'developer', expectedOrgId: '00D000000000001', verified: {} },
+            requirement: { summary: 'Create a consent screen Flow', acceptanceCriteria: '' },
+            plan: {
+                planVersion: 1,
+                missingInformation: ['No Salesforce source or record changes were proposed for this development request.'],
+                actionability: {
+                    actionable: false,
+                    attachmentFailures: [{ fileName: 'requirements.docx', reason: 'The document could not be read.' }]
+                }
+            },
+            metadataScope: { primaryMetadata: [], dependencies: [] }
+        };
+        getJobs.mockResolvedValue(JSON.stringify({ jobs: [job] }));
+        getAgentJob.mockResolvedValue(JSON.stringify(job));
+
+        const element = createElement('c-agent-chat', { is: AgentChat });
+        document.body.appendChild(element);
+        await flushPromises();
+
+        const blocked = element.shadowRoot.querySelector('.requirements-blocked');
+        expect(blocked.textContent).toContain('More information is required');
+        expect(blocked.textContent).toContain('No Salesforce source or record changes');
+        expect(blocked.textContent).toContain('requirements.docx');
+        expect(element.shadowRoot.querySelector('.current-action').textContent).toContain('Provide the missing implementation details');
+        expect(buttonByLabel(element, 'Approve Implementation')).toBeUndefined();
+        expect(textareaByLabel(element, 'Request a change or add an instruction').disabled).toBe(false);
+        expect(buttonByLabel(element, 'Refresh Analysis')).not.toBeUndefined();
+    });
+
     it('refreshes the workspace without triggering a job action', async () => {
         const job = {
             jobId: 'job-refresh', status: 'AWAITING_PLAN_APPROVAL', approvals: [], logs: [],

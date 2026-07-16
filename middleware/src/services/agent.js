@@ -17,7 +17,11 @@ import { latestApprovedApproval } from '../domain/approval.js';
 import { humanizeValidationFailure } from '../utils/validationFailure.js';
 import { activatePendingJiraRevision, syncJiraComments } from './jiraSync.js';
 import { approveSpecialistWorkItems, buildSpecialistOrchestration, specialistAuditEvent, structuredSpecialistMessage, workItemForFile } from './orchestrator.js';
-import { SPECIALIST_AGENT_IDS, SPECIALIST_MESSAGE_TYPES, WORK_ITEM_STATUSES, implementationAgentIds, ownerForMetadataType } from '../domain/specialistAgents.js';
+import { SPECIALIST_AGENT_IDS, SPECIALIST_MESSAGE_TYPES, WORK_ITEM_STATUSES, implementationAgentIds, ownerForMetadataType, workItemCompletionPath } from '../domain/specialistAgents.js';
+import { jiraLifecycleComment } from './jiraCommunication.js';
+import { generateImplementationReport } from './implementationReport.js';
+import { assertPlanActionable, evaluatePlanActionability } from '../domain/planActionability.js';
+import { routeValidationCorrection } from './correctionRouting.js';
 
 export async function processAgentJob(message) {
   const job = await requiredJob(message.jobId);
@@ -45,6 +49,7 @@ async function analyze(job, actor) {
   } : job.context;
   if (jira) await updateJob(job.jobId, { jira, context: routingContext, jiraSync: job.jiraSync || { commentIds: (jira.commentEntries || []).map((comment) => comment.id), syncedAt: new Date().toISOString() } });
   job = { ...job, jira, context: routingContext };
+  await postJiraMilestone(job, 'assigned', 'ASSIGNED');
 
   const selection = await selectOrgForJob(job);
   if (selection.status !== 'selected') {
@@ -84,10 +89,14 @@ async function analyze(job, actor) {
   }
 
   await transitionJob(job.jobId, JOB_STATES.ANALYZING_DEPENDENCIES, { actor, reason: 'Selective retrieval completed.' });
+  await updateJob(job.jobId, { currentActivity: 'Analyzing dependencies' });
   const dependencies = await analyzeDependencies(paths, scope);
   const current = await requiredJob(job.jobId);
   const basePlan = buildPlan({ ...current, orgContext }, requirement, scope, dependencies);
+  await updateJob(job.jobId, { currentActivity: 'Preparing implementation plan' });
   let plan = await enrichPlanWithCodex(basePlan, requirement, { ...scope, dependencies }, orgContext, { revisionContext: current.revisionContext });
+  const actionability = evaluatePlanActionability(plan, requirement, jira);
+  plan = { ...plan, missingInformation: actionability.missingInformation, actionability };
   const finalScope = expandScopeForFileOperations({ ...scope, dependencies }, plan.fileOperations, orgContext);
   await writeManifest(paths, finalScope);
   const planWithoutHash = { ...plan, metadataScopeHash: finalScope.hash };
@@ -95,7 +104,7 @@ async function analyze(job, actor) {
   const specialistOrchestration = buildSpecialistOrchestration({ ...current, orgContext }, requirement, finalScope, planWithoutHash);
   plan = specialistOrchestration.plan;
   await writeFile(join(paths.plan, `plan-v${plan.planVersion}.json`), JSON.stringify(plan, null, 2), 'utf8');
-  const carriedApproval = carriedImplementationApproval(current.revisionContext, plan, finalScope, orgContext);
+  const carriedApproval = actionability.actionable ? carriedImplementationApproval(current.revisionContext, plan, finalScope, orgContext) : null;
   await updateJob(job.jobId, {
     plan,
     metadataScope: finalScope,
@@ -104,7 +113,8 @@ async function analyze(job, actor) {
     workItems: specialistOrchestration.workItems,
     specialistMessages: specialistOrchestration.specialistMessages,
     fileOwnership: specialistOrchestration.fileOwnership,
-    approvals: carriedApproval ? [carriedApproval] : []
+    approvals: carriedApproval ? [carriedApproval] : [],
+    currentActivity: !actionability.actionable ? 'Waiting for required implementation details' : carriedApproval ? 'Continuing approved implementation' : 'Awaiting implementation approval'
   });
   for (const workItem of specialistOrchestration.workItems) {
     await auditEvent(specialistAuditEvent({ ...job, orgContext }, workItem, 'SPECIALIST_PROPOSAL_READY', 'success', {
@@ -114,7 +124,11 @@ async function analyze(job, actor) {
       filesAffected: workItem.filesAffected
     }));
   }
-  if (carriedApproval) {
+  if (!actionability.actionable) {
+    await transitionJob(job.jobId, JOB_STATES.AWAITING_REQUIREMENTS, { actor, reason: actionability.missingInformation[0] || 'The development plan does not contain concrete changes.' });
+    await auditEvent({ ...auditOptions(job, actor), orgRegistryId: orgContext.orgRegistryId, salesforceOrgId: orgContext.expectedOrgId, environment: orgContext.environment, action: 'PLAN_BLOCKED_REQUIREMENTS', result: 'blocked', safeMetadata: { planVersion: plan.planVersion, requestKind: actionability.requestKind, missingInformation: actionability.missingInformation } });
+    await postJiraMilestone(job, `requirementsNeededV${plan.planVersion}`, 'REQUIREMENTS_NEEDED');
+  } else if (carriedApproval) {
     await updateJob(job.jobId, { workItems: approveSpecialistWorkItems(specialistOrchestration.workItems, carriedApproval.approvalId) });
     await transitionJob(job.jobId, JOB_STATES.IMPLEMENTING, { actor, reason: 'The approved implementation boundary did not materially change; prior implementation approval was carried forward.', approvalId: carriedApproval.approvalId });
     await auditEvent({ ...auditOptions(job, actor), orgRegistryId: orgContext.orgRegistryId, salesforceOrgId: orgContext.expectedOrgId, environment: orgContext.environment, action: 'IMPLEMENTATION_APPROVAL_CARRIED_FORWARD', result: 'success', safeMetadata: { approvalId: carriedApproval.approvalId, materialChangeHash: plan.materialChangeHash } });
@@ -122,19 +136,14 @@ async function analyze(job, actor) {
     await transitionJob(job.jobId, JOB_STATES.AWAITING_PLAN_APPROVAL, { actor, reason: 'Versioned implementation plan generated.' });
   }
   await auditEvent({ ...auditOptions(job, actor), orgRegistryId: orgContext.orgRegistryId, salesforceOrgId: orgContext.expectedOrgId, environment: orgContext.environment, action: 'PLAN_GENERATED', result: 'success', safeMetadata: { planVersion: plan.planVersion, planHash: plan.planHash, metadataScopeHash: scope.hash } });
-  if (job.jiraIssueKey) {
-    try {
-      await addJiraComment(job.jiraIssueKey, planReviewComment(job, plan, orgContext, Boolean(carriedApproval)));
-    } catch (error) {
-      await appendLog(job.jobId, 'warn', `Plan generated, but the Jira review comment could not be added: ${error.message}`);
-    }
-  }
+  if (actionability.actionable) await postJiraMilestone(job, `planReadyV${plan.planVersion}`, 'PLAN_READY');
   if (carriedApproval) return implement(await requiredJob(job.jobId), actor);
   if (await activatePendingJiraRevision(job.jobId, actor)) return analyze(await requiredJob(job.jobId), actor);
 }
 
 async function implement(job, actor) {
   assertState(job, JOB_STATES.IMPLEMENTING, JOB_STATES.VALIDATION_FAILED);
+  assertPlanActionable(job.plan, job.requirement, job.jira);
   const approval = validApproval(job, 'IMPLEMENTATION');
   if (job.status === JOB_STATES.VALIDATION_FAILED) {
     if (job.implementation) return validate(job, actor);
@@ -142,6 +151,7 @@ async function implement(job, actor) {
     job = await requiredJob(job.jobId);
   }
   await verifySelectedOrg(job.orgContext, auditOptions(job, actor));
+  await postJiraMilestone(job, `implementingV${job.plan.planVersion}`, 'IMPLEMENTING');
   const paths = await ensureJobWorkspace(job.jobId, job.orgContext.orgRegistryId);
   const implementationProject = join(paths.implementation, `plan-v${job.plan.planVersion}`, 'project');
   await mkdir(join(paths.implementation, `plan-v${job.plan.planVersion}`), { recursive: true });
@@ -193,7 +203,12 @@ async function implement(job, actor) {
       throw error;
     }
     await transitionWorkItem(job.jobId, workItem.workItemId, WORK_ITEM_STATUSES.IMPLEMENTATION_COMPLETE, {
-      outputs: { ...workItem.outputs, filesAffected: operations.map((operation) => operation.path), completionStatus: WORK_ITEM_STATUSES.IMPLEMENTATION_COMPLETE }
+      outputs: { ...workItem.outputs, filesAffected: operations.map((operation) => operation.path), completionStatus: WORK_ITEM_STATUSES.IMPLEMENTATION_COMPLETE },
+      implementationEvidence: {
+        completedAt: new Date().toISOString(),
+        filePaths: operations.map((operation) => operation.path),
+        dataOperationCount: workItem.assignedSpecialistAgent === SPECIALIST_AGENT_IDS.DATA ? (job.plan.dataOperations || []).length : 0
+      }
     });
     await auditEvent(specialistAuditEvent(job, workItem, 'SPECIALIST_IMPLEMENTATION_COMPLETE', 'success', { filesModified: operations.map((operation) => operation.path) }));
   }
@@ -218,6 +233,7 @@ async function validate(job, actor) {
   assertState(job, JOB_STATES.IMPLEMENTING, JOB_STATES.VALIDATION_FAILED);
   validApproval(job, 'IMPLEMENTATION');
   await transitionJob(job.jobId, JOB_STATES.VALIDATING, { actor, reason: 'Validation requested.' });
+  await postJiraMilestone(job, `validatingV${job.plan.planVersion}`, 'VALIDATING');
   await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.TESTING, WORK_ITEM_STATUSES.VALIDATING, 'Independent combined-solution testing started.');
   await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT, WORK_ITEM_STATUSES.VALIDATING, 'Target-org validation and package verification started.');
   try {
@@ -231,6 +247,7 @@ async function validate(job, actor) {
     if (hasSourceChanges && dataOperations.length) throw new Error('Metadata and record mutations must be split into separate jobs to prevent partial execution.');
     const dataValidationCommands = await validatePlannedDataOperations(current, paths, actor);
     if (!hasSourceChanges && !dataOperations.length) {
+      assertPlanActionable(current.plan, current.requirement, current.jira);
       const now = new Date();
       const validation = { validationId: nanoid(), targetOrgId: current.orgContext.expectedOrgId, status: 'PASSED', outcome: 'NO_CHANGES', sourceHash: current.implementation?.sourceHash || stableHash([]), commitHash: current.implementation?.commitHash || '', planHash: current.plan.planHash, metadataScopeHash: current.metadataScope.hash, packageHash: stableHash([]), commands: [], result: 'No source changes were proposed, so Salesforce deployment validation was not required.', warnings: ['No Salesforce source changes to validate or deploy.'], timestamp: now.toISOString(), expiryTimestamp: new Date(now.getTime() + config.validationExpiryMinutes * 60000).toISOString() };
       await writeFile(join(paths.validation, `${validation.validationId}.json`), JSON.stringify(validation, null, 2), 'utf8');
@@ -239,7 +256,7 @@ async function validate(job, actor) {
       await transitionAgentWorkItem(current.jobId, SPECIALIST_AGENT_IDS.TESTING, WORK_ITEM_STATUSES.COMPLETED, validation.result);
       await transitionAgentWorkItem(current.jobId, SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT, WORK_ITEM_STATUSES.COMPLETED, validation.result);
       await transitionAgentWorkItem(current.jobId, SPECIALIST_AGENT_IDS.DOCUMENTATION_EXPLANATION, WORK_ITEM_STATUSES.COMPLETED, 'The no-change completion result was consolidated for the user and Jira.');
-      if (current.jiraIssueKey) await addJiraComment(current.jiraIssueKey, noChangeCompletionComment(current, validation));
+      await postJiraMilestone(current, `noChangesV${current.plan.planVersion}`, 'NO_CHANGES_REQUIRED');
       await transitionJob(current.jobId, JOB_STATES.COMPLETED, { actor, reason: 'Validation completed with no source changes; deployment was not required.' });
       return;
     }
@@ -252,6 +269,7 @@ async function validate(job, actor) {
       await transitionAgentWorkItem(current.jobId, SPECIALIST_AGENT_IDS.TESTING, WORK_ITEM_STATUSES.COMPLETED, validation.result);
       await transitionAgentWorkItem(current.jobId, SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT, WORK_ITEM_STATUSES.IMPLEMENTATION_COMPLETE, 'Structured data operations passed read-only validation. Deployment approval is still required.');
       await transitionJob(current.jobId, JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL, { actor, reason: 'Data operations validated; separate execution approval required.' });
+      await postJiraMilestone(current, `validationPassedV${current.plan.planVersion}`, 'VALIDATION_PASSED');
       if (await activatePendingJiraRevision(current.jobId, actor)) return analyze(await requiredJob(current.jobId), actor);
       return;
     }
@@ -266,12 +284,19 @@ async function validate(job, actor) {
     await transitionAgentWorkItem(current.jobId, SPECIALIST_AGENT_IDS.TESTING, WORK_ITEM_STATUSES.COMPLETED, 'The combined solution passed the selected Salesforce validation and regression checks.');
     await transitionAgentWorkItem(current.jobId, SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT, WORK_ITEM_STATUSES.IMPLEMENTATION_COMPLETE, 'The minimal package passed validation against the verified target org. Deployment approval is still required.');
     await transitionJob(current.jobId, JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL, { actor, reason: 'Validation passed.' });
+    await postJiraMilestone(current, `validationPassedV${current.plan.planVersion}`, 'VALIDATION_PASSED');
     if (await activatePendingJiraRevision(current.jobId, actor)) return analyze(await requiredJob(current.jobId), actor);
   } catch (error) {
     await updateJob(job.jobId, { validation: { status: 'FAILED', error: error.message, failureReason: humanizeValidationFailure(error.message), timestamp: new Date().toISOString() } });
     await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.TESTING, WORK_ITEM_STATUSES.CHANGES_REQUIRED, humanizeValidationFailure(error.message));
     await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT, WORK_ITEM_STATUSES.CHANGES_REQUIRED, humanizeValidationFailure(error.message));
     const current = await requiredJob(job.jobId);
+    const correctionRoute = routeValidationCorrection(current, error.message);
+    await updateJob(job.jobId, { correctionRoute });
+    for (const agentId of correctionRoute.implementationAgentIds) {
+      await transitionAgentWorkItem(job.jobId, agentId, WORK_ITEM_STATUSES.CHANGES_REQUIRED, humanizeValidationFailure(error.message));
+    }
+    const routed = await requiredJob(job.jobId);
     const validationItem = current.workItems.find((item) => item.assignedSpecialistAgent === SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT);
     if (validationItem) {
       const message = structuredSpecialistMessage(current, validationItem.agentName, 'Orchestrator Agent', validationItem.workItemId, SPECIALIST_MESSAGE_TYPES.VALIDATION_FAILED, {
@@ -281,7 +306,19 @@ async function validate(job, actor) {
       await updateJob(job.jobId, { specialistMessages: [...(current.specialistMessages || []), message] });
       await auditEvent(specialistAuditEvent(current, validationItem, 'SPECIALIST_VALIDATION_FAILED', 'failed', { failureReason: humanizeValidationFailure(error.message) }));
     }
+    for (const workItemId of correctionRoute.workItemIds) {
+      const target = routed.workItems.find((item) => item.workItemId === workItemId);
+      if (!target || !validationItem) continue;
+      const correction = structuredSpecialistMessage(routed, validationItem.agentName, target.agentName, target.workItemId, SPECIALIST_MESSAGE_TYPES.CORRECTION_REQUIRED, {
+        requestedInformation: humanizeValidationFailure(error.message),
+        dependency: validationItem.workItemId,
+        risk: routed.plan?.estimatedRiskLevel || 'MEDIUM'
+      });
+      const refreshed = await requiredJob(job.jobId);
+      await updateJob(job.jobId, { specialistMessages: [...(refreshed.specialistMessages || []), correction] });
+    }
     await transitionJob(job.jobId, JOB_STATES.VALIDATION_FAILED, { actor, reason: 'Validation failed.', error: error.message });
+    await postJiraMilestone(await requiredJob(job.jobId), `validationFailedV${job.plan.planVersion}`, 'VALIDATION_FAILED');
     if (await activatePendingJiraRevision(job.jobId, actor)) return analyze(await requiredJob(job.jobId), actor);
   }
 }
@@ -307,6 +344,7 @@ async function deploy(job, actor) {
         await updateJob(job.jobId, { deployment: { status: recordResults.length ? 'PARTIAL_FAILURE' : 'FAILED', targetOrgId: job.orgContext.expectedOrgId, recordResults, error: sfFailureMessage(result), failedAt: new Date().toISOString() } });
         await transitionJob(job.jobId, JOB_STATES.FAILED, { actor, reason: 'Approved data execution failed.', error: sfFailureMessage(result) });
         await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT, WORK_ITEM_STATUSES.FAILED, sfFailureMessage(result));
+        await postJiraMilestone(await requiredJob(job.jobId), `deploymentFailedV${job.plan.planVersion}`, 'DEPLOYMENT_FAILED');
         return;
       }
       recordResults.push({ operation: operation.operation, objectApiName: operation.objectApiName, recordId: extractRecordId(result.stdout) || operation.recordId });
@@ -317,16 +355,40 @@ async function deploy(job, actor) {
     if (result.exitCode !== 0) {
       await transitionJob(job.jobId, JOB_STATES.FAILED, { actor, reason: 'Deployment failed.', error: sfFailureMessage(result) });
       await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT, WORK_ITEM_STATUSES.FAILED, sfFailureMessage(result));
+      await postJiraMilestone(await requiredJob(job.jobId), `deploymentFailedV${job.plan.planVersion}`, 'DEPLOYMENT_FAILED');
       return;
     }
   }
   const deployment = { deploymentId: dataOperations.length ? '' : extractDeployId(result.stdout), targetOrgId: job.orgContext.expectedOrgId, sourceHash: job.validation.sourceHash, packageHash: job.validation.packageHash, commitHash: job.validation.commitHash || '', result: dataOperations.length ? JSON.stringify(recordResults) : result.stdout, recordResults, deployedAt: new Date().toISOString() };
   const componentSummary = dataOperations.length ? summarizeDataDeployment(job, recordResults) : summarizeMetadataDeployment(job, result.stdout);
-  const finalDeployment = { ...deployment, summary: componentSummary.summary, components: componentSummary.components, iteration: job.iteration || job.plan.planVersion, specialistSummary: combinedSpecialistSummary(job, componentSummary) };
-  await updateJob(job.jobId, { deployment: finalDeployment });
+  const deploymentVersion = nextDeploymentVersion(job.implementationReports || []);
+  let finalDeployment = { ...deployment, summary: componentSummary.summary, components: componentSummary.components, iteration: job.iteration || job.plan.planVersion, deploymentVersion, targetOrgDisplayName: job.orgContext.displayName, environment: job.orgContext.environment, specialistSummary: combinedSpecialistSummary(job, componentSummary) };
   await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT, WORK_ITEM_STATUSES.COMPLETED, componentSummary.summary);
-  await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.DOCUMENTATION_EXPLANATION, WORK_ITEM_STATUSES.COMPLETED, 'Implementation, validation, and deployment results were consolidated into one human-readable summary.');
-  if (job.jiraIssueKey) await addJiraComment(job.jiraIssueKey, completionComment(job, finalDeployment));
+  await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.DOCUMENTATION_EXPLANATION, WORK_ITEM_STATUSES.IMPLEMENTING, 'Preparing the consultant-quality implementation report for this deployment.');
+  let report;
+  try {
+    report = await generateImplementationReport({ ...job, deployment: finalDeployment }, finalDeployment, paths, deploymentVersion);
+    finalDeployment = { ...finalDeployment, implementationReport: { reportId: report.reportId, status: report.status, deploymentVersion } };
+    await updateJob(job.jobId, {
+      deployment: finalDeployment,
+      deploymentHistory: [...(job.deploymentHistory || []), finalDeployment],
+      implementationReports: appendImplementationReport(job.implementationReports || [], report)
+    });
+    await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.DOCUMENTATION_EXPLANATION, WORK_ITEM_STATUSES.COMPLETED, `Implementation Report V${deploymentVersion} is ready in PDF, Word, and Markdown formats.`);
+    await auditEvent({ ...auditOptions(job, actor), orgRegistryId: job.orgContext.orgRegistryId, salesforceOrgId: job.orgContext.expectedOrgId, environment: job.orgContext.environment, action: 'IMPLEMENTATION_REPORT_GENERATED', result: 'success', safeMetadata: { deploymentVersion, formats: Object.keys(report.formats) } });
+  } catch (error) {
+    report = failedImplementationReport(job, deploymentVersion, error);
+    finalDeployment = { ...finalDeployment, implementationReport: { reportId: report.reportId, status: report.status, deploymentVersion } };
+    await updateJob(job.jobId, {
+      deployment: finalDeployment,
+      deploymentHistory: [...(job.deploymentHistory || []), finalDeployment],
+      implementationReports: appendImplementationReport(job.implementationReports || [], report)
+    });
+    await appendLog(job.jobId, 'error', `Deployment succeeded, but implementation report generation failed: ${error.message}`);
+    await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.DOCUMENTATION_EXPLANATION, WORK_ITEM_STATUSES.FAILED, 'Deployment succeeded, but the implementation report could not be generated.');
+    await auditEvent({ ...auditOptions(job, actor), orgRegistryId: job.orgContext.orgRegistryId, salesforceOrgId: job.orgContext.expectedOrgId, environment: job.orgContext.environment, action: 'IMPLEMENTATION_REPORT_GENERATED', result: 'failed', safeMetadata: { deploymentVersion, error: compactText(error.message) } });
+  }
+  await postJiraMilestone(await requiredJob(job.jobId), `deployedV${job.plan.planVersion}`, 'DEPLOYMENT_COMPLETED');
   await transitionJob(job.jobId, JOB_STATES.COMPLETED, { actor, reason: dataOperations.length ? 'Approved record operations executed and Jira updated.' : 'Approved package deployed and Jira updated.', approvalId: approval.approvalId });
   if (await activatePendingJiraRevision(job.jobId, actor)) return analyze(await requiredJob(job.jobId), actor);
 }
@@ -419,49 +481,22 @@ export async function calculateSourceHash(projectRoot, changedFiles, plan) {
   }
   return stableHash({ planHash: plan.planHash, files, dataOperations: plan.dataOperations || [] });
 }
-function completionComment(job, deployment) {
-  const recordResults = deployment.recordResults || [];
-  const executionResult = recordResults.length
-    ? `Record execution: ${recordResults.map((item) => `${item.operation} ${item.objectApiName} ${item.recordId}`).join(', ')}`
-    : `Deployment ID: ${deployment.deploymentId || 'not returned'}`;
-  const componentLines = (deployment.components || []).slice(0, 10).map((item) => `- ${item.displayName}${item.apiName ? ` (${item.apiName})` : ''}${item.briefInfo ? `: ${item.briefInfo}` : ''}`);
-  return [
-    `AI agent job ${job.jobId} completed.`,
-    `Salesforce org: ${job.orgContext.displayName} (${job.orgContext.expectedOrgId})`,
-    `Environment: ${job.orgContext.environment}`,
-    `Validation: ${job.validation.status} (${job.validation.validationId})`,
-    executionResult,
-    deployment.summary || 'Deployment completed successfully.',
-    ...(deployment.specialistSummary?.whatChanged || []).map((line) => `- ${line}`),
-    ...(componentLines.length ? ['Deployed items:', ...componentLines] : []),
-    `Rollback: ${job.plan.rollbackPlan}`
-  ].join('\n');
+async function postJiraMilestone(job, milestone, stage) {
+  if (!job.jiraIssueKey) return;
+  const current = await requiredJob(job.jobId);
+  if (current.jiraCommunication?.[milestone]) return;
+  try {
+    await addJiraComment(job.jiraIssueKey, jiraLifecycleComment(stage, current));
+    await updateJob(job.jobId, {
+      jiraCommunication: {
+        ...(current.jiraCommunication || {}),
+        [milestone]: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    await appendLog(job.jobId, 'warn', `Providus Nexus could not post the Jira progress update: ${error.message}`);
+  }
 }
-function planReviewComment(job, plan, orgContext, approvalCarriedForward = false) {
-  const steps = (plan.implementationSteps || []).map((step, index) => `${index + 1}. ${step}`);
-  const specialists = (plan.specialistSections || []).map((section) => `- ${section.agentName}: ${section.responsibility}`);
-  return [
-    'AI agent plan ready for review.',
-    `Job: ${job.jobId}`,
-    `Target org: ${orgContext.displayName} (${orgContext.expectedOrgId})`,
-    `Environment: ${orgContext.environment}`,
-    `Requirement: ${plan.requirementSummary || 'See issue details.'}`,
-    `What will be delivered: ${plan.proposedImplementation}`,
-    'Implementation steps:',
-    ...steps,
-    'Specialist responsibilities:',
-    ...specialists,
-    `Expected outcome: ${plan.expectedOutcome || 'See the Salesforce AI Agent console.'}`,
-    `Business impact: ${plan.businessImpact || 'Limited to the approved requirement.'}`,
-    `Risk: ${plan.estimatedRiskLevel}`,
-    `Plan version: ${plan.planVersion}`,
-    plan.notice || 'No changes have been made yet.',
-    approvalCarriedForward
-      ? 'The approved technical boundary did not materially change, so the prior implementation approval was carried forward. Deployment still requires a new validation and separate approval.'
-      : 'Review and approve implementation in the Salesforce AI Agent console.'
-  ].join('\n');
-}
-function noChangeCompletionComment(job, validation) { return [`AI agent job ${job.jobId} completed without deployment.`, `Salesforce org: ${job.orgContext.displayName} (${job.orgContext.expectedOrgId})`, `Validation: ${validation.status} (${validation.validationId})`, `Result: No Salesforce source changes were proposed, so deployment was not required.`].join('\n'); }
 function summarizeMetadataDeployment(job, stdout) {
   const parsed = safeParseJson(stdout);
   const details = parsed?.result?.details || parsed?.details || {};
@@ -515,6 +550,35 @@ function compactText(value) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 240);
 }
 
+function nextDeploymentVersion(reports) {
+  return Math.max(0, ...(reports || []).map((report) => Number(report.deploymentVersion) || 0)) + 1;
+}
+
+function appendImplementationReport(reports, report) {
+  const existing = (reports || []).find((item) => item.deploymentVersion === report.deploymentVersion);
+  if (existing?.status === 'READY') return reports;
+  return [...(reports || []).filter((item) => item.deploymentVersion !== report.deploymentVersion), report];
+}
+
+function failedImplementationReport(job, deploymentVersion, error) {
+  return {
+    reportId: `implementation-report-v${deploymentVersion}`,
+    status: 'FAILED',
+    deploymentVersion,
+    planVersion: Number(job.plan?.planVersion || job.iteration || 1),
+    title: `${job.jira?.summary || job.requirement?.summary || 'Salesforce Implementation'} - Implementation Report`,
+    jiraIssueKey: job.jiraIssueKey || '',
+    customerName: job.orgContext?.customerName || '',
+    orgDisplayName: job.orgContext?.displayName || '',
+    salesforceOrganizationId: job.orgContext?.expectedOrgId || '',
+    environment: job.orgContext?.environment || '',
+    generatedAt: new Date().toISOString(),
+    generatedBy: 'Providus Nexus',
+    formats: {},
+    error: compactText(error.message)
+  };
+}
+
 function operationOwner(workItems, path) {
   return workItemForFile(workItems || [], path);
 }
@@ -530,13 +594,17 @@ async function optionalTextFile(path) {
 
 async function transitionAgentWorkItem(jobId, agentId, newStatus, summary) {
   const job = await requiredJob(jobId);
-  const item = (job.workItems || []).find((candidate) => candidate.assignedSpecialistAgent === agentId);
+  let item = (job.workItems || []).find((candidate) => candidate.assignedSpecialistAgent === agentId);
   if (!item || item.status === newStatus || item.status === WORK_ITEM_STATUSES.COMPLETED) return item || null;
-  const transitioned = await transitionWorkItem(jobId, item.workItemId, newStatus, {
-    outputs: { ...item.outputs, completionStatus: newStatus, analysisSummary: compactText(summary) || item.outputs.analysisSummary }
-  });
-  await auditEvent(specialistAuditEvent(job, transitioned, 'SPECIALIST_STATUS_CHANGED', 'success', { previousStatus: item.status, newStatus, summary: compactText(summary) }));
-  return transitioned;
+  const path = newStatus === WORK_ITEM_STATUSES.COMPLETED ? workItemCompletionPath(item.status) : [newStatus];
+  for (const status of path) {
+    const previousStatus = item.status;
+    item = await transitionWorkItem(jobId, item.workItemId, status, {
+      outputs: { ...item.outputs, completionStatus: status, analysisSummary: compactText(summary) || item.outputs.analysisSummary }
+    });
+    await auditEvent(specialistAuditEvent(job, item, 'SPECIALIST_STATUS_CHANGED', 'success', { previousStatus, newStatus: status, summary: compactText(summary) }));
+  }
+  return item;
 }
 
 async function completeImplementationWorkItems(jobId) {

@@ -2,6 +2,8 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { config } from '../config.js';
 import { redis } from '../queue/connection.js';
 import { sanitizeUntrustedText } from '../utils/sanitize.js';
+import { prepareProvidusNexusComment } from './jiraCommunication.js';
+import { readJiraAttachments } from './jiraAttachments.js';
 
 const memoryEvents = new Set();
 
@@ -42,7 +44,7 @@ export function parseJiraWebhook(payload) {
   if (!['jira:issue_created', 'jira:issue_updated'].includes(event)) throw unsupported('Unsupported Jira event.');
   const issue = normalizeIssue(payload.issue);
   enforceAllowedIssue(issue);
-  if (config.jiraAgentAccountId && issue.assigneeAccountId !== config.jiraAgentAccountId) throw unsupported('Issue is not assigned to the configured AI agent.');
+  if (config.jiraAgentAccountId && issue.assigneeAccountId !== config.jiraAgentAccountId) throw unsupported('Issue is not assigned to the configured Providus Nexus account.');
   return { event, issue };
 }
 
@@ -55,7 +57,8 @@ export async function getJiraIssue(issueKey) {
   if (!response.ok) throw new Error(`Jira issue retrieval failed with status ${response.status}.`);
   const issue = normalizeIssue(await response.json());
   enforceAllowedIssue(issue);
-  return issue;
+  const attachmentAnalysis = await readJiraAttachments(issue.attachments);
+  return { ...issue, ...attachmentAnalysis };
 }
 
 export async function getJiraComments(issueKey) {
@@ -75,7 +78,7 @@ export async function addJiraComment(issueKey, body) {
   const response = await fetch(`${config.jiraBaseUrl.replace(/\/$/, '')}/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Basic ${Buffer.from(`${config.jiraEmail}:${config.jiraApiToken}`).toString('base64')}` },
-    body: JSON.stringify({ body: adfDocument(sanitizeUntrustedText(body, 12000)) })
+    body: JSON.stringify({ body: adfDocument(prepareProvidusNexusComment(body)) })
   });
   if (!response.ok) throw new Error(`Jira comment update failed with status ${response.status}.`);
 }

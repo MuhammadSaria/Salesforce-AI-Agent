@@ -17,6 +17,10 @@ import { latestApprovedApproval } from './domain/approval.js';
 import { humanizeValidationFailure } from './utils/validationFailure.js';
 import { approveSpecialistWorkItems, overallSpecialistStatus } from './services/orchestrator.js';
 import { WORK_ITEM_STATUSES } from './domain/specialistAgents.js';
+import { publicImplementationReport, readImplementationReportArtifact } from './services/implementationReport.js';
+import { assertPlanActionable } from './domain/planActionability.js';
+import { runtimeReadiness } from './services/runtimeHealth.js';
+import { paginateJobSummaries } from './services/jobPresentation.js';
 
 export function createApp() {
   const app = express();
@@ -25,7 +29,11 @@ export function createApp() {
   app.use(express.json({ limit: '64kb', verify: (req, res, buffer) => { req.rawBody = buffer; } }));
   app.use(pinoHttp({ logger }));
 
-  app.get('/health', (req, res) => res.json({ ok: true }));
+  app.get('/health', (req, res) => res.json({ ok: true, service: 'providus-nexus-middleware' }));
+  app.get('/ready', asyncRoute(async (req, res) => {
+    const readiness = await runtimeReadiness();
+    res.status(readiness.ready ? 200 : 503).json(readiness);
+  }));
   app.post('/api/webhooks/jira', jiraWebhook);
   app.use('/api', requireApiAuth);
 
@@ -45,8 +53,7 @@ export function createApp() {
   }));
 
   app.get('/api/jobs', asyncRoute(async (req, res) => {
-    const jobs = (await listJobRecords()).map(publicJob);
-    res.json({ jobs });
+    res.json(paginateJobSummaries(await listJobRecords(), { limit: req.query.limit, cursor: req.query.cursor }));
   }));
   app.get('/api/jobs/:jobId', jobRoute((req, res, job) => res.json(publicJob(job))));
   app.get('/api/jobs/:jobId/plan', jobRoute((req, res, job) => res.json({ plan: job.plan })));
@@ -56,6 +63,13 @@ export function createApp() {
   app.get('/api/jobs/:jobId/audit', jobRoute((req, res, job) => res.json({ stateHistory: job.stateHistory, audit: job.audit })));
   app.get('/api/jobs/:jobId/work-items', jobRoute((req, res, job) => res.json({ overallStatus: overallSpecialistStatus(job.workItems || []), workItems: job.workItems || [] })));
   app.get('/api/jobs/:jobId/specialist-messages', jobRoute((req, res, job) => res.json({ messages: job.specialistMessages || [] })));
+  app.get('/api/jobs/:jobId/implementation-reports/:version/:format', jobRoute(async (req, res, job) => {
+    const report = (job.implementationReports || []).find((item) => item.deploymentVersion === Number(req.params.version));
+    if (!callerCanReadJob(req.actor, job, report)) return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'This report belongs to a different Salesforce org.' } });
+    const { artifact, buffer } = await readImplementationReportArtifact(job, req.params.version, req.params.format);
+    res.set('Cache-Control', 'private, no-store');
+    res.json({ fileName: artifact.fileName, contentType: artifact.contentType, contentBase64: buffer.toString('base64') });
+  }));
 
   app.post('/api/jobs/:jobId/select-org', requireRole('developer', 'deployer', 'admin'), jobRoute(async (req, res, job) => {
     const org = await getRegisteredOrg(String(req.body?.orgRegistryId || ''));
@@ -66,8 +80,8 @@ export function createApp() {
   }));
 
   app.post('/api/jobs/:jobId/analyze', requireRole('developer', 'deployer', 'admin'), jobRoute(async (req, res, job) => {
-    if (![JOB_STATES.RECEIVED, JOB_STATES.PLAN_REJECTED, JOB_STATES.ORG_VERIFICATION_FAILED].includes(job.status)) return conflict(res, 'Job is not ready for analysis.');
-    if (job.status === JOB_STATES.PLAN_REJECTED) await invalidateForPlanChange(job.jobId, req.actor.id);
+    if (![JOB_STATES.RECEIVED, JOB_STATES.AWAITING_REQUIREMENTS, JOB_STATES.PLAN_REJECTED, JOB_STATES.ORG_VERIFICATION_FAILED, JOB_STATES.FAILED].includes(job.status)) return conflict(res, 'Job is not ready for analysis.');
+    if ([JOB_STATES.AWAITING_REQUIREMENTS, JOB_STATES.PLAN_REJECTED, JOB_STATES.FAILED].includes(job.status)) await invalidateForPlanChange(job.jobId, req.actor.id);
     await enqueueAgentJob({ jobId: job.jobId, action: 'analyze', actor: req.actor.id }, { jobId: `${job.jobId}:analyze:${Date.now()}` });
     res.status(202).json({ jobId: job.jobId, message: 'Analysis queued.' });
   }));
@@ -100,6 +114,7 @@ export function createApp() {
   app.post('/api/jobs/:jobId/approve-implementation', requireRole('developer', 'deployer', 'admin'), jobRoute(async (req, res, job) => {
     if (job.status !== JOB_STATES.AWAITING_PLAN_APPROVAL) return conflict(res, 'Job is not awaiting implementation approval.');
     if (Number(req.body?.planVersion) !== job.plan?.planVersion) return conflict(res, 'Approval must identify the current plan version.');
+    assertPlanActionable(job.plan, job.requirement, job.jira);
     const approval = approvalRecord(job, req, 'IMPLEMENTATION', { decision: 'APPROVED' });
     await updateJob(job.jobId, { approvals: [...job.approvals, approval], workItems: approveSpecialistWorkItems(job.workItems || [], approval.approvalId) });
     await transitionJob(job.jobId, JOB_STATES.IMPLEMENTING, { actor: req.actor.id, reason: 'Explicit implementation approval recorded.', approvalId: approval.approvalId });
@@ -172,6 +187,16 @@ function asyncRoute(handler) { return (req, res, next) => Promise.resolve(handle
 function approvalRecord(job, req, type, extra) { return { approvalId: nanoid(), jobId: job.jobId, jiraIssueKey: job.jiraIssueKey, approvalType: type, planVersion: job.plan?.planVersion, planHash: job.plan?.planHash, materialChangeHash: job.plan?.materialChangeHash || '', metadataScopeHash: job.metadataScope?.hash, orgRegistryId: job.orgContext?.orgRegistryId, salesforceOrganizationId: job.orgContext?.expectedOrgId, environment: job.orgContext?.environment, approverIdentity: req.actor.id, comments: sanitizeUntrustedText(req.body?.comments, 1000), approvalTimestamp: new Date().toISOString(), ...extra }; }
 function publicJob(job) {
   const safe = { ...job };
+  if (safe.jira) {
+    safe.jira = {
+      ...safe.jira,
+      attachmentContents: (safe.jira.attachmentContents || []).map(({ id, filename, mimeType, truncated }) => ({ id, filename, mimeType, truncated }))
+    };
+  }
+  if (safe.requirement) {
+    safe.requirement = { ...safe.requirement };
+    delete safe.requirement.attachmentRequirements;
+  }
   safe.specialistOverallStatus = overallSpecialistStatus(job.workItems || []);
   safe.revisions = (job.revisions || []).map((revision) => ({
     revisionNumber: revision.revisionNumber,
@@ -194,11 +219,26 @@ function publicJob(job) {
     timestamp: entry.timestamp || '',
     responseToMessageId: entry.responseToMessageId || ''
   }));
+  safe.implementationReports = (job.implementationReports || []).map(publicImplementationReport);
+  safe.deploymentHistory = (job.deploymentHistory || []).map((deployment) => ({
+    deploymentVersion: deployment.deploymentVersion,
+    deployedAt: deployment.deployedAt,
+    targetOrg: deployment.targetOrgDisplayName || '',
+    environment: deployment.environment || '',
+    summary: deployment.summary || '',
+    reportStatus: deployment.implementationReport?.status || ''
+  }));
   if (safe.validation?.status === 'FAILED') {
     safe.validation = { ...safe.validation, failureReason: safe.validation.failureReason || humanizeValidationFailure(safe.validation.error || safe.error) };
   }
   delete safe.prompt;
   return safe;
+}
+function callerCanReadJob(actor, job, report) {
+  if (actor?.authMethod === 'bearer') return true;
+  const callerOrg = String(actor?.orgId || '').slice(0, 15).toUpperCase();
+  const targetOrg = String(report?.salesforceOrganizationId || job.orgContext?.expectedOrgId || job.deployment?.targetOrgId || '').slice(0, 15).toUpperCase();
+  return Boolean(callerOrg && targetOrg && callerOrg === targetOrg);
 }
 function safeContext(context) { return { selectedOrgRegistryId: String(context?.selectedOrgRegistryId || ''), customerName: String(context?.customerName || ''), environment: String(context?.environment || '') }; }
 function normalizeIssueKey(value) { const key = String(value || '').trim().toUpperCase(); if (key && !/^[A-Z][A-Z0-9_]{1,19}-[1-9][0-9]{0,9}$/.test(key)) throw Object.assign(new Error('Invalid Jira issue key.'), { statusCode: 422 }); return key; }

@@ -1,7 +1,9 @@
 import { nanoid } from 'nanoid';
 import { JOB_STATES } from '../domain/jobState.js';
-import { claimJiraComment, getJiraComments } from './jira.js';
+import { addJiraComment, claimJiraComment, getJiraComments } from './jira.js';
 import { appendAudit, appendConversation, getJobRecord, invalidateForPlanChange, updateJob } from './jobStore.js';
+import { classifyJiraComment, fallbackJiraReply, isProvidusNexusComment } from './jiraCommunication.js';
+import { generateJiraConversationReply } from './codexExecutor.js';
 
 const REVISION_READY_STATES = new Set([
   JOB_STATES.AWAITING_PLAN_APPROVAL,
@@ -28,7 +30,16 @@ export async function syncJiraComments(job, actor = 'jira-sync') {
     return { added: 0, reanalysisRequired: shouldResumeReceivedRevision(job) };
   }
 
-  const instructions = [...(job.instructions || []), ...selection.map((comment) => ({
+  const processed = [];
+  for (const comment of selection) {
+    const classification = classifyJiraComment(comment.body);
+    const fallback = fallbackJiraReply(job, classification);
+    const reply = await generateJiraConversationReply(job, comment.body, classification, fallback);
+    await addJiraComment(job.jiraIssueKey, reply);
+    processed.push({ comment, classification, reply });
+  }
+  const revisionComments = processed.filter((item) => item.classification.requiresPlanRevision);
+  const instructions = [...(job.instructions || []), ...revisionComments.map(({ comment }) => ({
     instructionId: nanoid(),
     text: comment.body,
     actor: comment.authorAccountId || comment.authorDisplayName || 'jira-user',
@@ -37,7 +48,7 @@ export async function syncJiraComments(job, actor = 'jira-sync') {
     jiraCommentId: comment.id
   }))];
   await updateJob(job.jobId, { instructions, jiraSync });
-  for (const comment of selection) {
+  for (const { comment, classification, reply } of processed) {
     await appendConversation(job.jobId, {
       conversationId: comment.id,
       role: 'user',
@@ -47,20 +58,38 @@ export async function syncJiraComments(job, actor = 'jira-sync') {
       actor: comment.authorAccountId || comment.authorDisplayName || 'jira-user',
       timestamp: comment.created || new Date().toISOString()
     });
+    await appendConversation(job.jobId, {
+      conversationId: nanoid(),
+      role: 'agent',
+      kind: 'jira-reply',
+      source: 'jira-comment',
+      text: reply,
+      actor: 'Providus Nexus',
+      timestamp: new Date().toISOString(),
+      responseToMessageId: comment.id
+    });
+    await appendAudit(job.jobId, {
+      actor: 'Providus Nexus',
+      action: 'JIRA_COMMENT_REPLIED',
+      result: 'success',
+      safeMetadata: { jiraCommentId: comment.id, intent: classification.intent, requiresPlanRevision: classification.requiresPlanRevision }
+    });
   }
-  await appendAudit(job.jobId, { actor, action: 'JIRA_COMMENTS_SYNCHRONIZED', result: 'accepted', safeMetadata: { commentIds: selection.map((comment) => comment.id), count: selection.length } });
+  await appendAudit(job.jobId, { actor, action: 'JIRA_COMMENTS_SYNCHRONIZED', result: 'accepted', safeMetadata: { commentIds: selection.map((comment) => comment.id), count: selection.length, revisionCount: revisionComments.length } });
 
-  if (job.status === JOB_STATES.RECEIVED) return { added: selection.length, reanalysisRequired: true };
+  if (!revisionComments.length) return { added: selection.length, replied: processed.length, reanalysisRequired: shouldResumeReceivedRevision(job) };
+
+  if (job.status === JOB_STATES.RECEIVED) return { added: selection.length, replied: processed.length, reanalysisRequired: true };
   if (REVISION_READY_STATES.has(job.status)) {
-    await invalidateForPlanChange(job.jobId, actor, { instruction: selection.map((comment) => comment.body).join('\n') });
-    return { added: selection.length, reanalysisRequired: true };
+    await invalidateForPlanChange(job.jobId, actor, { instruction: revisionComments.map(({ comment }) => comment.body).join('\n') });
+    return { added: selection.length, replied: processed.length, reanalysisRequired: true };
   }
   if (TERMINAL_OR_DEPLOYING_STATES.has(job.status)) {
     await updateJob(job.jobId, { followUpRequired: true });
-    return { added: selection.length, reanalysisRequired: false };
+    return { added: selection.length, replied: processed.length, reanalysisRequired: false };
   }
   await updateJob(job.jobId, { pendingRevision: true });
-  return { added: selection.length, reanalysisRequired: false };
+  return { added: selection.length, replied: processed.length, reanalysisRequired: false };
 }
 
 export function shouldResumeReceivedRevision(job) {
@@ -88,5 +117,5 @@ export function selectNewUserComments(job, comments) {
 }
 
 export function isAgentGeneratedComment(body) {
-  return /^(AI agent plan ready for review\.|AI agent job\s+.+\s+completed(?:\.|\s)|AI agent job\s+.+\s+completed without deployment\.)/i.test(String(body || '').trim());
+  return isProvidusNexusComment(body) || /^(AI agent plan ready for review\.|AI agent job\s+.+\s+completed(?:\.|\s)|AI agent job\s+.+\s+completed without deployment\.)/i.test(String(body || '').trim());
 }

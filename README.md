@@ -13,9 +13,10 @@ Worker -> Orchestrator -> specialist work-item graph -> unified plan approval
        -> exact-org validation -> separate deployment approval -> deployment
 Redis -> jobs, state history, approvals, validations, deployment records
 JSONL -> append-only operational audit copy
+Successful deployment -> Documentation Agent -> versioned PDF, Word, and Markdown reports
 ```
 
-The LWC never receives credentials. Jira content, Salesforce data, and user instructions are untrusted requirement inputs and cannot authorize commands, select arbitrary aliases, or bypass approvals. Internally selected specialists have strict metadata and file boundaries; they return structured results to the Orchestrator Agent and cannot deploy independently.
+The LWC never receives credentials. Jira content, Salesforce data, and user instructions are untrusted requirement inputs and cannot authorize commands, select arbitrary aliases, or bypass approvals. Internally selected specialists have strict metadata and file boundaries; they return structured results to the Orchestrator Agent and cannot deploy independently. Jira collaboration is handled by **Providus Nexus**, which responds conversationally while keeping technical and approval details in Salesforce.
 
 ## Repository
 
@@ -37,9 +38,9 @@ docs/                                         API, setup, persistence, security
 
 ## Safe Workflow
 
-`RECEIVED -> AWAITING_ORG_SELECTION|VERIFYING_ORG -> ANALYZING_JIRA -> DISCOVERING_METADATA -> RETRIEVING_RELEVANT_METADATA -> ANALYZING_DEPENDENCIES -> AWAITING_PLAN_APPROVAL -> IMPLEMENTING -> VALIDATING -> AWAITING_DEPLOYMENT_APPROVAL -> DEPLOYING -> COMPLETED`
+`RECEIVED -> AWAITING_ORG_SELECTION|VERIFYING_ORG -> ANALYZING_JIRA -> DISCOVERING_METADATA -> RETRIEVING_RELEVANT_METADATA -> ANALYZING_DEPENDENCIES -> AWAITING_REQUIREMENTS|AWAITING_PLAN_APPROVAL -> IMPLEMENTING -> VALIDATING -> AWAITING_DEPLOYMENT_APPROVAL -> DEPLOYING -> COMPLETED`
 
-Implementation and execution approvals are different durable records. Each is bound to the plan hash, metadata-scope hash, registry org, and Salesforce Organization ID. The second approval is additionally bound to the validation ID, source hash, and package hash. Any org reselection invalidates all downstream artifacts. An org may independently allow metadata deployment and structured record create/update operations; SAPA is currently the only registry entry enabled for the latter.
+Implementation and execution approvals are different durable records. Each is bound to the plan hash, metadata-scope hash, registry org, and Salesforce Organization ID. The second approval is additionally bound to the validation ID, source hash, and package hash. Any org reselection invalidates all downstream artifacts. Development requests with no concrete source or record operations stop in `AWAITING_REQUIREMENTS` and cannot be approved. An org may independently allow metadata deployment and structured record operations; the checked-in Providus developer and SAPA sandbox policies currently enable bounded business-record operations while retaining a security-object denylist.
 
 ## Quick Start
 
@@ -88,4 +89,4 @@ sf apex run test --class-names AgentControllerTest --target-org <setup-org-alias
 
 No Salesforce org, Named Credential principal, or Jira project is configured by the checked-in examples. Configure the modern Named/External Credential in Salesforce Setup, replace registry identity values, activate only verified org records, and grant `AI_Agent_Deploy` only to authorized deployers.
 
-See [setup](docs/SETUP.md), [multi-agent architecture](docs/MULTI_AGENT_ARCHITECTURE.md), [API contract](docs/API.md), [data model](docs/DATA_MODEL.md), and [security model](docs/SECURITY.md).
+See [setup](docs/SETUP.md), [Providus Nexus Jira collaboration](docs/JIRA_COLLABORATION.md), [multi-agent architecture](docs/MULTI_AGENT_ARCHITECTURE.md), [implementation reports](docs/IMPLEMENTATION_REPORTS.md), [API contract](docs/API.md), [data model](docs/DATA_MODEL.md), and [security model](docs/SECURITY.md).

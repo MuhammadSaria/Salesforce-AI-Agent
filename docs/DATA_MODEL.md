@@ -12,9 +12,11 @@ Specialist fields are stored directly in the job aggregate:
 - `specialistMessages`: bounded structured communication records.
 - `fileOwnership`: one owner and lock/hash record per approved file.
 - `revisionContext`: affected agents and completed unaffected work carried into the next iteration.
+- `deploymentHistory`: append-only successful deployment summaries and their report status.
+- `implementationReports`: immutable report descriptors for each deployment version. File bytes remain in isolated artifact storage and are never stored in Redis or API job responses.
 
 Work-item and file-ownership mutations use the existing local/Redis job lock. The single worker executes the dependency graph serially in the current version, preventing stale concurrent filesystem edits.
 
 Webhook idempotency keys use `jira-webhook:<eventId>` with a seven-day TTL. Audit events are stored in the job aggregate and duplicated to `jobs/<jobId>/logs/audit.jsonl` as an append-only operational copy.
 
-There is no database migration command for this version because existing Redis job keys are not rewritten. Production deployments needing SQL-enforced foreign keys, retention policies, immutable/WORM audit storage, or multi-process approval transactions should replace `jobStore.js` behind its existing interface before enabling production deployment.
+There is no database migration command for this version because existing Redis job keys are not rewritten; legacy jobs receive empty report/history collections when read by the UI. Production deployments needing SQL-enforced foreign keys, retention policies, immutable/WORM audit storage, backed-up report artifacts, or multi-process approval transactions should replace `jobStore.js` and the local report storage provider behind their existing interfaces before enabling production deployment.

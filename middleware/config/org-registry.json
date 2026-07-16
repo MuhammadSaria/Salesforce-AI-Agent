@@ -24,21 +24,7 @@
       "maximumDeleteOperations": 5,
       "productionApprovalRequired": false,
       "active": true,
-      "allowedMetadataTypes": [
-        "CustomObject",
-        "CustomField",
-        "Flow",
-        "ApexClass",
-        "ApexTrigger",
-        "LightningComponentBundle",
-        "PermissionSet",
-        "ValidationRule",
-        "CustomMetadata",
-        "CustomLabels",
-        "Layout",
-        "FlexiPage",
-        "RecordType"
-      ],
+      "allowedMetadataTypes": ["*"],
       "restrictedMetadataTypes": [
         "Profile",
         "ConnectedApp",
