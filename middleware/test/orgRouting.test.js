@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isDataObjectAllowed, selectOrgFromRegistry } from '../src/services/orgRegistry.js';
+import { getRegisteredOrg, isDataObjectAllowed, selectOrgFromRegistry } from '../src/services/orgRegistry.js';
 
 function org(id, projectKeys, options = {}) {
   return {
@@ -71,4 +71,17 @@ test('wildcard data access permits business objects but retains the security den
   assert.equal(isDataObjectAllowed(context, 'Order'), true);
   assert.equal(isDataObjectAllowed(context, 'User'), false);
   assert.equal(isDataObjectAllowed(context, 'PermissionSetAssignment'), false);
+});
+
+test('Providus developer org permits approved Opportunity creates only', async () => {
+  const context = await getRegisteredOrg('providus_orgfarm_dev');
+
+  assert.equal(context.dataMutationPermission, 'allowed');
+  assert.equal(context.recordDeletionPermission, 'blocked');
+  assert.equal(context.maximumDataOperations, 10);
+  assert.equal(context.allowedOperations.includes('data-create'), true);
+  assert.equal(context.allowedOperations.includes('data-update'), false);
+  assert.equal(context.allowedOperations.includes('data-delete'), false);
+  assert.equal(isDataObjectAllowed(context, 'Opportunity'), true);
+  assert.equal(isDataObjectAllowed(context, 'Account'), false);
 });
