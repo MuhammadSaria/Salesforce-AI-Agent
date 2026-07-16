@@ -73,15 +73,20 @@ test('wildcard data access permits business objects but retains the security den
   assert.equal(isDataObjectAllowed(context, 'PermissionSetAssignment'), false);
 });
 
-test('Providus developer org permits approved Opportunity creates only', async () => {
+test('Providus developer org permits approved business data mutations but blocks security objects', async () => {
   const context = await getRegisteredOrg('providus_orgfarm_dev');
 
   assert.equal(context.dataMutationPermission, 'allowed');
-  assert.equal(context.recordDeletionPermission, 'blocked');
-  assert.equal(context.maximumDataOperations, 10);
+  assert.equal(context.recordDeletionPermission, 'allowed');
+  assert.equal(context.maximumDataOperations, 25);
+  assert.equal(context.maximumDeleteOperations, 5);
   assert.equal(context.allowedOperations.includes('data-create'), true);
-  assert.equal(context.allowedOperations.includes('data-update'), false);
-  assert.equal(context.allowedOperations.includes('data-delete'), false);
+  assert.equal(context.allowedOperations.includes('data-update'), true);
+  assert.equal(context.allowedOperations.includes('data-delete'), true);
   assert.equal(isDataObjectAllowed(context, 'Opportunity'), true);
-  assert.equal(isDataObjectAllowed(context, 'Account'), false);
+  assert.equal(isDataObjectAllowed(context, 'Account'), true);
+  assert.equal(isDataObjectAllowed(context, 'Donation__c'), true);
+  assert.equal(isDataObjectAllowed(context, 'User'), false);
+  assert.equal(isDataObjectAllowed(context, 'PermissionSetAssignment'), false);
+  assert.equal(isDataObjectAllowed(context, 'AuthSession'), false);
 });

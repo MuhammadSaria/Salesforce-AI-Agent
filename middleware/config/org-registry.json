@@ -17,10 +17,11 @@
       "authenticationStatus": "connected",
       "deploymentPermission": "allowed",
       "dataMutationPermission": "allowed",
-      "recordDeletionPermission": "blocked",
-      "allowedDataObjects": ["Opportunity"],
-      "restrictedDataObjects": [],
-      "maximumDataOperations": 10,
+      "recordDeletionPermission": "allowed",
+      "allowedDataObjects": ["*"],
+      "restrictedDataObjects": ["User", "UserRole", "Profile", "PermissionSet", "PermissionSetAssignment", "PermissionSetGroup", "PermissionSetGroupComponent", "SetupEntityAccess", "Group", "GroupMember", "QueueSobject", "AuthSession", "LoginHistory", "OauthToken", "ConnectedApplication", "ExternalDataUserAuth"],
+      "maximumDataOperations": 25,
+      "maximumDeleteOperations": 5,
       "productionApprovalRequired": false,
       "active": true,
       "allowedMetadataTypes": [
@@ -48,7 +49,9 @@
         "retrieve",
         "validate",
         "deploy",
-        "data-create"
+        "data-create",
+        "data-update",
+        "data-delete"
       ]
     },
     {
