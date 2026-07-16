@@ -8,7 +8,7 @@
     <isNavAutoTempTabsDisabled>false</isNavAutoTempTabsDisabled>
     <isNavPersonalizationDisabled>false</isNavPersonalizationDisabled>
     <isNavTabPersistenceDisabled>false</isNavTabPersistenceDisabled>
-    <label>AI Agent</label>
+    <label>Providus Nexus</label>
     <navType>Standard</navType>
     <tabs>Agent_Console</tabs>
     <uiType>Lightning</uiType>
