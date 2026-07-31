@@ -1,0 +1,15 @@
+.git
+.sf
+.sfdx
+.vscode
+node_modules
+middleware/node_modules
+middleware/.env
+middleware/.ngrok-url
+middleware/logs
+middleware/runtime-logs
+middleware/*.log
+jobs
+workspaces
+coverage
+dist

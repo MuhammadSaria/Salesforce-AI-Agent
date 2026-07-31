@@ -8,7 +8,7 @@
         <apexClass>AgentController</apexClass>
         <enabled>true</enabled>
     </classAccesses>
-    <label>AI Agent User</label>
+    <label>Providus Nexus User</label>
     <tabSettings>
         <tab>Agent_Console</tab>
         <visibility>Visible</visibility>

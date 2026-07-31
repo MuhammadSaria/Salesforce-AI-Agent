@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { config } from '../config.js';
 import { stableHash } from '../utils/hash.js';
+import { metadataComponentFromPath } from '../domain/metadataCapabilities.js';
 
 const TYPE_PATTERNS = [
   ['CustomObject', /\b([A-Za-z][A-Za-z0-9_]*__c)\b/g],
@@ -14,11 +15,13 @@ const TYPE_PATTERNS = [
 ];
 
 export function extractRequirement(jira, prompt, instructions = []) {
-  const text = [jira?.summary, jira?.description, jira?.acceptanceCriteria, ...(jira?.comments || []), prompt, ...instructions.map((item) => item.text)].filter(Boolean).join('\n');
+  const attachmentRequirements = (jira?.attachmentContents || []).map((attachment) => `${attachment.filename}:\n${attachment.text}`);
+  const text = [jira?.summary, jira?.description, jira?.acceptanceCriteria, ...attachmentRequirements, ...(jira?.comments || []), prompt, ...instructions.map((item) => item.text)].filter(Boolean).join('\n');
   return {
     summary: jira?.summary || String(prompt || '').slice(0, 500),
     acceptanceCriteria: jira?.acceptanceCriteria || '',
-    businessRequirement: jira?.description || jira?.summary || prompt || '',
+    businessRequirement: [jira?.description || jira?.summary || prompt || '', ...attachmentRequirements].filter(Boolean).join('\n\n'),
+    attachmentRequirements,
     securityRequirements: matchingLines(text, /secur|permission|sharing|access/i),
     testingRequirements: matchingLines(text, /test|coverage|acceptance/i),
     userInstructions: instructions.map((item) => item.text).filter(Boolean),
@@ -138,7 +141,7 @@ export function buildPlan(job, requirement, scope, dependencies) {
   return { ...planCore, planHash: stableHash(planCore) };
 }
 
-function isAllowedType(type, orgContext) { return (!orgContext.allowedMetadataTypes?.length || orgContext.allowedMetadataTypes.includes(type)) && !orgContext.restrictedMetadataTypes?.includes(type); }
+function isAllowedType(type, orgContext) { return (!orgContext.allowedMetadataTypes?.length || orgContext.allowedMetadataTypes.includes('*') || orgContext.allowedMetadataTypes.includes(type)) && !orgContext.restrictedMetadataTypes?.includes(type); }
 function isPlausibleApiName(value) { return /[A-Z_]/.test(value) || /__c$/.test(value); }
 function detectAmbiguities(text) { const result = []; if (!text.trim()) result.push('Requirement details are missing.'); if (!/\b(test|accept|should|must|when)\b/i.test(text)) result.push('Explicit acceptance criteria are missing.'); return result; }
 function matchingLines(text, pattern) { return text.split(/\r?\n/).filter((line) => pattern.test(line)).slice(0, 20); }
@@ -171,6 +174,6 @@ function componentFromPath(path) {
   if ((match = value.match(/\/authproviders\/([^/]+)\.authprovider-meta\.xml$/))) return { type: 'AuthProvider', apiName: match[1] };
   if ((match = value.match(/\/connectedApps\/([^/]+)\.connectedApp-meta\.xml$/))) return { type: 'ConnectedApp', apiName: match[1] };
   if ((match = value.match(/\/customMetadata\/([^/]+)\.md-meta\.xml$/))) return { type: 'CustomMetadata', apiName: match[1] };
-  return null;
+  return metadataComponentFromPath(value);
 }
 function escapeXml(value) { return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }

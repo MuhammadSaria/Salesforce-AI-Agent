@@ -1,3 +1,5 @@
+import { GENERAL_METADATA_PATH_ROOTS, GENERAL_METADATA_TYPES } from './metadataCapabilities.js';
+
 export const SPECIALIST_AGENT_IDS = Object.freeze({
   OBJECT_FIELD: 'OBJECT_FIELD',
   FLOW: 'FLOW',
@@ -6,6 +8,7 @@ export const SPECIALIST_AGENT_IDS = Object.freeze({
   UI_METADATA: 'UI_METADATA',
   SECURITY_PERMISSIONS: 'SECURITY_PERMISSIONS',
   INTEGRATION: 'INTEGRATION',
+  GENERAL_METADATA: 'GENERAL_METADATA',
   DATA: 'DATA',
   TESTING: 'TESTING',
   VALIDATION_DEPLOYMENT: 'VALIDATION_DEPLOYMENT',
@@ -120,6 +123,15 @@ const AGENTS = [
     inspectionChecklist: ['Existing credentials without secret values', 'Endpoint and authentication metadata', 'Callout and webhook dependencies', 'Required Apex and permission coordination']
   },
   {
+    id: SPECIALIST_AGENT_IDS.GENERAL_METADATA,
+    name: 'General Salesforce Metadata Agent',
+    section: 'Additional Salesforce configuration',
+    role: 'Owns supported Salesforce configuration that falls outside the dedicated object, automation, code, UI, security, and integration specialist boundaries, including reports, dashboards, email templates, Experience Cloud, Visualforce, rules, translations, and related metadata.',
+    metadataTypes: GENERAL_METADATA_TYPES,
+    pathRoots: GENERAL_METADATA_PATH_ROOTS,
+    inspectionChecklist: ['Existing components and naming conventions', 'Folder, application, and audience assignments', 'Dependencies on fields, permissions, automation, and packages', 'Task-specific validation and user verification steps']
+  },
+  {
     id: SPECIALIST_AGENT_IDS.DATA,
     name: 'Data Agent',
     section: 'Data changes',
@@ -149,12 +161,12 @@ const AGENTS = [
   },
   {
     id: SPECIALIST_AGENT_IDS.DOCUMENTATION_EXPLANATION,
-    name: 'Documentation and Explanation Agent',
-    section: 'Human-readable explanation',
-    role: 'Consolidates technical specialist results into one plain-language plan, validation result, deployment result, and user verification summary.',
+    name: 'Documentation Agent',
+    section: 'Implementation documentation',
+    role: 'Consolidates approved requirements, implementation, validation, deployment, changed components, instructions, and deployment history into plain-language summaries and immutable implementation reports.',
     metadataTypes: [],
     pathRoots: [],
-    inspectionChecklist: ['Requested business behavior', 'Existing functionality reused', 'Observable changes and test results', 'Deployment outcome and user verification']
+    inspectionChecklist: ['Requested business behavior and user instructions', 'Existing functionality reused', 'Observable changes and validation results', 'Deployment outcome and version history', 'PDF, Word, and Markdown report generation']
   }
 ];
 
@@ -172,6 +184,18 @@ export function specialistAgent(agentId) {
 export function assertWorkItemTransition(from, to) {
   if (!Object.values(WORK_ITEM_STATUSES).includes(to)) throw Object.assign(new Error(`Unknown work-item status: ${to}`), { code: 'UNKNOWN_WORK_ITEM_STATUS' });
   if (!(WORK_ITEM_TRANSITIONS.get(from) || []).includes(to)) throw Object.assign(new Error(`Invalid specialist work-item transition: ${from} -> ${to}`), { statusCode: 409, code: 'INVALID_WORK_ITEM_TRANSITION' });
+}
+
+export function workItemCompletionPath(from) {
+  const path = from === WORK_ITEM_STATUSES.IMPLEMENTING
+    ? [WORK_ITEM_STATUSES.IMPLEMENTATION_COMPLETE, WORK_ITEM_STATUSES.COMPLETED]
+    : [WORK_ITEM_STATUSES.COMPLETED];
+  let current = from;
+  for (const status of path) {
+    assertWorkItemTransition(current, status);
+    current = status;
+  }
+  return path;
 }
 
 export function ownerForMetadataType(type) {
@@ -217,6 +241,7 @@ export function selectSpecialistAgents(requirement, metadataScope = {}, plan = {
   if (/\b(layout|lightning page|record page|flexipage|compact layout|related list|dynamic forms?|tab visibility|app page)\b/i.test(text)) selected.add(SPECIALIST_AGENT_IDS.UI_METADATA);
   if (/\b(permission|access|security|field.level|fls|profile|permission set|custom permission|least privilege)\b/i.test(text)) selected.add(SPECIALIST_AGENT_IDS.SECURITY_PERMISSIONS);
   if (/\b(integration|named credential|external credential|remote site|webhook|platform event|external service|connected app|auth provider)\b/i.test(text)) selected.add(SPECIALIST_AGENT_IDS.INTEGRATION);
+  if (/\b(report|dashboard|email template|visualforce|experience cloud|community|assignment rule|auto.?response rule|escalation rule|matching rule|duplicate rule|translation|approval process|quick action|home page)\b/i.test(text)) selected.add(SPECIALIST_AGENT_IDS.GENERAL_METADATA);
 
   if (selected.has(SPECIALIST_AGENT_IDS.OBJECT_FIELD)) {
     selected.add(SPECIALIST_AGENT_IDS.SECURITY_PERMISSIONS);
@@ -243,6 +268,7 @@ export function selectAffectedSpecialistAgents(instruction) {
   if (/\b(layout|lightning page|record page|flexipage|compact layout|related list|dynamic forms?|tab|app page)\b/i.test(text)) selected.add(SPECIALIST_AGENT_IDS.UI_METADATA);
   if (/\b(permission|access|security|field.level|fls|profile|permission set|custom permission)\b/i.test(text)) selected.add(SPECIALIST_AGENT_IDS.SECURITY_PERMISSIONS);
   if (/\b(integration|named credential|external credential|remote site|webhook|platform event|external service|connected app|auth provider)\b/i.test(text)) selected.add(SPECIALIST_AGENT_IDS.INTEGRATION);
+  if (/\b(report|dashboard|email template|visualforce|experience cloud|community|assignment rule|auto.?response rule|escalation rule|matching rule|duplicate rule|translation|approval process|quick action|home page)\b/i.test(text)) selected.add(SPECIALIST_AGENT_IDS.GENERAL_METADATA);
   if (/\b(data|record|backfill|migration|migrate|duplicate|soql)\b/i.test(text) && /\b(create|update|delete|analy|check|plan|backfill|migrate)\b/i.test(text)) selected.add(SPECIALIST_AGENT_IDS.DATA);
   if (selected.has(SPECIALIST_AGENT_IDS.OBJECT_FIELD)) {
     selected.add(SPECIALIST_AGENT_IDS.SECURITY_PERMISSIONS);

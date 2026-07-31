@@ -57,6 +57,19 @@ public with sharing class AgentController {
         return sendJson('GET', '/api/jobs/' + safePath(jobId, 'Job ID') + '/' + safeArtifact, null).getBody();
     }
 
+    @AuraEnabled(cacheable=false)
+    public static String getImplementationReport(String jobId, Integer deploymentVersion, String format) {
+        if (deploymentVersion == null || deploymentVersion < 1 || deploymentVersion > 9999) {
+            throw new AuraHandledException('Deployment version is invalid.');
+        }
+        String safeFormat = String.valueOf(format == null ? '' : format).trim().toLowerCase();
+        if (!new Set<String>{'pdf', 'docx', 'markdown'}.contains(safeFormat)) {
+            throw new AuraHandledException('Implementation report format is invalid.');
+        }
+        String path = '/api/jobs/' + safePath(jobId, 'Job ID') + '/implementation-reports/' + String.valueOf(deploymentVersion) + '/' + safeFormat;
+        return sendJson('GET', path, null).getBody();
+    }
+
     private static HttpResponse sendJson(String method, String path, Object payload) {
         HttpRequest request = new HttpRequest();
         request.setEndpoint('callout:' + NAMED_CREDENTIAL + path);

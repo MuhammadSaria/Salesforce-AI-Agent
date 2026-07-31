@@ -38,6 +38,21 @@ private class AgentControllerTest {
         Test.startTest(); String response = AgentController.getOrgs(); Test.stopTest();
         System.assert(response.contains('sapa_devsandbox'));
     }
+    @IsTest static void implementationReport_success() {
+        Test.setMock(HttpCalloutMock.class, new AgentMock(200, '{"fileName":"Implementation-Report-TA-6-V2.pdf","contentType":"application/pdf","contentBase64":"JVBERg=="}'));
+        Test.startTest();
+        String response = AgentController.getImplementationReport('job-1', 2, 'pdf');
+        Test.stopTest();
+        System.assert(response.contains('Implementation-Report-TA-6-V2.pdf'));
+    }
+    @IsTest static void implementationReport_inputGuards() {
+        for (Integer invalidVersion : new List<Integer>{0, -1}) {
+            try { AgentController.getImplementationReport('job-1', invalidVersion, 'pdf'); System.assert(false); }
+            catch (AuraHandledException expected) { }
+        }
+        try { AgentController.getImplementationReport('job-1', 1, '../pdf'); System.assert(false); }
+        catch (AuraHandledException expected) { }
+    }
     @IsTest static void middleware_error_isSanitized() {
         Test.setMock(HttpCalloutMock.class, new AgentMock(500, '{"error":{"message":"Worker unavailable."}}'));
         try { AgentController.getJobs(); System.assert(false); }

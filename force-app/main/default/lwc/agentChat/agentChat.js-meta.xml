@@ -2,6 +2,8 @@
 <LightningComponentBundle xmlns="http://soap.sforce.com/2006/04/metadata">
     <apiVersion>67.0</apiVersion>
     <isExposed>true</isExposed>
+    <masterLabel>Providus Nexus</masterLabel>
+    <description>Supervised Salesforce delivery workspace for Jira-driven implementation, validation, and deployment.</description>
     <targets>
         <target>lightning__AppPage</target>
         <target>lightning__HomePage</target>

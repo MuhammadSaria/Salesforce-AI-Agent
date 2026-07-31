@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>AI_Agent</members>
+        <name>CustomApplication</name>
+    </types>
+    <types>
+        <members>AgentController</members>
+        <members>AgentControllerTest</members>
+        <name>ApexClass</name>
+    </types>
+    <types>
+        <members>AI_Agent_Admin</members>
+        <members>AI_Agent_Deploy</members>
+        <name>CustomPermission</name>
+    </types>
+    <types>
+        <members>Agent_Console</members>
+        <name>CustomTab</name>
+    </types>
+    <types>
+        <members>Agent_Console</members>
+        <name>FlexiPage</name>
+    </types>
+    <types>
+        <members>agentChat</members>
+        <name>LightningComponentBundle</name>
+    </types>
+    <types>
+        <members>AI_Agent_Executor</members>
+        <members>AI_Agent_User</members>
+        <name>PermissionSet</name>
+    </types>
+    <version>67.0</version>
+</Package>

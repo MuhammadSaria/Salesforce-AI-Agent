@@ -19,6 +19,7 @@ export function getJobPaths(jobId, orgRegistryId) {
     logs: join(jobRoot, 'logs'),
     approvals: join(jobRoot, 'approvals'),
     deployment: join(jobRoot, 'deployment'),
+    implementationReports: join(jobRoot, 'deployment', 'reports'),
     jira: join(jobRoot, 'jira'),
     orgBaseline: resolve(config.workspaceRoot, 'workspaces', orgRegistryId, 'baseline'),
     orgProject: resolve(config.workspaceRoot, 'workspaces', orgRegistryId, 'project')
@@ -28,7 +29,7 @@ export function getJobPaths(jobId, orgRegistryId) {
 export async function ensureJobWorkspace(jobId, orgRegistryId) {
   const paths = getJobPaths(jobId, orgRegistryId);
   await Promise.all(
-    [paths.workspace, paths.manifest, paths.retrievedMetadata, paths.analysis, paths.plan, paths.implementation, paths.validation, paths.diff, paths.logs, paths.approvals, paths.deployment, paths.jira].map((path) =>
+    [paths.workspace, paths.manifest, paths.retrievedMetadata, paths.analysis, paths.plan, paths.implementation, paths.validation, paths.diff, paths.logs, paths.approvals, paths.deployment, paths.implementationReports, paths.jira].map((path) =>
       mkdir(path, { recursive: true })
     )
   );

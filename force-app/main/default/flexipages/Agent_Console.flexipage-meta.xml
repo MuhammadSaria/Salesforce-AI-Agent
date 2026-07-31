@@ -10,7 +10,7 @@
         <name>main</name>
         <type>Region</type>
     </flexiPageRegions>
-    <masterLabel>Agent Console</masterLabel>
+    <masterLabel>Providus Nexus Workspace</masterLabel>
     <template>
         <name>flexipage:defaultAppHomeTemplate</name>
     </template>

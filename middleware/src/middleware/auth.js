@@ -14,6 +14,7 @@ export async function requireApiAuth(req, res, next) {
   const bearer = String(req.get('authorization') || '').replace(/^Bearer\s+/i, '');
   if (config.apiAuthToken && safeEqual(bearer, config.apiAuthToken)) {
     req.actor = actorFromHeaders(req);
+    req.actor.authMethod = 'bearer';
     next();
     return;
   }
@@ -41,7 +42,8 @@ export function requireRole(...roles) {
 function actorFromHeaders(req) {
   return {
     id: String(req.get('x-agent-user-id') || 'salesforce-user').slice(0, 80),
-    role: String(req.get('x-agent-role') || 'developer').toLowerCase()
+    role: String(req.get('x-agent-role') || 'developer').toLowerCase(),
+    orgId: normalizeOrgId(req.get('x-agent-org-id'))
   };
 }
 

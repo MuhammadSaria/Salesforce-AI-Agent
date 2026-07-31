@@ -193,7 +193,7 @@ function buildSpecialistResult(definition, metadata, files, dataOperations, plan
   if (!proposedChanges.length) {
     if (definition.id === SPECIALIST_AGENT_IDS.TESTING) proposedChanges.push(...(plan.testingStrategy || []));
     else if (definition.id === SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT) proposedChanges.push(plan.validationStrategy, plan.deploymentStrategy);
-    else if (definition.id === SPECIALIST_AGENT_IDS.DOCUMENTATION_EXPLANATION) proposedChanges.push('Combine all specialist findings into one human-readable result for Salesforce and Jira.');
+    else if (definition.id === SPECIALIST_AGENT_IDS.DOCUMENTATION_EXPLANATION) proposedChanges.push('Combine all specialist findings into human-readable Salesforce and Jira summaries, then generate versioned PDF, Word, and Markdown implementation reports after deployment.');
     else proposedChanges.push(`Inspect and coordinate the ${definition.section.toLowerCase()} required by the approved plan.`);
   }
   return {

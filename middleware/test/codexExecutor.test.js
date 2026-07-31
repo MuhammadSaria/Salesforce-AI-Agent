@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { validateCodexProposal } from '../src/services/codexExecutor.js';
+import { buildCodexArgs, codexPlanningFailure, validateCodexProposal } from '../src/services/codexExecutor.js';
 
 const proposal = (file) => ({
   proposedImplementation: 'Update the approved Salesforce source.',
@@ -59,4 +59,28 @@ test('rejects destructive Codex file operations', () => {
     content: 'delete',
     reason: 'Untrusted request.'
   })), /blocked file operation/);
+});
+
+test('summarizes Codex planning failures without exposing stderr details', () => {
+  const timeout = codexPlanningFailure({
+    exitCode: 124,
+    stderr: 'Codex planning timed out. prompt=private requirement token=top-secret'
+  });
+  assert.match(timeout, /time limit/i);
+  assert.match(timeout, /no Salesforce changes were made/i);
+  assert.doesNotMatch(timeout, /private requirement|top-secret|prompt=/i);
+
+  const authorization = codexPlanningFailure({
+    exitCode: 1,
+    stderr: 'AuthorizationRequired bearer-token-value'
+  });
+  assert.match(authorization, /Codex session/i);
+  assert.doesNotMatch(authorization, /AuthorizationRequired|bearer-token-value/i);
+});
+
+test('isolates middleware planning from personal Codex configuration', () => {
+  const args = buildCodexArgs('plan.json', 'schema.json');
+  assert.ok(args.includes('--ignore-user-config'));
+  assert.ok(args.includes('--ephemeral'));
+  assert.deepEqual(args.slice(-1), ['-']);
 });
