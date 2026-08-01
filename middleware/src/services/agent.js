@@ -22,6 +22,7 @@ import { SPECIALIST_AGENT_IDS, SPECIALIST_MESSAGE_TYPES, WORK_ITEM_STATUSES, imp
 export async function processAgentJob(message) {
   const job = await requiredJob(message.jobId);
   const actor = message.actor || 'system';
+  assertJiraActionAllowed(job);
   if (message.action === 'understand') return { jobId: job.jobId, status: job.status };
   if (message.action === 'sync-jira') {
     assertJiraEnabled();
@@ -358,7 +359,10 @@ function assertDeploymentGuard(job, approval) {
 }
 
 function assertState(job, ...states) { if (!states.includes(job.status)) throw Object.assign(new Error(`Job must be in ${states.join(' or ')}.`), { statusCode: 409 }); }
-function assertJiraEnabled() { if (!config.jiraEnabled) throw Object.assign(new Error('Jira worker actions are disabled.'), { statusCode: 409 }); }
+function assertJiraEnabled() { if (!config.jiraEnabled) throw jiraDisabledError(); }
+function assertJiraActionAllowed(job) { if (!config.jiraEnabled && isJiraSource(job)) throw jiraDisabledError(); }
+function isJiraSource(job) { return Boolean(job.jiraIssueKey || String(job.source || '').startsWith('jira-')); }
+function jiraDisabledError() { return Object.assign(new Error('Jira workflows are disabled.'), { statusCode: 409, code: 'JIRA_DISABLED' }); }
 async function activatePendingJiraRevisionWhenEnabled(jobId, actor) { return config.jiraEnabled && activatePendingJiraRevision(jobId, actor); }
 function completionReason(base, job) { return config.jiraEnabled && job.jiraIssueKey ? `${base} Jira updated.` : base; }
 function documentationSummary(job) { return config.jiraEnabled && job.jiraIssueKey ? 'The no-change completion result was consolidated for the user and Jira.' : 'The no-change completion result was consolidated for the user.'; }

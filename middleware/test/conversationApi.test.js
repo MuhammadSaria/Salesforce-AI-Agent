@@ -5,6 +5,14 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { config } from '../src/config.js';
 import { createApp } from '../src/server.js';
+import { createJobRecord, updateJob } from '../src/services/jobStore.js';
+
+const promptRequired = {
+  error: {
+    code: 'PROMPT_REQUIRED',
+    message: 'Enter a Salesforce development request.'
+  }
+};
 
 test('any authenticated Salesforce user can start and continue their own job', async (t) => {
   const { base, close } = await testServer(t);
@@ -56,6 +64,20 @@ test('conversation routes preserve owner and admin job isolation', async (t) => 
   assert.equal(admin.status, 202);
 });
 
+test('starting a Salesforce chat job requires a prompt before sanitization', async (t) => {
+  const { base, close } = await testServer(t);
+  t.after(close);
+
+  for (const body of [{}, { prompt: '' }, { prompt: '   \n\t  ' }]) {
+    const response = await postJson(`${base}/api/jobs`, body, viewerHeaders('005-owner'));
+
+    assert.equal(response.status, 422);
+    assert.deepEqual(response.body, promptRequired);
+    assert.equal(JSON.stringify(response.body).includes('sanitizePrompt'), false);
+    assert.equal(JSON.stringify(response.body).includes('stack'), false);
+  }
+});
+
 test('job owner can cancel their own job but approval routes remain role gated', async (t) => {
   const { base, close } = await testServer(t);
   t.after(close);
@@ -89,7 +111,7 @@ test('new Salesforce chat jobs cannot enter the legacy Jira analysis route', asy
   assert.equal(created.status, 201);
 
   const analyzed = await postJson(`${base}/api/jobs/${created.body.jobId}/analyze`, {}, viewerHeaders('005-owner', 'developer'));
-  assert.equal(analyzed.status, 409);
+  assert.equal(analyzed.status, 404);
 
   const job = await getJson(`${base}/api/jobs/${created.body.jobId}`, viewerHeaders('005-owner', 'developer'));
   assert.equal(job.body.stateHistory.some((event) => String(event.newState).includes('JIRA')), false);
@@ -107,8 +129,104 @@ test('Jira webhook is not registered when Jira is disabled by default', async (t
   assert.equal(response.status, 404);
 });
 
+test('Jira-specific routes are unavailable and historical Jira jobs remain readable when disabled', async (t) => {
+  const { base, close } = await testServer(t);
+  t.after(close);
+  const jobId = `jira-disabled-read-${Date.now()}`;
+  await createJobRecord({
+    jobId,
+    userId: '005-owner',
+    source: 'jira-webhook',
+    jiraIssueKey: 'SAPA-123',
+    prompt: 'Analyze Jira issue SAPA-123'
+  });
+
+  const read = await getJson(`${base}/api/jobs/${jobId}`, viewerHeaders('005-owner', 'developer'));
+  assert.equal(read.status, 200);
+  assert.equal(read.body.source, 'jira-webhook');
+  assert.equal(read.body.jiraIssueKey, 'SAPA-123');
+
+  assert.equal((await postJson(`${base}/api/jobs/${jobId}/analyze`, {}, viewerHeaders('005-owner', 'developer'))).status, 404);
+  assert.equal((await postJson(`${base}/api/jobs/${jobId}/instructions`, { instruction: 'Revise it' }, viewerHeaders('005-owner', 'developer'))).status, 404);
+});
+
+test('generic action routes reject Jira-source jobs when Jira is disabled', async (t) => {
+  const { base, close } = await testServer(t);
+  t.after(close);
+  const jobId = `jira-disabled-mutate-${Date.now()}`;
+  await createJobRecord({
+    jobId,
+    userId: '005-owner',
+    source: 'jira-webhook',
+    jiraIssueKey: 'SAPA-124',
+    prompt: 'Analyze Jira issue SAPA-124'
+  });
+  await updateJob(jobId, {
+    status: 'IMPLEMENTING',
+    plan: { planVersion: 1, planHash: 'plan-hash', materialChangeHash: 'material-hash' },
+    metadataScope: { hash: 'scope-hash' },
+    orgContext: { expectedOrgId: '00DTEST' }
+  });
+
+  for (const route of ['implement', 'validate']) {
+    const response = await postJson(`${base}/api/jobs/${jobId}/${route}`, {}, viewerHeaders('005-owner', 'developer'));
+    assert.equal(response.status, 409);
+    assert.equal(response.body.error.code, 'JIRA_DISABLED');
+  }
+
+  await updateJob(jobId, {
+    status: 'AWAITING_DEPLOYMENT_APPROVAL',
+    validation: { validationId: 'validation-1', sourceHash: 'source-hash', packageHash: 'package-hash' }
+  });
+  const deployment = await postJson(`${base}/api/jobs/${jobId}/approve-deployment`, {
+    validationId: 'validation-1'
+  }, viewerHeaders('005-owner', 'deployer'));
+  assert.equal(deployment.status, 409);
+  assert.equal(deployment.body.error.code, 'JIRA_DISABLED');
+});
+
+test('Salesforce chat jobs continue through generic action routes when Jira is disabled', async (t) => {
+  const { base, close } = await testServer(t);
+  t.after(close);
+  const jobId = `chat-action-${Date.now()}`;
+  await createJobRecord({
+    jobId,
+    userId: '005-owner',
+    source: 'salesforce-chat',
+    prompt: 'Create a Flow'
+  });
+  await updateJob(jobId, { status: 'RECEIVED' });
+
+  const response = await postJson(`${base}/api/jobs/${jobId}/implement`, {}, viewerHeaders('005-owner', 'developer'));
+  assert.equal(response.status, 409);
+  assert.notEqual(response.body.error.code, 'JIRA_DISABLED');
+});
+
+test('Jira-specific routes remain available when Jira is enabled', async (t) => {
+  config.jiraEnabled = true;
+  const { base, close } = await testServer(t);
+  t.after(() => {
+    config.jiraEnabled = false;
+    close();
+  });
+  const jobId = `jira-enabled-${Date.now()}`;
+  await createJobRecord({
+    jobId,
+    userId: '005-owner',
+    source: 'jira-webhook',
+    jiraIssueKey: 'SAPA-125',
+    prompt: 'Analyze Jira issue SAPA-125'
+  });
+  await updateJob(jobId, { status: 'IMPLEMENTING' });
+
+  const response = await postJson(`${base}/api/jobs/${jobId}/analyze`, {}, viewerHeaders('005-owner', 'developer'));
+  assert.equal(response.status, 409);
+  assert.notEqual(response.body.error.code, 'JIRA_DISABLED');
+});
+
 async function testServer() {
   config.apiAuthToken = '';
+  config.jiraEnabled = config.jiraEnabled === true;
   config.workspaceRoot = await mkdtemp(join(tmpdir(), 'providus-conversation-api-'));
   const server = createApp().listen(0);
   await new Promise((resolve) => server.once('listening', resolve));
