@@ -21,12 +21,16 @@
   - Implementation commit: e0eadeac118cee6a7c498d57f7813741b345520f
   - Verification/fix commit: 822ac011f13976d96c5ec93535680906595ba02d
   - Critical/important correction commit: 1691f560054a5e972190134ad4c0a479aade05d4
+  - Final safety correction commit: pending
   - Verification date: 2026-08-01
   - Verification:
     - `cd middleware && docker compose ps` - PASS, `middleware-postgres-1` running and publishing `5432`.
+    - `cd middleware && docker compose exec -T postgres psql -U providus -d postgres -c "SELECT datname FROM pg_database WHERE datname = 'providus_nexus_test'"` - PASS, dedicated test database exists.
     - `cd middleware && npm.cmd run migrate` - PASS.
-    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/jobRepositoryPostgres.test.js test/postgresHelper.test.js` - PASS, 10 tests, 0 skipped.
-    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 82 passing tests and 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/postgresHelper.test.js test/jobRepositoryPostgres.test.js` - PASS, 13 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:6543/providus_nexus_test'; node --import ./test/setup.js --test test/jobRepositoryPostgres.test.js` - FAIL as required, 6 failing live PostgreSQL tests and 0 skipped; failure message names `providus_nexus_test`, says to start PostgreSQL/Docker, and says the integration test was not executed.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:6543/providus_nexus_test'; npm.cmd run check` - FAIL as required, required PostgreSQL tests fail instead of skipping.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 85 passing tests and 0 skipped.
   - Review:
     - Fixed migration regression found during diff review: active component locks now use a partial unique index so only one unreleased lease can exist per component.
   - Correction review:
@@ -34,6 +38,9 @@
     - `withTransaction()` now supplies a transaction-scoped repository and nested repository methods reuse the same PostgreSQL client.
     - Migrations run under a PostgreSQL advisory transaction lock and are idempotent under concurrent runners.
     - Job hydration uses a repeatable-read read-only transaction for a consistent aggregate snapshot.
+  - Final safety correction review:
+    - Required PostgreSQL integration tests no longer skip when the configured test database is unavailable.
+    - Test cleanup verifies `SELECT current_database()` equals the `_test` database parsed from `TEST_DATABASE_URL` before any table cleanup SQL executes.
 
 - Phase 1 Task 1: Establish the Phase 1 direct-chat state model
   - Commit: 94de137

@@ -2,17 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createJobRepository } from '../src/persistence/jobRepository.js';
 import { migrate } from '../src/persistence/migrate.js';
-import { createTestPostgresPool, postgresIsAvailable, resetPostgresSchema } from './helpers/postgres.js';
+import { createTestPostgresPool, resetPostgresSchema } from './helpers/postgres.js';
 
-test('persists a job, conversation, plan, approval, and transition atomically', async (t) => {
+test('persists a job, conversation, plan, approval, and transition atomically', async () => {
   const pool = createTestPostgresPool();
 
   try {
-    if (!(await postgresIsAvailable(pool))) {
-      t.skip('PostgreSQL is unavailable; start docker compose postgres to run this integration test.');
-      return;
-    }
-
     await resetPostgresSchema(pool);
     await migrate(pool);
 
@@ -33,15 +28,10 @@ test('persists a job, conversation, plan, approval, and transition atomically', 
   }
 });
 
-test('component locks allow only one active lease per component', async (t) => {
+test('component locks allow only one active lease per component', async () => {
   const pool = createTestPostgresPool();
 
   try {
-    if (!(await postgresIsAvailable(pool))) {
-      t.skip('PostgreSQL is unavailable; start docker compose postgres to run this integration test.');
-      return;
-    }
-
     await resetPostgresSchema(pool);
     await migrate(pool);
 
@@ -69,15 +59,10 @@ test('component locks allow only one active lease per component', async (t) => {
   }
 });
 
-test('rolls back composed repository writes in one transaction', async (t) => {
+test('rolls back composed repository writes in one transaction', async () => {
   const pool = createTestPostgresPool();
 
   try {
-    if (!(await postgresIsAvailable(pool))) {
-      t.skip('PostgreSQL is unavailable; start docker compose postgres to run this integration test.');
-      return;
-    }
-
     await resetPostgresSchema(pool);
     await migrate(pool);
 
@@ -100,15 +85,10 @@ test('rolls back composed repository writes in one transaction', async (t) => {
   }
 });
 
-test('commits composed repository writes in one transaction', async (t) => {
+test('commits composed repository writes in one transaction', async () => {
   const pool = createTestPostgresPool();
 
   try {
-    if (!(await postgresIsAvailable(pool))) {
-      t.skip('PostgreSQL is unavailable; start docker compose postgres to run this integration test.');
-      return;
-    }
-
     await resetPostgresSchema(pool);
     await migrate(pool);
 
@@ -171,15 +151,10 @@ test('hydrates a job through one repeatable-read transaction', async () => {
   assert.equal(queries.filter((query) => query.params[0] === 'job-snapshot').length, 5);
 });
 
-test('serializes concurrent migration runners and records each filename once', async (t) => {
+test('serializes concurrent migration runners and records each filename once', async () => {
   const pool = createTestPostgresPool();
 
   try {
-    if (!(await postgresIsAvailable(pool))) {
-      t.skip('PostgreSQL is unavailable; start docker compose postgres to run this integration test.');
-      return;
-    }
-
     await resetPostgresSchema(pool);
     await Promise.all([migrate(pool), migrate(pool)]);
 
@@ -196,15 +171,10 @@ test('serializes concurrent migration runners and records each filename once', a
   }
 });
 
-test('migration execution is idempotent after the first successful run', async (t) => {
+test('migration execution is idempotent after the first successful run', async () => {
   const pool = createTestPostgresPool();
 
   try {
-    if (!(await postgresIsAvailable(pool))) {
-      t.skip('PostgreSQL is unavailable; start docker compose postgres to run this integration test.');
-      return;
-    }
-
     await resetPostgresSchema(pool);
     await migrate(pool);
     await migrate(pool);

@@ -18,6 +18,15 @@ export function requireTestDatabaseUrl(databaseUrl = process.env.TEST_DATABASE_U
     throw new Error('TEST_DATABASE_URL must be set to a dedicated PostgreSQL test database.');
   }
 
+  expectedTestDatabaseName(databaseUrl);
+  return databaseUrl;
+}
+
+export function expectedTestDatabaseName(databaseUrl = process.env.TEST_DATABASE_URL) {
+  if (!databaseUrl) {
+    throw new Error('TEST_DATABASE_URL must be set to a dedicated PostgreSQL test database.');
+  }
+
   let parsed;
   try {
     parsed = new URL(databaseUrl);
@@ -30,17 +39,20 @@ export function requireTestDatabaseUrl(databaseUrl = process.env.TEST_DATABASE_U
     throw new Error('TEST_DATABASE_URL database name must end with _test.');
   }
 
-  return databaseUrl;
+  return databaseName;
 }
 
 export function createTestPostgresPool() {
-  return new Pool({
-    connectionString: requireTestDatabaseUrl()
+  const databaseUrl = requireTestDatabaseUrl();
+  const pool = new Pool({
+    connectionString: databaseUrl
   });
+  pool.expectedTestDatabaseName = expectedTestDatabaseName(databaseUrl);
+  return pool;
 }
 
-export async function resetPostgresSchema(pool, databaseUrl = process.env.TEST_DATABASE_URL) {
-  requireTestDatabaseUrl(databaseUrl);
+export async function resetPostgresSchema(pool) {
+  await verifyTestDatabaseIdentity(pool);
   for (const table of providusTablesInDeleteOrder) {
     await pool.query(`
       DO $$
@@ -53,11 +65,24 @@ export async function resetPostgresSchema(pool, databaseUrl = process.env.TEST_D
   }
 }
 
-export async function postgresIsAvailable(pool) {
+export async function verifyTestDatabaseIdentity(pool) {
+  const expectedDatabaseName = pool.expectedTestDatabaseName || expectedTestDatabaseName();
+  let result;
   try {
-    await pool.query('SELECT 1');
-    return true;
-  } catch {
-    return false;
+    result = await pool.query('SELECT current_database() AS database_name');
+  } catch (error) {
+    throw new Error(
+      `Required PostgreSQL integration test database "${expectedDatabaseName}" is unavailable. ` +
+      'Start PostgreSQL/Docker and ensure TEST_DATABASE_URL points to the dedicated test database. ' +
+      `The PostgreSQL integration test was not executed. Cause: ${error.message}`
+    );
+  }
+
+  const actualDatabaseName = result.rows[0]?.database_name;
+  if (actualDatabaseName !== expectedDatabaseName) {
+    throw new Error(
+      `Refusing to reset PostgreSQL test database: TEST_DATABASE_URL expects "${expectedDatabaseName}" ` +
+      `but the pool is connected to "${actualDatabaseName}".`
+    );
   }
 }
