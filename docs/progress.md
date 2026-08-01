@@ -20,6 +20,7 @@
 - Phase 1 Task 4: Enforce same-sandbox identity and permission claims
   - Implementation commit: 17f1a71dc4d746bc6093ba708a8dc934e1d506ed
   - Security correction commit: f5a00d28829b6e888b3af6aff8453bc14c693d0a
+  - Final authorization correction commit: 3434f8c5776c378e54eca06bf3a53f87ab311e8a
   - Verification date: 2026-08-01
   - Verification:
     - `cd middleware && node --import ./test/setup.js --test test/sameOrgService.test.js test/apiAuth.test.js test/security.test.js` - RED first, failed for expected missing same-org service, missing production executor preflight, and permission-claim enforcement gaps.
@@ -31,6 +32,11 @@
     - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/apiAuth.test.js test/sameOrgService.test.js test/security.test.js test/agentSameOrg.test.js test/orgRouting.test.js test/conversationApi.test.js test/agentJiraIsolation.test.js` - PASS, 56 tests, 0 skipped.
     - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 117 tests and 0 skipped.
     - `sf.cmd apex run test --tests AgentControllerTest --result-format human --wait 10 --target-org $env:PHASE1_SALESFORCE_ALIAS` - PASS against explicit alias `Developer-org`, 14 tests, 0 skipped, Org Id `00Dg500000E07e9EAB`.
+  - Final authorization correction verification:
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/apiAuth.test.js test/salesforceId.test.js test/sameOrgService.test.js test/orgRouting.test.js test/security.test.js test/agentSameOrg.test.js test/conversationApi.test.js` - RED first, failed for expected bearer-token plus role-header downgrade, missing Salesforce checksum validation, permissive org-routing ID matching, and 15/18 same-org canonicalization gaps.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/apiAuth.test.js test/salesforceId.test.js test/sameOrgService.test.js test/orgRouting.test.js test/security.test.js test/agentSameOrg.test.js test/conversationApi.test.js` - PASS, 70 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 133 tests and 0 skipped.
+    - `sf.cmd apex run test --tests AgentControllerTest --result-format human --wait 10 --target-org $env:PHASE1_SALESFORCE_ALIAS` - PASS against explicit alias `Developer-org`, 14 tests, 0 skipped, Org Id `00Dg500000E07e9EAB`.
   - Review:
     - `resolveSameOrg({ authenticatedOrgId, actorId })` resolves exactly one active connected registry entry matching the authenticated Salesforce org ID and rejects body/prompt/org-registry attempts to switch orgs.
     - `assertSameVerifiedOrg(orgContext, observed)` verifies organization ID, normalized instance URL, configured username, connected status, and non-production context before returning a frozen public context.
@@ -41,6 +47,10 @@
     - Direct Salesforce chat job creation resolves same-org context from authenticated `X-Agent-Org-Id`; workers re-resolve fresh trusted context before implementation, validation, or deployment execution.
     - `assertSameVerifiedOrg` requires configured and observed org ID, instance URL, username, connected status, and non-production evidence; Salesforce org IDs must be valid 15- or 18-character IDs and are not matched by prefix truncation.
     - Public org contexts are deeply frozen, and Salesforce executor operations reject structurally correct but untrusted fabricated contexts while preserving internal registry-built Jira contexts for explicitly enabled legacy Jira workflows.
+  - Final authorization correction review:
+    - Bearer-token API callers now receive immutable `trusted-internal-service` mode that ignores caller-supplied role headers; `salesforce-chat` job routes require `salesforce-claims` mode before read, conversation, implementation, validation, deployment, or approval authorization.
+    - `X-Agent-Role` no longer grants `salesforce-chat` read, implementation, or deployment access; `canImplement` and `canDeploy` remain independent, and body-spoofed role or permission fields are ignored.
+    - Shared Salesforce ID canonicalization validates exact 15- and 18-character IDs with the official checksum suffix and is used by auth claim parsing, same-org resolution, org registry matching, and Salesforce executor org checks.
 
 - Phase 1 Task 3: Introduce direct conversation APIs and isolate Jira
   - Implementation commit: 4e7e42b
