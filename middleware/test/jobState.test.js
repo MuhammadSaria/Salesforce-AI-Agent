@@ -7,8 +7,15 @@ test('safe job lifecycle accepts the required supervised flow', () => {
   for (let index = 1; index < flow.length; index += 1) assert.doesNotThrow(() => assertTransition(flow[index - 1], flow[index]));
 });
 
+test('active job transition model accepts the direct-chat planning flow', () => {
+  const flow = [JOB_STATES.RECEIVED, JOB_STATES.UNDERSTANDING, JOB_STATES.INSPECTING_ORG, JOB_STATES.PLANNING, JOB_STATES.AWAITING_IMPLEMENTATION_APPROVAL, JOB_STATES.IMPLEMENTING];
+  for (let index = 1; index < flow.length; index += 1) assert.doesNotThrow(() => assertTransition(flow[index - 1], flow[index]));
+});
+
 test('invalid transition cannot bypass implementation and deployment approvals', () => {
   assert.throws(() => assertTransition(JOB_STATES.RECEIVED, JOB_STATES.DEPLOYING), /Invalid job transition/);
+  assert.throws(() => assertTransition(JOB_STATES.PLANNING, JOB_STATES.IMPLEMENTING), /Invalid job transition/);
+  assert.throws(() => assertTransition(JOB_STATES.ANALYZING_DEPENDENCIES, JOB_STATES.IMPLEMENTING), /Invalid job transition/);
   assert.throws(() => assertTransition(JOB_STATES.AWAITING_PLAN_APPROVAL, JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL), /Invalid job transition/);
 });
 

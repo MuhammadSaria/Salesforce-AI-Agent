@@ -44,6 +44,37 @@ test('successful progress clears a stale job error', async () => {
   }
 });
 
+test('transitionJob persists the direct-chat planning lifecycle and approval gate', async () => {
+  const originalRoot = config.workspaceRoot;
+  const workspace = await mkdtemp(join(tmpdir(), 'agent-job-store-'));
+  config.workspaceRoot = workspace;
+  const jobId = `direct-chat-${Date.now()}`;
+
+  try {
+    await createJobRecord({ jobId, userId: 'test-user', source: 'salesforce-chat' });
+    await transitionJob(jobId, JOB_STATES.UNDERSTANDING, { actor: 'test' });
+    await transitionJob(jobId, JOB_STATES.INSPECTING_ORG, { actor: 'test' });
+    await transitionJob(jobId, JOB_STATES.PLANNING, { actor: 'test' });
+    await assert.rejects(() => transitionJob(jobId, JOB_STATES.IMPLEMENTING, { actor: 'test' }), /Invalid job transition/);
+    await transitionJob(jobId, JOB_STATES.AWAITING_IMPLEMENTATION_APPROVAL, { actor: 'test' });
+    await transitionJob(jobId, JOB_STATES.IMPLEMENTING, { actor: 'test' });
+
+    const job = await getJobRecord(jobId);
+    assert.equal(job.status, JOB_STATES.IMPLEMENTING);
+    assert.deepEqual(job.stateHistory.map((entry) => entry.newState), [
+      JOB_STATES.RECEIVED,
+      JOB_STATES.UNDERSTANDING,
+      JOB_STATES.INSPECTING_ORG,
+      JOB_STATES.PLANNING,
+      JOB_STATES.AWAITING_IMPLEMENTATION_APPROVAL,
+      JOB_STATES.IMPLEMENTING
+    ]);
+  } finally {
+    config.workspaceRoot = originalRoot;
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test('a conversational revision archives artifacts and advances the plan version', async () => {
   const originalRoot = config.workspaceRoot;
   const workspace = await mkdtemp(join(tmpdir(), 'agent-job-store-'));

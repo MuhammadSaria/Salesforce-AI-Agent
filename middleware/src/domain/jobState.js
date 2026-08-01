@@ -1,4 +1,4 @@
-import { DEVELOPMENT_JOB_STATES } from './developmentJob.js';
+import { DEVELOPMENT_JOB_STATES, assertDevelopmentTransition } from './developmentJob.js';
 
 export const JOB_STATES = Object.freeze({
   ...DEVELOPMENT_JOB_STATES,
@@ -30,7 +30,7 @@ const transitions = new Map([
   [JOB_STATES.ANALYZING_JIRA, [JOB_STATES.DISCOVERING_METADATA, JOB_STATES.FAILED, JOB_STATES.CANCELLED]],
   [JOB_STATES.DISCOVERING_METADATA, [JOB_STATES.RETRIEVING_RELEVANT_METADATA, JOB_STATES.FAILED, JOB_STATES.CANCELLED]],
   [JOB_STATES.RETRIEVING_RELEVANT_METADATA, [JOB_STATES.ANALYZING_DEPENDENCIES, JOB_STATES.FAILED, JOB_STATES.CANCELLED]],
-  [JOB_STATES.ANALYZING_DEPENDENCIES, [JOB_STATES.AWAITING_PLAN_APPROVAL, JOB_STATES.IMPLEMENTING, JOB_STATES.FAILED, JOB_STATES.CANCELLED]],
+  [JOB_STATES.ANALYZING_DEPENDENCIES, [JOB_STATES.AWAITING_PLAN_APPROVAL, JOB_STATES.FAILED, JOB_STATES.CANCELLED]],
   [JOB_STATES.AWAITING_PLAN_APPROVAL, [JOB_STATES.IMPLEMENTING, JOB_STATES.PLAN_REJECTED, JOB_STATES.CANCELLED]],
   [JOB_STATES.PLAN_REJECTED, [JOB_STATES.ANALYZING_JIRA, JOB_STATES.CANCELLED]],
   [JOB_STATES.IMPLEMENTING, [JOB_STATES.VALIDATING, JOB_STATES.FAILED, JOB_STATES.CANCELLED]],
@@ -47,9 +47,19 @@ export function assertTransition(from, to) {
   if (!Object.values(JOB_STATES).includes(to)) {
     throw conflict(`Unknown job state: ${to}`);
   }
+  try {
+    assertDevelopmentTransition(from, to);
+    return;
+  } catch (error) {
+    if (!isInvalidDevelopmentTransition(error)) throw error;
+  }
   if (!(transitions.get(from) || []).includes(to)) {
     throw conflict(`Invalid job transition: ${from} -> ${to}`);
   }
+}
+
+function isInvalidDevelopmentTransition(error) {
+  return error?.code === 'INVALID_STATE_TRANSITION';
 }
 
 function conflict(message) {
