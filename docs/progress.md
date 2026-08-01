@@ -19,7 +19,7 @@
 
 - Phase 1 Task 3: Introduce direct conversation APIs and isolate Jira
   - Implementation commit: 4e7e42b
-  - Correction commit: pending
+  - Correction commit: d12272ba1abfd23299545e6e74dde1076a114f18
   - Verification date: 2026-08-01
   - Verification:
     - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/conversationApi.test.js test/runtimeHealth.test.js` - RED first, failed for expected missing/direct-chat/Jira-readiness reasons.
