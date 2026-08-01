@@ -105,7 +105,7 @@ export async function updateJob(jobId, patch) {
 export async function transitionJob(jobId, newState, details = {}) {
   return withJobLock(jobId, async () => {
     const record = await requiredJob(jobId);
-    assertTransition(record.status, newState);
+    assertTransition(record.status, newState, record);
     const event = {
       previousState: record.status,
       newState,

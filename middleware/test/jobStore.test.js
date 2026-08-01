@@ -75,6 +75,48 @@ test('transitionJob persists the direct-chat planning lifecycle and approval gat
   }
 });
 
+test('direct-chat transitionJob requires deployment approval after validation', async () => {
+  const originalRoot = config.workspaceRoot;
+  const workspace = await mkdtemp(join(tmpdir(), 'agent-job-store-'));
+  config.workspaceRoot = workspace;
+  const jobId = `direct-deploy-${Date.now()}`;
+
+  try {
+    await createJobRecord({ jobId, userId: 'test-user', source: 'salesforce-chat' });
+    await updateJob(jobId, { status: JOB_STATES.VALIDATING });
+    await assert.rejects(() => transitionJob(jobId, JOB_STATES.COMPLETED, { actor: 'test' }), /Invalid job transition/);
+    await transitionJob(jobId, JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL, { actor: 'test' });
+    await assert.rejects(() => transitionJob(jobId, JOB_STATES.IMPLEMENTING, { actor: 'test' }), /Invalid job transition/);
+    await transitionJob(jobId, JOB_STATES.DEPLOYING, { actor: 'test' });
+    await transitionJob(jobId, JOB_STATES.COMPLETED, { actor: 'test' });
+
+    const job = await getJobRecord(jobId);
+    assert.equal(job.status, JOB_STATES.COMPLETED);
+  } finally {
+    config.workspaceRoot = originalRoot;
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('explicit legacy transitionJob preserves historical no-deployment completion', async () => {
+  const originalRoot = config.workspaceRoot;
+  const workspace = await mkdtemp(join(tmpdir(), 'agent-job-store-'));
+  config.workspaceRoot = workspace;
+  const jobId = `legacy-no-deploy-${Date.now()}`;
+
+  try {
+    await createJobRecord({ jobId, userId: 'jira-webhook', source: 'jira-webhook', jiraIssueKey: 'TA-1' });
+    await updateJob(jobId, { status: JOB_STATES.VALIDATING });
+    await transitionJob(jobId, JOB_STATES.COMPLETED, { actor: 'test' });
+
+    const job = await getJobRecord(jobId);
+    assert.equal(job.status, JOB_STATES.COMPLETED);
+  } finally {
+    config.workspaceRoot = originalRoot;
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test('a conversational revision archives artifacts and advances the plan version', async () => {
   const originalRoot = config.workspaceRoot;
   const workspace = await mkdtemp(join(tmpdir(), 'agent-job-store-'));

@@ -43,23 +43,21 @@ const transitions = new Map([
   [JOB_STATES.CANCELLED, []]
 ]);
 
-export function assertTransition(from, to) {
+export function assertTransition(from, to, job = {}) {
   if (!Object.values(JOB_STATES).includes(to)) {
     throw conflict(`Unknown job state: ${to}`);
   }
-  try {
+  if (isDirectDevelopmentJob(job)) {
     assertDevelopmentTransition(from, to);
     return;
-  } catch (error) {
-    if (!isInvalidDevelopmentTransition(error)) throw error;
   }
   if (!(transitions.get(from) || []).includes(to)) {
     throw conflict(`Invalid job transition: ${from} -> ${to}`);
   }
 }
 
-function isInvalidDevelopmentTransition(error) {
-  return error?.code === 'INVALID_STATE_TRANSITION';
+function isDirectDevelopmentJob(job) {
+  return job?.source === 'salesforce-chat' || job?.lifecycle === 'development';
 }
 
 function conflict(message) {
