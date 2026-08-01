@@ -4,6 +4,12 @@
 **Base:** `main`  
 **Last updated:** 2026-08-01
 
+## Repository Workflow Setup
+
+- Status: Complete
+- Verification: All required files are non-empty; stable paths resolve; all branch changes are limited to `AGENTS.md` and Markdown files under `docs/`; feature branch is pushed and ahead of `main`.
+- Verification date: 2026-08-01
+
 ## Current Task
 
 - Task: Phase 1 Task 1
