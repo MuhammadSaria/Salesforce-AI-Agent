@@ -52,6 +52,39 @@ test('worker re-resolves direct Salesforce org context before validation executi
   assert.equal(updated.orgContext.expectedOrgId, '00Dg500000E07e9EAB');
 });
 
+test('worker implementation does not treat generic admin actor strings as approval', async (t) => {
+  config.workspaceRoot = await mkdtemp(join(tmpdir(), 'providus-agent-same-org-'));
+  const calls = [];
+  setSameOrgResolverForTest(async ({ authenticatedOrgId, actorId }) => {
+    calls.push({ authenticatedOrgId, actorId });
+    return trustedContext(authenticatedOrgId);
+  });
+  t.after(() => setSameOrgResolverForTest(null));
+
+  const jobId = `same-org-worker-admin-${Date.now()}`;
+  await createJobRecord({
+    jobId,
+    userId: '005g5000009ImIkAAK',
+    orgId: '00Dg500000E07e9EAB',
+    source: 'salesforce-chat',
+    prompt: 'Create a Flow'
+  });
+  await updateJob(jobId, {
+    status: 'IMPLEMENTING',
+    plan: { planVersion: 1, planHash: 'plan-hash', materialChangeHash: 'material-hash', fileOperations: [], dataOperations: [] },
+    metadataScope: { hash: 'scope-hash' },
+    approvals: [],
+    orgContext: { orgRegistryId: 'forged', expectedOrgId: '00D000000000BAD', environment: 'sandbox', verified: true }
+  });
+
+  await assert.rejects(
+    processAgentJob({ jobId, action: 'implement', actor: 'admin' }),
+    /current implementation approval/
+  );
+
+  assert.deepEqual(calls, [{ authenticatedOrgId: '00Dg500000E07e9EAB', actorId: 'admin' }]);
+});
+
 function trustedContext(expectedOrgId) {
   return {
     orgRegistryId: 'providus_orgfarm_dev',

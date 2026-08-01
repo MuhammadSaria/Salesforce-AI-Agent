@@ -2,6 +2,7 @@ import { URL } from 'node:url';
 import { loadOrgRegistry } from './orgRegistry.js';
 import { verifySelectedOrg } from './sfExecutor.js';
 import { isTrustedOrgContext, trustOrgContext } from './orgContextTrust.js';
+import { requireSalesforceOrgId } from '../utils/salesforceId.js';
 
 export { isTrustedOrgContext };
 
@@ -110,7 +111,7 @@ function publicContext(org, actorId) {
   const context = {
     orgRegistryId: org.id,
     salesforceAlias: org.salesforceAlias,
-    expectedOrgId: org.expectedOrgId,
+    expectedOrgId: requireSalesforceOrgId(org.expectedOrgId, 'Registry Salesforce org ID'),
     environment: org.environment,
     instanceUrl: org.instanceUrl,
     displayName: org.displayName,
@@ -139,14 +140,6 @@ function sameSandboxError(message) {
   error.code = 'SAME_ORG_REQUIRED';
   error.statusCode = 409;
   return error;
-}
-
-function requireSalesforceOrgId(value, label) {
-  const text = String(value || '');
-  if (text !== text.trim() || !/^[A-Za-z0-9]{15}(?:[A-Za-z0-9]{3})?$/.test(text.trim()) || !text.trim().startsWith('00D')) {
-    throw sameSandboxError(`${label} must be a valid Salesforce org ID.`);
-  }
-  return text.trim();
 }
 
 function normalizeUrl(value) {

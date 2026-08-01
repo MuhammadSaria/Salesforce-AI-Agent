@@ -58,10 +58,10 @@ test('conversation routes preserve owner and admin job isolation', async (t) => 
   }, viewerHeaders('005-other'));
   assert.equal(blocked.status, 404);
 
-  const admin = await postJson(`${base}/api/jobs/${created.body.jobId}/messages`, {
-    text: 'Admin follow-up'
+  const roleOnlyAdmin = await postJson(`${base}/api/jobs/${created.body.jobId}/messages`, {
+    text: 'Role-only admin follow-up'
   }, viewerHeaders('005-admin', 'admin'));
-  assert.equal(admin.status, 202);
+  assert.equal(roleOnlyAdmin.status, 404);
 });
 
 test('starting a Salesforce chat job requires a prompt before sanitization', async (t) => {

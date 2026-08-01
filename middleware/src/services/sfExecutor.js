@@ -4,6 +4,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { config } from '../config.js';
 import { redactSecrets } from '../utils/sanitize.js';
 import { isPathInside } from '../utils/paths.js';
+import { canonicalSalesforceId } from '../utils/salesforceId.js';
 import { auditSalesforceOperation } from './auditLog.js';
 import { assertTrustedOrgContext } from './orgContextTrust.js';
 
@@ -410,8 +411,11 @@ function parseSfJson(stdout) {
 }
 
 function normalizeOrgId(value) {
-  const text = String(value || '').trim();
-  return /^[A-Za-z0-9]{15}(?:[A-Za-z0-9]{3})?$/.test(text) ? text.slice(0, 15).toUpperCase() : '';
+  try {
+    return canonicalSalesforceId(value, 'Salesforce org ID');
+  } catch {
+    return '';
+  }
 }
 
 function normalizeUrl(value) {

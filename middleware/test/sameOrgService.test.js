@@ -43,9 +43,9 @@ test('resolves exactly the registry entry matching the authenticated Salesforce 
     }
   });
 
-  assert.equal(context.expectedOrgId, expectedOrgId);
+  assert.equal(context.expectedOrgId, '00D000000000SAPEA2');
   assert.equal(context.orgRegistryId, 'sapa');
-  assert.equal(context.verified.organizationId, expectedOrgId);
+  assert.equal(context.verified.organizationId, '00D000000000SAPEA2');
   assert.equal(Object.isFrozen(context), true);
   assert.equal(Object.isFrozen(context.allowedOperations), true);
   assert.equal(isTrustedOrgContext(context), true);
@@ -140,10 +140,10 @@ test('requires complete configured and observed identity evidence', () => {
   };
 
   for (const field of ['expectedOrgId', 'instanceUrl', 'expectedUsername']) {
-    assert.throws(() => assertSameVerifiedOrg({ ...context, [field]: '' }, observed), /required|same Salesforce sandbox/);
+    assert.throws(() => assertSameVerifiedOrg({ ...context, [field]: '' }, observed), /required|valid Salesforce ID|same Salesforce sandbox/);
   }
   for (const field of ['organizationId', 'instanceUrl', 'username']) {
-    assert.throws(() => assertSameVerifiedOrg(context, { ...observed, [field]: '' }), /required|same Salesforce sandbox/);
+    assert.throws(() => assertSameVerifiedOrg(context, { ...observed, [field]: '' }), /required|valid Salesforce ID|same Salesforce sandbox/);
   }
   assert.throws(() => assertSameVerifiedOrg(context, { ...observed, organizationId: '00D000000000BAD' }), /organization ID/);
   assert.throws(() => assertSameVerifiedOrg(context, { ...observed, instanceUrl: 'https://evil.example.test' }), /instance URL/);
@@ -166,7 +166,7 @@ test('rejects malformed Salesforce org IDs instead of truncating prefixes', asyn
       registryOrgs: [org('sapa', '00D000000000SAP')],
       observed
     }),
-    /valid Salesforce org ID/
+    /valid Salesforce ID/
   );
   await assert.rejects(
     () => resolveSameOrg({
@@ -175,7 +175,45 @@ test('rejects malformed Salesforce org IDs instead of truncating prefixes', asyn
       registryOrgs: [org('sapa', '00D000000000SAP')],
       observed
     }),
-    /valid Salesforce org ID/
+    /valid Salesforce ID/
+  );
+});
+
+test('matches valid 15-character registry and 18-character CLI organization IDs canonically', async () => {
+  const context = await resolveSameOrg({
+    authenticatedOrgId: '00Dg500000E07e9EAB',
+    actorId: '005-user',
+    registryOrgs: [org('sapa', '00Dg500000E07e9')],
+    observed: {
+      organizationId: '00Dg500000E07e9EAB',
+      instanceUrl: 'https://sapa.sandbox.my.salesforce.com',
+      username: 'sapa@example.test',
+      connected: true,
+      isSandbox: true
+    }
+  });
+
+  assert.equal(context.expectedOrgId, '00Dg500000E07e9EAB');
+  assert.equal(context.verified.organizationId, '00Dg500000E07e9EAB');
+});
+
+test('rejects CLI organization IDs with invalid 18-character checksum suffixes', () => {
+  assert.throws(
+    () => assertSameVerifiedOrg({
+      orgRegistryId: 'sapa',
+      salesforceAlias: 'sapa',
+      expectedOrgId: '00Dg500000E07e9',
+      environment: 'sandbox',
+      instanceUrl: 'https://sapa.sandbox.my.salesforce.com',
+      expectedUsername: 'sapa@example.test'
+    }, {
+      organizationId: '00Dg500000E07e9EAC',
+      instanceUrl: 'https://sapa.sandbox.my.salesforce.com',
+      username: 'sapa@example.test',
+      connected: true,
+      isSandbox: true
+    }),
+    /checksum|valid Salesforce ID/
   );
 });
 
