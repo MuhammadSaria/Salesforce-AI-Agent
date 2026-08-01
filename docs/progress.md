@@ -12,14 +12,19 @@
 
 ## Current Task
 
-- Task: Phase 1 Task 1
+- Task: Phase 1 Task 2
 - Status: Not started
 - Working commit: None
 - Verification: Not run
 
 ## Completed Tasks
 
-None.
+- Phase 1 Task 1: Establish the Phase 1 direct-chat state model
+  - Commit: 9f4c3ba
+  - Verification date: 2026-08-01
+  - Verification:
+    - `cd middleware && node --import ./test/setup.js --test test/developmentJob.test.js test/jobState.test.js test/jobPresentation.test.js` - PASS, 10 tests
+    - `cd middleware && npm.cmd run check` - PASS, lint plus 67 tests
 
 ## Blockers
 
@@ -27,7 +32,7 @@ None.
 
 ## Next Task
 
-Start Phase 1 Task 1 from `docs/plans/phase-1-implementation-plan.md`.
+Start Phase 1 Task 2 from `docs/plans/phase-1-implementation-plan.md`.
 
 ## Update Rules
 
