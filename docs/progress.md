@@ -22,10 +22,11 @@
 - Phase 1 Task 1: Establish the Phase 1 direct-chat state model
   - Commit: 94de137
   - Correction commit: 5b4ff6cc741aeec0ff3423cc972b6458ea9170c8
+  - Second correction commit: 5137298e2d2934524614580d0c7018c83b3a6703
   - Verification date: 2026-08-01
   - Verification:
-    - `cd middleware && node --import ./test/setup.js --test test/developmentJob.test.js test/jobState.test.js test/jobStore.test.js test/jobPresentation.test.js` - PASS, 19 tests
-    - `cd middleware && npm.cmd run check` - PASS, lint plus 69 tests
+    - `cd middleware && node --import ./test/setup.js --test test/developmentJob.test.js test/jobState.test.js test/jobStore.test.js test/jobPresentation.test.js` - PASS, 21 tests
+    - `cd middleware && npm.cmd run check` - PASS, lint plus 71 tests
 
 ## Blockers
 
