@@ -262,7 +262,7 @@ test('Jira-source messages still append when Jira is enabled', async (t) => {
   assert.equal(after.status, before.status);
 });
 
-test('Salesforce chat jobs continue through generic action routes when Jira is disabled', async (t) => {
+test('Salesforce chat generic action routes fail closed instead of using Jira-disabled handling', async (t) => {
   const { base, close } = await testServer(t);
   t.after(close);
   const jobId = `chat-action-${Date.now()}`;
@@ -275,7 +275,7 @@ test('Salesforce chat jobs continue through generic action routes when Jira is d
   await updateJob(jobId, { status: 'RECEIVED' });
 
   const response = await postJson(`${base}/api/jobs/${jobId}/implement`, {}, viewerHeaders('005-owner', 'admin'));
-  assert.equal(response.status, 409);
+  assert.equal(response.status, 403);
   assert.notEqual(response.body.error.code, 'JIRA_DISABLED');
 });
 

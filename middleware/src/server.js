@@ -20,6 +20,7 @@ import { publicJob } from './services/jobPresentation.js';
 import { conversationService } from './services/conversationService.js';
 import { runtimeReadiness } from './services/runtimeHealth.js';
 import { resolveSameOrg } from './services/sameOrgService.js';
+import { sameSalesforceId } from './utils/salesforceId.js';
 
 export function createApp(options = {}) {
   const app = express();
@@ -59,8 +60,8 @@ export function createApp(options = {}) {
     res.status(201).json(outcome);
   }));
 
-  app.get('/api/jobs', asyncRoute(async (req, res) => {
-    const jobs = (await listJobRecords()).filter((job) => canAccessJob(req.actor, job)).map(publicJob);
+  app.get('/api/jobs', requireDirectSalesforceClaims, asyncRoute(async (req, res) => {
+    const jobs = (await listJobRecords()).filter((job) => canListJob(req.actor, job)).map(publicJob);
     res.json({ jobs });
   }));
   app.get('/api/jobs/:jobId', jobRoute((req, res, job) => res.json(publicJob(job))));
@@ -204,7 +205,7 @@ function requireDeploymentPermission(req, res, job) { if (requiresSalesforceClai
 function jobRoute(handler) { return asyncRoute(async (req, res) => { const job = await getJobRecord(req.params.jobId); if (!job) return res.status(404).json({ error: { message: 'Job not found.' } }); if (requiresSalesforceClaims(req, res, job)) return; if (!canAccessJob(req.actor, job)) return res.status(404).json({ error: { message: 'Job not found.' } }); return handler(req, res, job); }); }
 function mutableJobRoute(handler) { return jobRoute((req, res, job) => isJiraSource(job) && !config.jiraEnabled ? jiraDisabled(res) : handler(req, res, job)); }
 function asyncRoute(handler) { return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next); }
-function approvalRecord(job, req, type, extra) { return { approvalId: nanoid(), jobId: job.jobId, jiraIssueKey: job.jiraIssueKey, approvalType: type, planVersion: job.plan?.planVersion, planHash: job.plan?.planHash, materialChangeHash: job.plan?.materialChangeHash || '', metadataScopeHash: job.metadataScope?.hash, orgRegistryId: job.orgContext?.orgRegistryId, salesforceOrganizationId: job.orgContext?.expectedOrgId, environment: job.orgContext?.environment, approverIdentity: req.actor.id, comments: sanitizeUntrustedText(req.body?.comments, 1000), approvalTimestamp: new Date().toISOString(), ...extra }; }
+function approvalRecord(job, req, type, extra) { return { approvalId: nanoid(), jobId: job.jobId, jiraIssueKey: job.jiraIssueKey, approvalType: type, planVersion: job.plan?.planVersion, planHash: job.plan?.planHash, materialChangeHash: job.plan?.materialChangeHash || '', metadataScopeHash: job.metadataScope?.hash, orgRegistryId: job.orgContext?.orgRegistryId, salesforceOrganizationId: isSalesforceChat(job) ? req.actor?.orgId : job.orgContext?.expectedOrgId, environment: job.orgContext?.environment, approverIdentity: req.actor.id, comments: sanitizeUntrustedText(req.body?.comments, 1000), approvalTimestamp: new Date().toISOString(), ...extra }; }
 function safeContext() { return { selectedOrgRegistryId: '', customerName: '', environment: '' }; }
 function conflict(res, message) { return res.status(409).json({ error: { message } }); }
 function promptRequired(res) { return res.status(422).json({ error: { code: 'PROMPT_REQUIRED', message: 'Enter a Salesforce development request.' } }); }
@@ -224,9 +225,27 @@ function requiresSalesforceClaims(req, res, job) {
   res.status(401).json({ error: { code: 'SALESFORCE_CLAIMS_REQUIRED', message: 'Authenticated Salesforce identity claims are required for this job.' } });
   return true;
 }
-function canAccessJob(actor, job) { if (isSalesforceChat(job)) return job.userId === actor?.id || actor?.canImplement === true; return actor?.role === 'admin' || job.userId === actor?.id; }
-function hasImplementationPermission(actor, job) { if (isSalesforceChat(job)) return actor?.canImplement === true || (actor?.authMode === 'test-bypass' && actor?.role === 'admin'); return actor?.authMode === 'test-bypass' && actor?.role === 'admin'; }
-function hasDeploymentPermission(actor, job) { if (isSalesforceChat(job)) return actor?.canDeploy === true || (actor?.authMode === 'test-bypass' && (actor?.role === 'admin' || actor?.role === 'deployer')); return actor?.authMode === 'test-bypass' && (actor?.role === 'admin' || actor?.role === 'deployer'); }
+function canListJob(actor, job) {
+  if (!isSalesforceChat(job)) return actor?.role === 'admin' || job.userId === actor?.id;
+  return sameSalesforceJobOrg(actor, job) && (job.userId === actor?.id || actor?.canImplement === true);
+}
+function canAccessJob(actor, job) {
+  if (!isSalesforceChat(job)) return actor?.role === 'admin' || job.userId === actor?.id;
+  return sameSalesforceJobOrg(actor, job) && (job.userId === actor?.id || actor?.canImplement === true || actor?.canDeploy === true);
+}
+function hasImplementationPermission(actor, job) {
+  if (isSalesforceChat(job)) return sameSalesforceJobOrg(actor, job) && actor?.canImplement === true;
+  return actor?.authMode === 'test-bypass' && actor?.role === 'admin';
+}
+function hasDeploymentPermission(actor, job) {
+  if (isSalesforceChat(job)) return sameSalesforceJobOrg(actor, job) && actor?.canDeploy === true;
+  return actor?.authMode === 'test-bypass' && (actor?.role === 'admin' || actor?.role === 'deployer');
+}
+function sameSalesforceJobOrg(actor, job) {
+  if (!isSalesforceChat(job)) return true;
+  if (actor?.authMode === 'test-bypass' && !actor?.orgId) return true;
+  return Boolean(actor?.orgId && job?.orgId && sameSalesforceId(actor.orgId, job.orgId));
+}
 function isSalesforceClaimsActor(actor) { return actor?.authMode === 'salesforce-claims'; }
 function isSalesforceChat(job) { return job.source === 'salesforce-chat'; }
 function isAwaitingImplementationApproval(job) { return [JOB_STATES.AWAITING_PLAN_APPROVAL, JOB_STATES.AWAITING_IMPLEMENTATION_APPROVAL].includes(job.status); }

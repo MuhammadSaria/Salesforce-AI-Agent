@@ -19,6 +19,7 @@ import { humanizeValidationFailure } from '../utils/validationFailure.js';
 import { activatePendingJiraRevision, syncJiraComments } from './jiraSync.js';
 import { approveSpecialistWorkItems, buildSpecialistOrchestration, specialistAuditEvent, structuredSpecialistMessage, workItemForFile } from './orchestrator.js';
 import { SPECIALIST_AGENT_IDS, SPECIALIST_MESSAGE_TYPES, WORK_ITEM_STATUSES, implementationAgentIds, ownerForMetadataType } from '../domain/specialistAgents.js';
+import { sameSalesforceId } from '../utils/salesforceId.js';
 
 let sameOrgResolver = resolveSameOrg;
 
@@ -352,7 +353,9 @@ function validApproval(job, type) {
   const approval = latestApprovedApproval(job, type, type === 'DEPLOYMENT' ? job.validation?.validationId : '');
   const planMatches = approval?.planHash === job.plan?.planHash
     || (type === 'IMPLEMENTATION' && approval?.materialChangeHash && approval.materialChangeHash === job.plan?.materialChangeHash);
-  if (!approval || !planMatches || approval.metadataScopeHash !== job.metadataScope?.hash || approval.salesforceOrganizationId !== job.orgContext?.expectedOrgId) throw Object.assign(new Error(`A current ${type.toLowerCase()} approval for this exact plan, scope, and org is required.`), { statusCode: 409 });
+  const approvalOrgMatchesContext = sameSalesforceId(approval?.salesforceOrganizationId, job.orgContext?.expectedOrgId);
+  const approvalOrgMatchesJob = job.source !== 'salesforce-chat' || sameSalesforceId(approval?.salesforceOrganizationId, job.orgId);
+  if (!approval || !planMatches || approval.metadataScopeHash !== job.metadataScope?.hash || !approvalOrgMatchesContext || !approvalOrgMatchesJob) throw Object.assign(new Error(`A current ${type.toLowerCase()} approval for this exact plan, scope, and org is required.`), { statusCode: 409 });
   return approval;
 }
 
@@ -360,6 +363,7 @@ function assertDeploymentGuard(job, approval) {
   const validation = job.validation;
   if (!validation || validation.status !== 'PASSED' || new Date(validation.expiryTimestamp) <= new Date()) throw new Error('A current successful validation is required.');
   if (approval.validationId !== validation.validationId || approval.validatedSourceHash !== validation.sourceHash || approval.deploymentPackageHash !== validation.packageHash) throw new Error('Deployment approval does not match the validated artifacts.');
+  if (job.source === 'salesforce-chat' && !sameSalesforceId(validation.targetOrgId, job.orgId)) throw new Error('Validated package org identity does not match the Salesforce chat job org.');
   if (job.orgContext.environment === 'production' && (!config.allowProductionDeployment || approval.productionSpecificApproval !== true)) throw new Error('Production execution is disabled or lacks production-specific approval.');
   const hasDataOperations = Boolean(job.plan.dataOperations?.length);
   if (hasDataOperations && job.orgContext.dataMutationPermission !== 'allowed') throw new Error('Data mutation is not enabled for the selected org registry entry.');
@@ -372,6 +376,7 @@ function assertState(job, ...states) { if (!states.includes(job.status)) throw O
 async function reResolveDirectOrgContext(job, actor) {
   if (job.source !== 'salesforce-chat') return job;
   const orgContext = await sameOrgResolver({ authenticatedOrgId: job.orgId, actorId: actor });
+  if (!sameSalesforceId(orgContext?.expectedOrgId, job.orgId)) throw Object.assign(new Error('Resolved Salesforce org context does not match the job org.'), { statusCode: 409 });
   await updateJob(job.jobId, { orgContext });
   return { ...job, orgContext };
 }

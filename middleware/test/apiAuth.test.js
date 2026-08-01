@@ -346,11 +346,180 @@ test('Salesforce owner without implementation or deployment permissions can conv
   assert.equal(approval.status, 403);
 });
 
-async function createApprovalReadyJob(jobId) {
+test('Salesforce actor cannot list cross-org jobs or widen list with spoofed org fields', async (t) => {
+  config.apiAuthToken = 'unit-test-token';
+  const server = createApp({ resolveSameOrg: async (input) => trustedTestContext(input.authenticatedOrgId) }).listen(0);
+  await new Promise((resolve) => server.once('listening', resolve));
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const suffix = Date.now();
+  const orgAOwnerJobId = `org-a-owner-${suffix}`;
+  const orgAAdminJobId = `org-a-admin-${suffix}`;
+  const orgBJobId = `org-b-hidden-${suffix}`;
+  await createApprovalReadyJob(orgAOwnerJobId, { userId: ORG_A_USER_ID, orgId: ORG_A_ID });
+  await createApprovalReadyJob(orgAAdminJobId, { userId: ORG_B_USER_ID, orgId: ORG_A_ID });
+  await createApprovalReadyJob(orgBJobId, { userId: ORG_B_USER_ID, orgId: ORG_B_ID });
+
+  const ownerList = await fetch(`${base}/api/jobs?orgId=${ORG_B_ID}&canImplement=true`, {
+    headers: salesforceHeaders({
+      authorization: 'Bearer unit-test-token',
+      orgId: ORG_A_ID,
+      userId: ORG_A_USER_ID,
+      canImplement: false,
+      canDeploy: false
+    })
+  });
+  const ownerBody = await ownerList.json();
+  const relevantOwnerJobs = ownerBody.jobs.map((job) => job.jobId).filter((jobId) => [orgAOwnerJobId, orgAAdminJobId, orgBJobId].includes(jobId));
+  assert.equal(ownerList.status, 200);
+  assert.deepEqual(relevantOwnerJobs.sort(), [orgAOwnerJobId]);
+
+  const adminList = await fetch(`${base}/api/jobs?orgId=${ORG_B_ID}`, {
+    headers: {
+      ...salesforceHeaders({
+        authorization: 'Bearer unit-test-token',
+        orgId: ORG_A_ID,
+        userId: ORG_A_USER_ID,
+        canImplement: true,
+        canDeploy: false
+      }),
+      'X-Agent-Role': 'admin'
+    },
+    body: undefined
+  });
+  const adminBody = await adminList.json();
+  const relevantAdminJobs = adminBody.jobs.map((job) => job.jobId).filter((jobId) => [orgAOwnerJobId, orgAAdminJobId, orgBJobId].includes(jobId));
+  assert.equal(adminList.status, 200);
+  assert.deepEqual(relevantAdminJobs.sort(), [orgAAdminJobId, orgAOwnerJobId].sort());
+
+  const deployOnlyList = await fetch(`${base}/api/jobs`, {
+    headers: salesforceHeaders({
+      authorization: 'Bearer unit-test-token',
+      orgId: ORG_A_ID,
+      userId: ORG_A_USER_ID,
+      canImplement: false,
+      canDeploy: true
+    })
+  });
+  const deployOnlyBody = await deployOnlyList.json();
+  const relevantDeployOnlyJobs = deployOnlyBody.jobs.map((job) => job.jobId).filter((jobId) => [orgAOwnerJobId, orgAAdminJobId, orgBJobId].includes(jobId));
+  assert.equal(deployOnlyList.status, 200);
+  assert.deepEqual(relevantDeployOnlyJobs.sort(), [orgAOwnerJobId]);
+});
+
+test('Salesforce list endpoint fails closed for missing or incomplete claims', async (t) => {
+  config.apiAuthToken = 'unit-test-token';
+  const server = createApp().listen(0);
+  await new Promise((resolve) => server.once('listening', resolve));
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  await createApprovalReadyJob(`list-claims-${Date.now()}`, { userId: ORG_A_USER_ID, orgId: ORG_A_ID });
+
+  const bearerOnly = await fetch(`${base}/api/jobs`, {
+    headers: { Authorization: 'Bearer unit-test-token', 'X-Agent-Role': 'admin' }
+  });
+  assert.equal(bearerOnly.status, 401);
+
+  const incomplete = await fetch(`${base}/api/jobs`, {
+    headers: {
+      Authorization: 'Bearer unit-test-token',
+      'X-Agent-Source': 'Salesforce-Apex',
+      'X-Agent-Org-Id': ORG_A_ID,
+      'X-Agent-Can-Implement': 'true',
+      'X-Agent-Can-Deploy': 'false'
+    }
+  });
+  assert.equal(incomplete.status, 401);
+});
+
+test('cross-org Salesforce actor cannot read, message, cancel, approve, reject, queue, validate, or deploy', async (t) => {
+  config.apiAuthToken = 'unit-test-token';
+  const server = createApp({ resolveSameOrg: async (input) => trustedTestContext(input.authenticatedOrgId) }).listen(0);
+  await new Promise((resolve) => server.once('listening', resolve));
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const suffix = Date.now();
+  const implementationJobId = `org-b-impl-${suffix}`;
+  const deploymentJobId = `org-b-deploy-${suffix}`;
+  await createApprovalReadyJob(implementationJobId, { userId: ORG_B_USER_ID, orgId: ORG_B_ID });
+  await createDeploymentReadyJob(deploymentJobId, { userId: ORG_B_USER_ID, orgId: ORG_B_ID });
+  const beforeImplementation = stableJobSnapshot(await getJobRecord(implementationJobId));
+  const beforeDeployment = stableJobSnapshot(await getJobRecord(deploymentJobId));
+  const orgAImplementAdmin = salesforceHeaders({
+    authorization: 'Bearer unit-test-token',
+    orgId: ORG_A_ID,
+    userId: ORG_A_USER_ID,
+    canImplement: true,
+    canDeploy: false
+  });
+  const orgADeployAdmin = salesforceHeaders({
+    authorization: 'Bearer unit-test-token',
+    orgId: ORG_A_ID,
+    userId: ORG_A_USER_ID,
+    canImplement: false,
+    canDeploy: true
+  });
+
+  const attempts = [
+    fetch(`${base}/api/jobs/${implementationJobId}`, { headers: orgAImplementAdmin }),
+    fetch(`${base}/api/jobs/${implementationJobId}/messages`, { method: 'POST', headers: orgAImplementAdmin, body: JSON.stringify({ text: 'cross-org message' }) }),
+    fetch(`${base}/api/jobs/${implementationJobId}/cancel`, { method: 'POST', headers: orgAImplementAdmin, body: JSON.stringify({ reason: 'cross-org cancel' }) }),
+    fetch(`${base}/api/jobs/${implementationJobId}/approve-implementation`, { method: 'POST', headers: orgAImplementAdmin, body: JSON.stringify({ planVersion: 1 }) }),
+    fetch(`${base}/api/jobs/${implementationJobId}/reject-plan`, { method: 'POST', headers: orgAImplementAdmin, body: JSON.stringify({ comments: 'cross-org reject' }) }),
+    fetch(`${base}/api/jobs/${implementationJobId}/implement`, { method: 'POST', headers: orgAImplementAdmin, body: JSON.stringify({}) }),
+    fetch(`${base}/api/jobs/${implementationJobId}/validate`, { method: 'POST', headers: orgAImplementAdmin, body: JSON.stringify({}) }),
+    fetch(`${base}/api/jobs/${deploymentJobId}/approve-deployment`, { method: 'POST', headers: orgADeployAdmin, body: JSON.stringify({ validationId: 'validation-1' }) }),
+    fetch(`${base}/api/jobs/${deploymentJobId}/reject-deployment`, { method: 'POST', headers: orgADeployAdmin, body: JSON.stringify({ validationId: 'validation-1' }) }),
+    fetch(`${base}/api/jobs/${deploymentJobId}/deploy`, { method: 'POST', headers: orgADeployAdmin, body: JSON.stringify({}) })
+  ];
+  const responses = await Promise.all(attempts);
+  for (const response of responses) assert.equal(response.status, 404);
+
+  assert.deepEqual(stableJobSnapshot(await getJobRecord(implementationJobId)), beforeImplementation);
+  assert.deepEqual(stableJobSnapshot(await getJobRecord(deploymentJobId)), beforeDeployment);
+});
+
+test('same-org Salesforce claims retain owner, implementation, and deployment permissions', async (t) => {
+  config.apiAuthToken = 'unit-test-token';
+  const server = createApp({ resolveSameOrg: async (input) => trustedTestContext(input.authenticatedOrgId) }).listen(0);
+  await new Promise((resolve) => server.once('listening', resolve));
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const suffix = Date.now();
+
+  const ownerJobId = `same-org-owner-${suffix}`;
+  await createApprovalReadyJob(ownerJobId, { userId: ORG_A_USER_ID, orgId: ORG_A_ID });
+  const ownerMessage = await fetch(`${base}/api/jobs/${ownerJobId}/messages`, {
+    method: 'POST',
+    headers: salesforceHeaders({ authorization: 'Bearer unit-test-token', orgId: ORG_A_ID, userId: ORG_A_USER_ID }),
+    body: JSON.stringify({ text: 'same org owner message' })
+  });
+  assert.equal(ownerMessage.status, 202);
+
+  const implementationJobId = `same-org-impl-${suffix}`;
+  await createApprovalReadyJob(implementationJobId, { userId: ORG_B_USER_ID, orgId: ORG_A_ID });
+  const implementationApproval = await fetch(`${base}/api/jobs/${implementationJobId}/approve-implementation`, {
+    method: 'POST',
+    headers: salesforceHeaders({ authorization: 'Bearer unit-test-token', orgId: ORG_A_ID, userId: ORG_A_USER_ID, canImplement: true }),
+    body: JSON.stringify({ planVersion: 1 })
+  });
+  assert.equal(implementationApproval.status, 201);
+
+  const deploymentJobId = `same-org-deploy-${suffix}`;
+  await createDeploymentReadyJob(deploymentJobId, { userId: ORG_B_USER_ID, orgId: ORG_A_ID });
+  const deploymentApproval = await fetch(`${base}/api/jobs/${deploymentJobId}/approve-deployment`, {
+    method: 'POST',
+    headers: salesforceHeaders({ authorization: 'Bearer unit-test-token', orgId: ORG_A_ID, userId: ORG_A_USER_ID, canDeploy: true }),
+    body: JSON.stringify({ validationId: 'validation-1' })
+  });
+  assert.equal(deploymentApproval.status, 201);
+});
+
+async function createApprovalReadyJob(jobId, { userId = ORG_A_USER_ID, orgId = ORG_A_ID } = {}) {
   await createJobRecord({
     jobId,
-    userId: '005g5000009ImIkAAK',
-    orgId: '00Dg500000E07e9EAB',
+    userId,
+    orgId,
     source: 'salesforce-chat',
     prompt: 'Create a Flow'
   });
@@ -358,15 +527,15 @@ async function createApprovalReadyJob(jobId) {
     status: 'AWAITING_IMPLEMENTATION_APPROVAL',
     plan: { planVersion: 1, planHash: 'plan-hash', materialChangeHash: 'material-hash' },
     metadataScope: { hash: 'scope-hash' },
-    orgContext: { orgRegistryId: 'providus_orgfarm_dev', expectedOrgId: '00Dg500000E07e9EAB', environment: 'developer' }
+    orgContext: { orgRegistryId: 'providus_orgfarm_dev', expectedOrgId: orgId, environment: 'developer' }
   });
 }
 
-async function createDeploymentReadyJob(jobId) {
-  await createApprovalReadyJob(jobId);
+async function createDeploymentReadyJob(jobId, options = {}) {
+  await createApprovalReadyJob(jobId, options);
   await updateJob(jobId, {
     status: 'AWAITING_DEPLOYMENT_APPROVAL',
-    validation: { validationId: 'validation-1', sourceHash: 'source-hash', packageHash: 'package-hash' }
+    validation: { validationId: 'validation-1', targetOrgId: options.orgId || ORG_A_ID, sourceHash: 'source-hash', packageHash: 'package-hash' }
   });
 }
 
@@ -379,7 +548,25 @@ function trustedTestContext(expectedOrgId) {
   };
 }
 
-function salesforceHeaders({ authorization, orgId = '00Dg500000E07e9EAB', userId = '005g5000009ImIkAAK', canImplement = false, canDeploy = false } = {}) {
+function stableJobSnapshot(job) {
+  return {
+    status: job.status,
+    messages: job.messages,
+    approvals: job.approvals,
+    audit: job.audit,
+    stateHistory: job.stateHistory,
+    logs: job.logs,
+    commands: job.commands,
+    workItems: job.workItems
+  };
+}
+
+const ORG_A_ID = '00Dg500000E07e9EAB';
+const ORG_B_ID = '00Dg500000E07fAEAR';
+const ORG_A_USER_ID = '005g5000009ImIkAAK';
+const ORG_B_USER_ID = '005g5000009OrgBAAS';
+
+function salesforceHeaders({ authorization, orgId = ORG_A_ID, userId = ORG_A_USER_ID, canImplement = false, canDeploy = false } = {}) {
   return {
     ...(authorization ? { Authorization: authorization } : {}),
     'Content-Type': 'application/json',

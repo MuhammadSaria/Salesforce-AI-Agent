@@ -85,6 +85,83 @@ test('worker implementation does not treat generic admin actor strings as approv
   assert.deepEqual(calls, [{ authenticatedOrgId: '00Dg500000E07e9EAB', actorId: 'admin' }]);
 });
 
+test('worker rejects salesforce-chat implementation approval org mismatch', async (t) => {
+  config.workspaceRoot = await mkdtemp(join(tmpdir(), 'providus-agent-same-org-'));
+  setSameOrgResolverForTest(async ({ authenticatedOrgId }) => trustedContext(authenticatedOrgId));
+  t.after(() => setSameOrgResolverForTest(null));
+
+  const jobId = `same-org-worker-approval-mismatch-${Date.now()}`;
+  await createJobRecord({
+    jobId,
+    userId: '005g5000009ImIkAAK',
+    orgId: '00Dg500000E07e9EAB',
+    source: 'salesforce-chat',
+    prompt: 'Create a Flow'
+  });
+  await updateJob(jobId, {
+    status: 'IMPLEMENTING',
+    plan: { planVersion: 1, planHash: 'plan-hash', materialChangeHash: 'material-hash', fileOperations: [], dataOperations: [] },
+    metadataScope: { hash: 'scope-hash' },
+    approvals: [{
+      approvalId: 'approval-1',
+      approvalType: 'IMPLEMENTATION',
+      decision: 'APPROVED',
+      planHash: 'plan-hash',
+      metadataScopeHash: 'scope-hash',
+      salesforceOrganizationId: '00Dg500000E07fAEAR'
+    }],
+    orgContext: trustedContext('00Dg500000E07e9EAB')
+  });
+  const before = await getJobRecord(jobId);
+
+  await assert.rejects(
+    processAgentJob({ jobId, action: 'implement', actor: '005g5000009ImIkAAK' }),
+    /approval org|current implementation approval|exact plan, scope, and org/i
+  );
+  const updated = await getJobRecord(jobId);
+  assert.equal(updated.status, 'IMPLEMENTING');
+  assert.deepEqual(updated.logs, before.logs);
+  assert.equal(updated.implementation, undefined);
+});
+
+test('worker rejects salesforce-chat approval without org binding', async (t) => {
+  config.workspaceRoot = await mkdtemp(join(tmpdir(), 'providus-agent-same-org-'));
+  setSameOrgResolverForTest(async ({ authenticatedOrgId }) => trustedContext(authenticatedOrgId));
+  t.after(() => setSameOrgResolverForTest(null));
+
+  const jobId = `same-org-worker-approval-missing-${Date.now()}`;
+  await createJobRecord({
+    jobId,
+    userId: '005g5000009ImIkAAK',
+    orgId: '00Dg500000E07e9EAB',
+    source: 'salesforce-chat',
+    prompt: 'Create a Flow'
+  });
+  await updateJob(jobId, {
+    status: 'IMPLEMENTING',
+    plan: { planVersion: 1, planHash: 'plan-hash', materialChangeHash: 'material-hash', fileOperations: [], dataOperations: [] },
+    metadataScope: { hash: 'scope-hash' },
+    approvals: [{
+      approvalId: 'approval-1',
+      approvalType: 'IMPLEMENTATION',
+      decision: 'APPROVED',
+      planHash: 'plan-hash',
+      metadataScopeHash: 'scope-hash'
+    }],
+    orgContext: trustedContext('00Dg500000E07e9EAB')
+  });
+  const before = await getJobRecord(jobId);
+
+  await assert.rejects(
+    processAgentJob({ jobId, action: 'implement', actor: '005g5000009ImIkAAK' }),
+    /approval org|current implementation approval|exact plan, scope, and org/i
+  );
+  const updated = await getJobRecord(jobId);
+  assert.equal(updated.status, 'IMPLEMENTING');
+  assert.deepEqual(updated.logs, before.logs);
+  assert.equal(updated.implementation, undefined);
+});
+
 function trustedContext(expectedOrgId) {
   return {
     orgRegistryId: 'providus_orgfarm_dev',
