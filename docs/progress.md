@@ -21,7 +21,7 @@
   - Implementation commit: e0eadeac118cee6a7c498d57f7813741b345520f
   - Verification/fix commit: 822ac011f13976d96c5ec93535680906595ba02d
   - Critical/important correction commit: 1691f560054a5e972190134ad4c0a479aade05d4
-  - Final safety correction commit: pending
+  - Final safety correction commit: 0bf9cc4cca63f78326122890309345e9ca4444ab
   - Verification date: 2026-08-01
   - Verification:
     - `cd middleware && docker compose ps` - PASS, `middleware-postgres-1` running and publishing `5432`.
