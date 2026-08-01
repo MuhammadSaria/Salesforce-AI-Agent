@@ -21,6 +21,7 @@
   - Implementation commit: 17f1a71dc4d746bc6093ba708a8dc934e1d506ed
   - Security correction commit: f5a00d28829b6e888b3af6aff8453bc14c693d0a
   - Final authorization correction commit: 3434f8c5776c378e54eca06bf3a53f87ab311e8a
+  - Final cross-org correction commit: c1c559679e11326e48646a5f5a7f9a86371b25fe
   - Verification date: 2026-08-01
   - Verification:
     - `cd middleware && node --import ./test/setup.js --test test/sameOrgService.test.js test/apiAuth.test.js test/security.test.js` - RED first, failed for expected missing same-org service, missing production executor preflight, and permission-claim enforcement gaps.
@@ -37,6 +38,12 @@
     - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/apiAuth.test.js test/salesforceId.test.js test/sameOrgService.test.js test/orgRouting.test.js test/security.test.js test/agentSameOrg.test.js test/conversationApi.test.js` - PASS, 70 tests, 0 skipped.
     - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 133 tests and 0 skipped.
     - `sf.cmd apex run test --tests AgentControllerTest --result-format human --wait 10 --target-org $env:PHASE1_SALESFORCE_ALIAS` - PASS against explicit alias `Developer-org`, 14 tests, 0 skipped, Org Id `00Dg500000E07e9EAB`.
+  - Final cross-org correction verification:
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/apiAuth.test.js test/agentSameOrg.test.js` - RED first, failed for expected cross-org Salesforce-chat read/mutation bypass, bearer-only list fallback, missing list claim parsing, and approval-org binding gaps.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/apiAuth.test.js test/agentSameOrg.test.js` - PASS, 21 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/apiAuth.test.js test/conversationApi.test.js test/approval.test.js test/salesforceId.test.js test/sameOrgService.test.js test/orgRouting.test.js test/security.test.js test/agentSameOrg.test.js test/agentJiraIsolation.test.js test/agentQueue.test.js test/agentQueueFallback.test.js` - PASS, 82 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 139 tests and 0 skipped.
+    - `sf.cmd apex run test --tests AgentControllerTest --result-format human --wait 10 --target-org $env:PHASE1_SALESFORCE_ALIAS` - PASS against explicit alias `Developer-org`, 14 tests, 0 skipped, Org Id `00Dg500000E07e9EAB`.
   - Review:
     - `resolveSameOrg({ authenticatedOrgId, actorId })` resolves exactly one active connected registry entry matching the authenticated Salesforce org ID and rejects body/prompt/org-registry attempts to switch orgs.
     - `assertSameVerifiedOrg(orgContext, observed)` verifies organization ID, normalized instance URL, configured username, connected status, and non-production context before returning a frozen public context.
@@ -51,6 +58,10 @@
     - Bearer-token API callers now receive immutable `trusted-internal-service` mode that ignores caller-supplied role headers; `salesforce-chat` job routes require `salesforce-claims` mode before read, conversation, implementation, validation, deployment, or approval authorization.
     - `X-Agent-Role` no longer grants `salesforce-chat` read, implementation, or deployment access; `canImplement` and `canDeploy` remain independent, and body-spoofed role or permission fields are ignored.
     - Shared Salesforce ID canonicalization validates exact 15- and 18-character IDs with the official checksum suffix and is used by auth claim parsing, same-org resolution, org registry matching, and Salesforce executor org checks.
+  - Final cross-org correction review:
+    - Salesforce-chat list, read, conversation, cancellation, approval, queue, validation, and deployment routes require canonical actor/job org equality before owner, implementation, deployment, or role authorization is evaluated.
+    - The user-facing job list now parses complete Salesforce claims, rejects bearer-only or incomplete Salesforce identity headers, filters by authenticated org, and does not let query/body/role spoofing widen results.
+    - New Salesforce-chat approvals are bound to the authenticated org ID; workers reject approval org mismatches, missing approval org bindings, resolved-context org mismatches, and validation target-org mismatches before Salesforce execution.
 
 - Phase 1 Task 3: Introduce direct conversation APIs and isolate Jira
   - Implementation commit: 4e7e42b
