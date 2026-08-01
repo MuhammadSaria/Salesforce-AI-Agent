@@ -345,7 +345,7 @@ Expected: future sessions can determine current state without previous chat hist
 
 Create `docs/prompts/continue-task.md`:
 
-```markdown
+````markdown
 # Continue One Phase 1 Task
 
 Replace `TASK_NUMBER` once before sending this prompt.
@@ -378,13 +378,13 @@ Return only:
 - Blockers
 - Next task
 ```
-```
+````
 
 - [ ] **Step 2: Create the review prompt**
 
 Create `docs/prompts/review-task.md`:
 
-```markdown
+````markdown
 # Review One Phase 1 Task
 
 Replace `TASK_NUMBER` and `COMMIT_SHA` once before sending this prompt.
@@ -412,7 +412,7 @@ Report findings first, ordered by severity, with file paths and concrete fixes.
 If there are no findings, state that clearly and list residual risks or unverified areas.
 Do not edit files unless explicitly asked to address the findings.
 ```
-```
+````
 
 - [ ] **Step 3: Verify prompt scope and output controls**
 
@@ -467,15 +467,16 @@ done
 
 Expected: exit status 0.
 
-- [ ] **Step 2: Scan setup documents for forbidden placeholders**
+- [ ] **Step 2: Scan setup documents for unfinished or empty sections**
 
 Run:
 
 ```bash
-rg -n '\b(TBD|TODO|FIXME|implement later|fill in details)\b'   AGENTS.md docs/specifications docs/plans docs/progress.md docs/decisions.md docs/prompts docs/superpowers
+rg -n '^##[^#]*$|^[-*] [^:]+:[[:space:]]*$|\[insert|\[replace' \
+  AGENTS.md docs/specifications docs/plans docs/progress.md docs/decisions.md docs/prompts docs/superpowers
 ```
 
-Expected: no matches. The literal placeholder-policy examples in the approved workflow design or implementation plan may be excluded from this check after confirming they are explanatory text rather than unfinished requirements.
+Expected: no empty headings, empty keyed values, or unfinished insertion markers. The intentional `TASK_NUMBER` and `COMMIT_SHA` replacement markers appear only in reusable prompt templates.
 
 - [ ] **Step 3: Check internal path references**
 
