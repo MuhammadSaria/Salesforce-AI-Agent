@@ -12,15 +12,15 @@
 
 ## Current Task
 
-- Task: Phase 1 Task 2 correction
-- Status: Verified, pending commit and push
+- Task: Phase 1 Task 3
+- Status: Not started
 
 ## Completed Tasks
 
 - Phase 1 Task 2: Add durable PostgreSQL job persistence
   - Implementation commit: e0eadeac118cee6a7c498d57f7813741b345520f
   - Verification/fix commit: 822ac011f13976d96c5ec93535680906595ba02d
-  - Critical/important correction commit: pending
+  - Critical/important correction commit: 1691f560054a5e972190134ad4c0a479aade05d4
   - Verification date: 2026-08-01
   - Verification:
     - `cd middleware && docker compose ps` - PASS, `middleware-postgres-1` running and publishing `5432`.
@@ -50,7 +50,7 @@
 
 ## Next Task
 
-After the correction commit is pushed and confirmed, Task 3 remains not started until explicit approval.
+Start Phase 1 Task 3 only after explicit approval.
 
 ## Update Rules
 
