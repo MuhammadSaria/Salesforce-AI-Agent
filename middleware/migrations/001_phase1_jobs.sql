@@ -58,11 +58,13 @@ CREATE TABLE IF NOT EXISTS component_locks (
   lease_expires_at timestamptz NOT NULL,
   released_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (component_key, released_at)
+  updated_at timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS job_messages_job_id_created_at_idx ON job_messages(job_id, created_at);
 CREATE INDEX IF NOT EXISTS job_plans_job_id_version_idx ON job_plans(job_id, version);
 CREATE INDEX IF NOT EXISTS job_approvals_job_id_created_at_idx ON job_approvals(job_id, created_at);
 CREATE INDEX IF NOT EXISTS job_events_job_id_created_at_idx ON job_events(job_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS component_locks_active_component_key_idx
+  ON component_locks(component_key)
+  WHERE released_at IS NULL;

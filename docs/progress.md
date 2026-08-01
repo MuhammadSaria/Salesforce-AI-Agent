@@ -12,17 +12,21 @@
 
 ## Current Task
 
-- Task: Phase 1 Task 2
-- Status: Blocked on local PostgreSQL runtime verification
-- Working commit: e0eadeac118cee6a7c498d57f7813741b345520f
-- Verification:
-  - `cd middleware && npm.cmd install pg@^8.13.0` - PASS
-  - `cd middleware && node --import ./test/setup.js --test test/jobRepositoryPostgres.test.js` - SKIP, PostgreSQL unavailable
-  - `cd middleware && npm.cmd run check` - PASS, lint plus 72 passing tests and 1 skipped PostgreSQL integration test
-  - `cd middleware && docker compose up -d postgres` - BLOCKED, `docker` command not found
-  - `cd middleware && npm.cmd run migrate` - BLOCKED, `ECONNREFUSED 127.0.0.1:5432`
+- Task: Phase 1 Task 3
+- Status: Not started
 
 ## Completed Tasks
+
+- Phase 1 Task 2: Add durable PostgreSQL job persistence
+  - Implementation commit: e0eadeac118cee6a7c498d57f7813741b345520f
+  - Verification date: 2026-08-01
+  - Verification:
+    - `cd middleware && docker compose ps` - PASS, `middleware-postgres-1` running and publishing `5432`.
+    - `cd middleware && npm.cmd run migrate` - PASS.
+    - `cd middleware && node --import ./test/setup.js --test test/jobRepositoryPostgres.test.js` - PASS, 2 tests, 0 skipped.
+    - `cd middleware && npm.cmd run check` - PASS, lint plus 74 passing tests and 0 skipped.
+  - Review:
+    - Fixed migration regression found during diff review: active component locks now use a partial unique index so only one unreleased lease can exist per component.
 
 - Phase 1 Task 1: Establish the Phase 1 direct-chat state model
   - Commit: 94de137
@@ -35,11 +39,11 @@
 
 ## Blockers
 
-- Phase 1 Task 2 live PostgreSQL verification is blocked because Docker is not installed or not on PATH in this environment, and no PostgreSQL service is listening on `127.0.0.1:5432`.
+- None.
 
 ## Next Task
 
-Complete Phase 1 Task 2 verification by starting PostgreSQL, running migrations, running the focused repository integration test without a skip, then committing the verified result.
+Start Phase 1 Task 3 only after explicit approval.
 
 ## Update Rules
 
