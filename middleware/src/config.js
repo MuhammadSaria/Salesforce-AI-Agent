@@ -5,6 +5,7 @@ export const config = {
   port: Number(process.env.PORT || 3000),
   nodeEnv: process.env.NODE_ENV || 'development',
   agentBackend: process.env.AGENT_BACKEND || 'codex',
+  databaseUrl: process.env.DATABASE_URL || 'postgres://providus:providus@127.0.0.1:5432/providus_nexus',
   redisUrl: process.env.REDIS_URL || 'redis://127.0.0.1:6379',
   queueDriver: process.env.QUEUE_DRIVER || 'redis',
   apiAuthToken: process.env.MIDDLEWARE_API_TOKEN || '',
