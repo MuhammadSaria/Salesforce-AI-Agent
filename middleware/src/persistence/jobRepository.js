@@ -1,11 +1,32 @@
 import { DEVELOPMENT_JOB_STATES, assertDevelopmentTransition } from '../domain/developmentJob.js';
 
 export function createJobRepository({ pool }) {
-  async function withTransaction(work) {
-    const client = await pool.connect();
+  return repositoryFor(pool, { ownsTransactions: true });
+}
+
+function repositoryFor(db, { ownsTransactions }) {
+  async function runInTransaction(work) {
+    if (!ownsTransactions) return work(db);
+    const client = await db.connect();
     try {
       await client.query('BEGIN');
       const value = await work(client);
+      await client.query('COMMIT');
+      return value;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async function withTransaction(work) {
+    if (!ownsTransactions) return work(repositoryFor(db, { ownsTransactions: false }));
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      const value = await work(repositoryFor(client, { ownsTransactions: false }));
       await client.query('COMMIT');
       return value;
     } catch (error) {
@@ -20,28 +41,30 @@ export function createJobRepository({ pool }) {
     withTransaction,
     async createJob(input) {
       const now = new Date();
-      await pool.query(
+      await db.query(
         `INSERT INTO development_jobs (job_id, user_id, org_id, prompt, status, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $6)`,
         [input.jobId, input.userId, input.orgId, input.prompt, input.status || DEVELOPMENT_JOB_STATES.RECEIVED, now]
       );
     },
     async getJob(jobId) {
-      return hydrateJob(pool, jobId);
+      return hydrateJob(db, jobId, { ownsTransactions });
     },
     async listJobs() {
-      const result = await pool.query('SELECT job_id FROM development_jobs ORDER BY created_at DESC, job_id DESC');
-      return Promise.all(result.rows.map((row) => hydrateJob(pool, row.job_id)));
+      return runReadOnlySnapshot(async (client) => {
+        const result = await client.query('SELECT job_id FROM development_jobs ORDER BY created_at DESC, job_id DESC');
+        return Promise.all(result.rows.map((row) => hydrateJob(client, row.job_id, { ownsTransactions: false })));
+      }, { db, ownsTransactions });
     },
     async appendMessage(jobId, message) {
-      await pool.query(
+      await db.query(
         `INSERT INTO job_messages (message_id, job_id, role, kind, text, body)
          VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
         [message.messageId, jobId, message.role, message.kind, message.text, JSON.stringify(message.body || {})]
       );
     },
     async savePlan(jobId, plan) {
-      await withTransaction(async (client) => {
+      await runInTransaction(async (client) => {
         await client.query(
           `INSERT INTO job_plans (job_id, version, plan_hash, scope_hash, body)
            VALUES ($1, $2, $3, $4, $5::jsonb)`,
@@ -56,7 +79,7 @@ export function createJobRepository({ pool }) {
       });
     },
     async appendApproval(jobId, approval) {
-      await pool.query(
+      await db.query(
         `INSERT INTO job_approvals (approval_id, job_id, approval_type, decision, actor_id, plan_hash, scope_hash, body)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`,
         [
@@ -72,7 +95,7 @@ export function createJobRepository({ pool }) {
       );
     },
     async transition(jobId, expectedState, nextState, details = {}) {
-      await withTransaction(async (client) => {
+      await runInTransaction(async (client) => {
         const result = await client.query('SELECT status FROM development_jobs WHERE job_id = $1 FOR UPDATE', [jobId]);
         if (!result.rowCount) throw notFound();
         const currentState = result.rows[0].status;
@@ -92,7 +115,7 @@ export function createJobRepository({ pool }) {
       });
     },
     async appendEvent(jobId, event) {
-      await pool.query(
+      await db.query(
         `INSERT INTO job_events (job_id, event_type, actor_id, body)
          VALUES ($1, $2, $3, $4::jsonb)`,
         [jobId, event.type, event.actorId || 'system', JSON.stringify(event.body || {})]
@@ -101,8 +124,28 @@ export function createJobRepository({ pool }) {
   };
 }
 
-async function hydrateJob(pool, jobId) {
-  const jobResult = await pool.query(
+async function hydrateJob(db, jobId, { ownsTransactions }) {
+  return runReadOnlySnapshot(async (client) => hydrateJobInSnapshot(client, jobId), { db, ownsTransactions });
+}
+
+async function runReadOnlySnapshot(work, { db, ownsTransactions }) {
+  if (!ownsTransactions) return work(db);
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    const value = await work(client);
+    await client.query('COMMIT');
+    return value;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function hydrateJobInSnapshot(client, jobId) {
+  const jobResult = await client.query(
     `SELECT job_id, user_id, org_id, prompt, status, current_plan_version, created_at, updated_at
      FROM development_jobs
      WHERE job_id = $1`,
@@ -111,28 +154,28 @@ async function hydrateJob(pool, jobId) {
   if (!jobResult.rowCount) return null;
 
   const [messages, plans, approvals, events] = await Promise.all([
-    pool.query(
+    client.query(
       `SELECT message_id, role, kind, text, body, created_at
        FROM job_messages
        WHERE job_id = $1
        ORDER BY created_at, message_id`,
       [jobId]
     ),
-    pool.query(
+    client.query(
       `SELECT version, plan_hash, scope_hash, body, created_at
        FROM job_plans
        WHERE job_id = $1
        ORDER BY version`,
       [jobId]
     ),
-    pool.query(
+    client.query(
       `SELECT approval_id, approval_type, decision, actor_id, plan_hash, scope_hash, body, created_at
        FROM job_approvals
        WHERE job_id = $1
        ORDER BY created_at, approval_id`,
       [jobId]
     ),
-    pool.query(
+    client.query(
       `SELECT event_id, event_type, actor_id, body, created_at
        FROM job_events
        WHERE job_id = $1

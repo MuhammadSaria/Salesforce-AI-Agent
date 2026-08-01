@@ -47,7 +47,9 @@ Implementation and execution approvals are different durable records. Each is bo
 cd middleware
 Copy-Item .env.example .env
 npm install
-docker compose up -d redis
+docker compose up -d postgres redis
+docker compose exec -T postgres createdb -U providus providus_nexus_test
+npm run migrate
 npm run start
 ```
 
@@ -62,6 +64,7 @@ Run local checks:
 
 ```powershell
 cd middleware
+$env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'
 npm run check
 ```
 

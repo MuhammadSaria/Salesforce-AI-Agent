@@ -12,22 +12,28 @@
 
 ## Current Task
 
-- Task: Phase 1 Task 3
-- Status: Not started
+- Task: Phase 1 Task 2 correction
+- Status: Verified, pending commit and push
 
 ## Completed Tasks
 
 - Phase 1 Task 2: Add durable PostgreSQL job persistence
   - Implementation commit: e0eadeac118cee6a7c498d57f7813741b345520f
   - Verification/fix commit: 822ac011f13976d96c5ec93535680906595ba02d
+  - Critical/important correction commit: pending
   - Verification date: 2026-08-01
   - Verification:
     - `cd middleware && docker compose ps` - PASS, `middleware-postgres-1` running and publishing `5432`.
     - `cd middleware && npm.cmd run migrate` - PASS.
-    - `cd middleware && node --import ./test/setup.js --test test/jobRepositoryPostgres.test.js` - PASS, 2 tests, 0 skipped.
-    - `cd middleware && npm.cmd run check` - PASS, lint plus 74 passing tests and 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/jobRepositoryPostgres.test.js test/postgresHelper.test.js` - PASS, 10 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 82 passing tests and 0 skipped.
   - Review:
     - Fixed migration regression found during diff review: active component locks now use a partial unique index so only one unreleased lease can exist per component.
+  - Correction review:
+    - Test database cleanup requires explicit `TEST_DATABASE_URL`, rejects non-`_test` database names before cleanup, and deletes only Providus-owned tables in foreign-key order.
+    - `withTransaction()` now supplies a transaction-scoped repository and nested repository methods reuse the same PostgreSQL client.
+    - Migrations run under a PostgreSQL advisory transaction lock and are idempotent under concurrent runners.
+    - Job hydration uses a repeatable-read read-only transaction for a consistent aggregate snapshot.
 
 - Phase 1 Task 1: Establish the Phase 1 direct-chat state model
   - Commit: 94de137
@@ -44,7 +50,7 @@
 
 ## Next Task
 
-Start Phase 1 Task 3 only after explicit approval.
+After the correction commit is pushed and confirmed, Task 3 remains not started until explicit approval.
 
 ## Update Rules
 
