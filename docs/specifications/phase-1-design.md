@@ -1,7 +1,7 @@
 # Providus Nexus Salesforce Development Core Design
 
 **Date:** 2026-07-31  
-**Status:** Approved design awaiting written-spec review  
+**Status:** Approved  
 **Selected approach:** Rebuild the core workflow inside the existing project
 
 ## 1. Objective
