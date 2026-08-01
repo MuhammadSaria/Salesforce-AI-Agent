@@ -67,9 +67,13 @@ public with sharing class AgentController {
         request.setHeader('X-Agent-User-Id', UserInfo.getUserId());
         request.setHeader('X-Agent-Org-Id', UserInfo.getOrganizationId());
         request.setHeader('X-Agent-Source', 'Salesforce-Apex');
-        String agentRole = FeatureManagement.checkPermission('AI_Agent_Admin')
+        Boolean canImplement = FeatureManagement.checkPermission('AI_Agent_Admin');
+        Boolean canDeploy = FeatureManagement.checkPermission('AI_Agent_Deploy');
+        request.setHeader('X-Agent-Can-Implement', String.valueOf(canImplement));
+        request.setHeader('X-Agent-Can-Deploy', String.valueOf(canDeploy));
+        String agentRole = canImplement
             ? 'admin'
-            : (FeatureManagement.checkPermission('AI_Agent_Deploy') ? 'deployer' : 'developer');
+            : (canDeploy ? 'deployer' : 'developer');
         request.setHeader('X-Agent-Role', agentRole);
         if (payload != null) {
             request.setHeader('Content-Type', 'application/json');

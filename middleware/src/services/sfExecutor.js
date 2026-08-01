@@ -140,6 +140,7 @@ export async function runSfCommand(command, params = {}, options = {}) {
   if (!orgContext?.salesforceAlias || !orgContext?.expectedOrgId) {
     throw new Error('A verified Salesforce org context is required before running Salesforce commands.');
   }
+  assertNonProductionOrgContext(orgContext);
 
   if (definition.requiresApproval && !options.approved) {
     const error = new Error(`Command ${command} requires explicit approval.`);
@@ -275,6 +276,7 @@ function resolveMetadataPath(path) {
 }
 
 export async function verifySelectedOrg(orgContext, options = {}) {
+  assertNonProductionOrgContext(orgContext);
   const started = new Date().toISOString();
   const result = await executeSf(['org', 'display', '--target-org', orgContext.salesforceAlias, '--json'], config.sfCommandTimeoutMs);
   const parsed = parseSfJson(result.stdout);
@@ -336,6 +338,14 @@ export async function verifySelectedOrg(orgContext, options = {}) {
     environment: orgContext.environment,
     verifiedAt: new Date().toISOString()
   };
+}
+
+function assertNonProductionOrgContext(orgContext) {
+  if (String(orgContext?.environment || '').toLowerCase() === 'production' || orgContext?.productionApprovalRequired === true) {
+    const error = new Error('Production Salesforce orgs are not allowed in Phase 1.');
+    error.code = 'PRODUCTION_ORG_BLOCKED';
+    throw error;
+  }
 }
 
 function executeSf(args, timeoutMs, cwd = config.projectRoot) {

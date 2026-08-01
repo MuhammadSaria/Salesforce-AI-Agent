@@ -2,8 +2,6 @@ import { timingSafeEqual } from 'node:crypto';
 import { config } from '../config.js';
 import { loadOrgRegistry } from '../services/orgRegistry.js';
 
-const TRUSTED_ROLES = new Set(['viewer', 'developer', 'deployer', 'admin']);
-
 export async function requireApiAuth(req, res, next) {
   if (config.nodeEnv === 'test' && !config.apiAuthToken) {
     req.actor = actorFromHeaders(req);
@@ -39,9 +37,16 @@ export function requireRole(...roles) {
 }
 
 function actorFromHeaders(req) {
+  const canImplement = headerBoolean(req.get('x-agent-can-implement'));
+  const canDeploy = headerBoolean(req.get('x-agent-can-deploy'));
+  const source = String(req.get('x-agent-source') || '').trim().toLowerCase();
+  const headerRole = String(req.get('x-agent-role') || '').toLowerCase();
   return {
     id: String(req.get('x-agent-user-id') || 'salesforce-user').slice(0, 80),
-    role: String(req.get('x-agent-role') || 'developer').toLowerCase()
+    orgId: normalizeOrgId(req.get('x-agent-org-id')),
+    canImplement,
+    canDeploy,
+    role: canImplement ? 'admin' : (canDeploy ? 'deployer' : (source === 'salesforce-apex' ? 'developer' : (headerRole || 'developer')))
   };
 }
 
@@ -55,8 +60,9 @@ async function isTrustedSalesforceContext(req) {
   const source = String(req.get('x-agent-source') || '').trim().toLowerCase();
   const orgId = normalizeOrgId(req.get('x-agent-org-id'));
   const userId = String(req.get('x-agent-user-id') || '').trim();
-  const role = String(req.get('x-agent-role') || '').trim().toLowerCase();
-  if (source !== 'salesforce-apex' || !orgId || !userId || !TRUSTED_ROLES.has(role)) {
+  const canImplement = req.get('x-agent-can-implement');
+  const canDeploy = req.get('x-agent-can-deploy');
+  if (source !== 'salesforce-apex' || !orgId || !userId || !isBooleanHeader(canImplement) || !isBooleanHeader(canDeploy)) {
     return false;
   }
 
@@ -67,4 +73,12 @@ async function isTrustedSalesforceContext(req) {
 
 function normalizeOrgId(value) {
   return String(value || '').trim().slice(0, 15).toUpperCase();
+}
+
+function headerBoolean(value) {
+  return String(value || '').trim().toLowerCase() === 'true';
+}
+
+function isBooleanHeader(value) {
+  return ['true', 'false'].includes(String(value || '').trim().toLowerCase());
 }

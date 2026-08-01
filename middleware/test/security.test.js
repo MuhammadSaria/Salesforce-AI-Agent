@@ -132,3 +132,33 @@ test('Salesforce operations are blocked when the org registry does not allow the
     /Operation validate is not allowed/
   );
 });
+
+test('Salesforce executor rejects production and mismatched explicit target orgs before CLI lookup', async () => {
+  await assert.rejects(
+    runSfCommand('orgDisplay', {}, {
+      orgContext: {
+        orgRegistryId: 'prod',
+        salesforceAlias: 'prod',
+        expectedOrgId: '00DPROD',
+        environment: 'production',
+        instanceUrl: 'https://prod.my.salesforce.com',
+        allowedOperations: ['read']
+      }
+    }),
+    /Production Salesforce orgs are not allowed/
+  );
+
+  await assert.rejects(
+    runSfCommand('orgDisplay', { targetOrg: 'default' }, {
+      orgContext: {
+        orgRegistryId: 'sapa',
+        salesforceAlias: 'my-sandbox',
+        expectedOrgId: '00DTEST',
+        environment: 'sandbox',
+        instanceUrl: 'https://sapa.sandbox.my.salesforce.com',
+        allowedOperations: ['read']
+      }
+    }),
+    /does not match/
+  );
+});

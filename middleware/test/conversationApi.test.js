@@ -169,7 +169,7 @@ test('generic action routes reject Jira-source jobs when Jira is disabled', asyn
   });
 
   for (const route of ['implement', 'validate']) {
-    const response = await postJson(`${base}/api/jobs/${jobId}/${route}`, {}, viewerHeaders('005-owner', 'developer'));
+    const response = await postJson(`${base}/api/jobs/${jobId}/${route}`, {}, permissionHeaders('005-owner', { canImplement: true }));
     assert.equal(response.status, 409);
     assert.equal(response.body.error.code, 'JIRA_DISABLED');
   }
@@ -274,7 +274,7 @@ test('Salesforce chat jobs continue through generic action routes when Jira is d
   });
   await updateJob(jobId, { status: 'RECEIVED' });
 
-  const response = await postJson(`${base}/api/jobs/${jobId}/implement`, {}, viewerHeaders('005-owner', 'developer'));
+  const response = await postJson(`${base}/api/jobs/${jobId}/implement`, {}, permissionHeaders('005-owner', { canImplement: true }));
   assert.equal(response.status, 409);
   assert.notEqual(response.body.error.code, 'JIRA_DISABLED');
 });
@@ -317,6 +317,15 @@ function viewerHeaders(userId, role = 'viewer') {
   return {
     'X-Agent-User-Id': userId,
     'X-Agent-Role': role,
+    'Content-Type': 'application/json'
+  };
+}
+
+function permissionHeaders(userId, { canImplement = false, canDeploy = false } = {}) {
+  return {
+    'X-Agent-User-Id': userId,
+    'X-Agent-Can-Implement': String(canImplement),
+    'X-Agent-Can-Deploy': String(canDeploy),
     'Content-Type': 'application/json'
   };
 }

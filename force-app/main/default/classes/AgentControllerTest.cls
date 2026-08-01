@@ -70,6 +70,8 @@ private class AgentControllerTest {
             System.assertNotEquals(null, request.getHeader('X-Agent-Org-Id'));
             System.assertEquals('Salesforce-Apex', request.getHeader('X-Agent-Source'));
             System.assertNotEquals(null, request.getHeader('X-Agent-Role'));
+            System.assertNotEquals(null, request.getHeader('X-Agent-Can-Implement'));
+            System.assertNotEquals(null, request.getHeader('X-Agent-Can-Deploy'));
             HttpResponse response = new HttpResponse(); response.setStatusCode(statusCode); response.setBody(body); return response;
         }
     }

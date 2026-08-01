@@ -49,7 +49,7 @@ export function createApp() {
   app.post('/api/jobs', asyncRoute(async (req, res) => {
     if (!String(req.body?.prompt || '').trim()) return promptRequired(res);
     const prompt = sanitizePrompt(req.body.prompt, config.maxPromptLength).trim();
-    const outcome = await conversations.start({ actor: req.actor, prompt, orgId: String(req.body?.orgId || ''), context: safeContext(req.body?.context) });
+    const outcome = await conversations.start({ actor: req.actor, prompt, orgId: req.actor?.orgId || '', context: safeContext() });
     res.status(201).json(outcome);
   }));
 
@@ -74,6 +74,7 @@ export function createApp() {
   }));
 
   app.post('/api/jobs/:jobId/select-org', requireRole('developer', 'deployer', 'admin'), mutableJobRoute(async (req, res, job) => {
+    if (job.source === 'salesforce-chat') return conflict(res, 'Direct Phase 1 actions must use the authenticated same Salesforce sandbox.');
     const org = await getRegisteredOrg(String(req.body?.orgRegistryId || ''));
     if (!org) return res.status(422).json({ error: { message: 'Select an active org from the registry.' } });
     const updated = await invalidateForOrgChange(job.jobId, org.id, req.actor.id);
@@ -116,7 +117,7 @@ export function createApp() {
     }));
   }
 
-  app.post('/api/jobs/:jobId/approve-implementation', requireRole('developer', 'deployer', 'admin'), mutableJobRoute(async (req, res, job) => {
+  app.post('/api/jobs/:jobId/approve-implementation', requireImplementationPermission, mutableJobRoute(async (req, res, job) => {
     if (job.status !== JOB_STATES.AWAITING_PLAN_APPROVAL) return conflict(res, 'Job is not awaiting implementation approval.');
     if (Number(req.body?.planVersion) !== job.plan?.planVersion) return conflict(res, 'Approval must identify the current plan version.');
     const approval = approvalRecord(job, req, 'IMPLEMENTATION', { decision: 'APPROVED' });
@@ -125,7 +126,7 @@ export function createApp() {
     await enqueueAgentJob({ jobId: job.jobId, action: 'implement', actor: req.actor.id }, { jobId: `${job.jobId}:implement:${Date.now()}` });
     res.status(201).json({ approval });
   }));
-  app.post('/api/jobs/:jobId/reject-plan', requireRole('developer', 'deployer', 'admin'), mutableJobRoute(async (req, res, job) => {
+  app.post('/api/jobs/:jobId/reject-plan', requireImplementationPermission, mutableJobRoute(async (req, res, job) => {
     if (job.status !== JOB_STATES.AWAITING_PLAN_APPROVAL) return conflict(res, 'Job is not awaiting plan review.');
     const approval = approvalRecord(job, req, 'IMPLEMENTATION', { decision: 'REJECTED' });
     await updateJob(job.jobId, {
@@ -135,23 +136,23 @@ export function createApp() {
     await transitionJob(job.jobId, JOB_STATES.PLAN_REJECTED, { actor: req.actor.id, reason: 'Plan rejected.', approvalId: approval.approvalId });
     res.status(201).json({ approval });
   }));
-  app.post('/api/jobs/:jobId/implement', requireRole('developer', 'deployer', 'admin'), queueAction('implement', [JOB_STATES.IMPLEMENTING, JOB_STATES.VALIDATION_FAILED]));
-  app.post('/api/jobs/:jobId/validate', requireRole('developer', 'deployer', 'admin'), queueAction('validate', [JOB_STATES.IMPLEMENTING, JOB_STATES.VALIDATION_FAILED]));
+  app.post('/api/jobs/:jobId/implement', requireImplementationPermission, queueAction('implement', [JOB_STATES.IMPLEMENTING, JOB_STATES.VALIDATION_FAILED]));
+  app.post('/api/jobs/:jobId/validate', requireImplementationPermission, queueAction('validate', [JOB_STATES.IMPLEMENTING, JOB_STATES.VALIDATION_FAILED]));
 
-  app.post('/api/jobs/:jobId/approve-deployment', requireRole('deployer', 'admin'), mutableJobRoute(async (req, res, job) => {
+  app.post('/api/jobs/:jobId/approve-deployment', requireDeploymentPermission, mutableJobRoute(async (req, res, job) => {
     if (job.status !== JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL) return conflict(res, 'Job is not awaiting deployment approval.');
     if (req.body?.validationId !== job.validation?.validationId) return conflict(res, 'Approval must identify the current validation.');
     const approval = approvalRecord(job, req, 'DEPLOYMENT', { decision: 'APPROVED', validationId: job.validation.validationId, validatedSourceHash: job.validation.sourceHash, gitCommitHash: job.validation.commitHash || '', deploymentPackageHash: job.validation.packageHash, productionSpecificApproval: req.body?.productionSpecificApproval === true });
     await updateJob(job.jobId, { approvals: [...job.approvals, approval] });
     res.status(201).json({ approval });
   }));
-  app.post('/api/jobs/:jobId/reject-deployment', requireRole('deployer', 'admin'), mutableJobRoute(async (req, res, job) => {
+  app.post('/api/jobs/:jobId/reject-deployment', requireDeploymentPermission, mutableJobRoute(async (req, res, job) => {
     if (job.status !== JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL) return conflict(res, 'Job is not awaiting deployment approval.');
     const approval = approvalRecord(job, req, 'DEPLOYMENT', { decision: 'REJECTED', validationId: job.validation?.validationId });
     await updateJob(job.jobId, { approvals: [...job.approvals, approval] });
     res.status(201).json({ approval });
   }));
-  app.post('/api/jobs/:jobId/deploy', requireRole('deployer', 'admin'), mutableJobRoute(async (req, res, job) => {
+  app.post('/api/jobs/:jobId/deploy', requireDeploymentPermission, mutableJobRoute(async (req, res, job) => {
     if (job.status !== JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL) return conflict(res, 'Job is not ready to deploy.');
     const approval = latestApprovedApproval(job, 'DEPLOYMENT', job.validation?.validationId);
     if (!approval) return conflict(res, 'Explicit deployment approval is required.');
@@ -186,16 +187,20 @@ async function jiraWebhook(req, res, next) {
 }
 
 function queueAction(action, states) { return mutableJobRoute(async (req, res, job) => { if (!states.includes(job.status)) return conflict(res, `Job is not ready to ${action}.`); await enqueueAgentJob({ jobId: job.jobId, action, actor: req.actor.id }, { jobId: `${job.jobId}:${action}:${Date.now()}` }); res.status(202).json({ jobId: job.jobId, message: `${action} queued.` }); }); }
+function requireImplementationPermission(req, res, next) { return hasImplementationPermission(req.actor) ? next() : res.status(403).json({ error: { code: 'FORBIDDEN', message: 'This action is not permitted.' } }); }
+function requireDeploymentPermission(req, res, next) { return hasDeploymentPermission(req.actor) ? next() : res.status(403).json({ error: { code: 'FORBIDDEN', message: 'This action is not permitted.' } }); }
 function jobRoute(handler) { return asyncRoute(async (req, res) => { const job = await getJobRecord(req.params.jobId); if (!job || !canAccessJob(req.actor, job)) return res.status(404).json({ error: { message: 'Job not found.' } }); return handler(req, res, job); }); }
 function mutableJobRoute(handler) { return jobRoute((req, res, job) => isJiraSource(job) && !config.jiraEnabled ? jiraDisabled(res) : handler(req, res, job)); }
 function asyncRoute(handler) { return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next); }
 function approvalRecord(job, req, type, extra) { return { approvalId: nanoid(), jobId: job.jobId, jiraIssueKey: job.jiraIssueKey, approvalType: type, planVersion: job.plan?.planVersion, planHash: job.plan?.planHash, materialChangeHash: job.plan?.materialChangeHash || '', metadataScopeHash: job.metadataScope?.hash, orgRegistryId: job.orgContext?.orgRegistryId, salesforceOrganizationId: job.orgContext?.expectedOrgId, environment: job.orgContext?.environment, approverIdentity: req.actor.id, comments: sanitizeUntrustedText(req.body?.comments, 1000), approvalTimestamp: new Date().toISOString(), ...extra }; }
-function safeContext(context) { return { selectedOrgRegistryId: String(context?.selectedOrgRegistryId || ''), customerName: String(context?.customerName || ''), environment: String(context?.environment || '') }; }
+function safeContext() { return { selectedOrgRegistryId: '', customerName: '', environment: '' }; }
 function conflict(res, message) { return res.status(409).json({ error: { message } }); }
 function promptRequired(res) { return res.status(422).json({ error: { code: 'PROMPT_REQUIRED', message: 'Enter a Salesforce development request.' } }); }
 function jiraDisabled(res) { return res.status(409).json({ error: { code: 'JIRA_DISABLED', message: 'Jira workflows are disabled.' } }); }
 function errorHandler(error, req, res, _next) { req.log?.error({ err: error, code: error.code }, 'Request failed'); res.status(error.statusCode || 500).json({ error: { code: error.code || 'REQUEST_FAILED', message: error.message || 'Unexpected middleware error.' } }); }
 function canAccessJob(actor, job) { return actor?.role === 'admin' || job.userId === actor?.id; }
+function hasImplementationPermission(actor) { return actor?.canImplement === true || actor?.role === 'admin'; }
+function hasDeploymentPermission(actor) { return actor?.canDeploy === true || actor?.role === 'admin' || actor?.role === 'deployer'; }
 function isJiraSource(job) { return Boolean(job.jiraIssueKey || String(job.source || '').startsWith('jira-')); }
 function jobStoreRepository() {
   return {
