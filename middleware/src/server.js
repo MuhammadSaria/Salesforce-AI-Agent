@@ -17,6 +17,8 @@ import { latestApprovedApproval } from './domain/approval.js';
 import { approveSpecialistWorkItems, overallSpecialistStatus } from './services/orchestrator.js';
 import { WORK_ITEM_STATUSES } from './domain/specialistAgents.js';
 import { publicJob } from './services/jobPresentation.js';
+import { conversationService } from './services/conversationService.js';
+import { runtimeReadiness } from './services/runtimeHealth.js';
 
 export function createApp() {
   const app = express();
@@ -24,9 +26,17 @@ export function createApp() {
   app.use(cors({ origin: config.allowedOrigins.length ? config.allowedOrigins : false }));
   app.use(express.json({ limit: '64kb', verify: (req, res, buffer) => { req.rawBody = buffer; } }));
   app.use(pinoHttp({ logger }));
+  const conversations = conversationService({
+    repository: jobStoreRepository(),
+    enqueue: enqueueAgentJob
+  });
 
   app.get('/health', (req, res) => res.json({ ok: true }));
-  app.post('/api/webhooks/jira', jiraWebhook);
+  app.get('/ready', asyncRoute(async (req, res) => {
+    const readiness = await runtimeReadiness();
+    res.status(readiness.ready ? 200 : 503).json(readiness);
+  }));
+  if (config.jiraEnabled) app.post('/api/webhooks/jira', jiraWebhook);
   app.use('/api', requireApiAuth);
 
   app.get('/api/orgs', asyncRoute(async (req, res) => res.json({ orgs: await listPublicOrgs() })));
@@ -37,15 +47,14 @@ export function createApp() {
   }));
 
   app.post('/api/jobs', asyncRoute(async (req, res) => {
-    const prompt = sanitizePrompt(req.body?.prompt || `Analyze Jira issue ${req.body?.jiraIssueKey || ''}`, config.maxPromptLength);
-    const jiraIssueKey = normalizeIssueKey(req.body?.jiraIssueKey);
-    const job = await createJobRecord({ jobId: nanoid(), prompt, jiraIssueKey, source: jiraIssueKey ? 'jira-manual' : 'manual', orgId: String(req.body?.orgId || ''), userId: req.actor.id, context: safeContext(req.body?.context) });
-    await enqueueAgentJob({ jobId: job.jobId, action: 'analyze', actor: req.actor.id }, { jobId: `${job.jobId}:analyze:1` });
-    res.status(201).json({ jobId: job.jobId, status: job.status, message: 'Job accepted for supervised analysis.' });
+    const prompt = sanitizePrompt(req.body?.prompt, config.maxPromptLength).trim();
+    if (!prompt) return res.status(422).json({ error: { code: 'PROMPT_REQUIRED', message: 'Enter a requirement.' } });
+    const outcome = await conversations.start({ actor: req.actor, prompt, orgId: String(req.body?.orgId || ''), context: safeContext(req.body?.context) });
+    res.status(201).json(outcome);
   }));
 
   app.get('/api/jobs', asyncRoute(async (req, res) => {
-    const jobs = (await listJobRecords()).map(publicJob);
+    const jobs = (await listJobRecords()).filter((job) => canAccessJob(req.actor, job)).map(publicJob);
     res.json({ jobs });
   }));
   app.get('/api/jobs/:jobId', jobRoute((req, res, job) => res.json(publicJob(job))));
@@ -57,6 +66,13 @@ export function createApp() {
   app.get('/api/jobs/:jobId/work-items', jobRoute((req, res, job) => res.json({ overallStatus: overallSpecialistStatus(job.workItems || []), workItems: job.workItems || [] })));
   app.get('/api/jobs/:jobId/specialist-messages', jobRoute((req, res, job) => res.json({ messages: job.specialistMessages || [] })));
 
+  app.post('/api/jobs/:jobId/messages', jobRoute(async (req, res, job) => {
+    const text = sanitizeUntrustedText(req.body?.text, 4000).trim();
+    if (!text) return res.status(422).json({ error: { code: 'MESSAGE_REQUIRED', message: 'Enter a message.' } });
+    const outcome = await conversations.append({ job, actor: req.actor, text });
+    res.status(202).json(outcome);
+  }));
+
   app.post('/api/jobs/:jobId/select-org', requireRole('developer', 'deployer', 'admin'), jobRoute(async (req, res, job) => {
     const org = await getRegisteredOrg(String(req.body?.orgRegistryId || ''));
     if (!org) return res.status(422).json({ error: { message: 'Select an active org from the registry.' } });
@@ -66,6 +82,7 @@ export function createApp() {
   }));
 
   app.post('/api/jobs/:jobId/analyze', requireRole('developer', 'deployer', 'admin'), jobRoute(async (req, res, job) => {
+    if (job.source === 'salesforce-chat') return conflict(res, 'Direct Salesforce chat jobs continue through conversation messages.');
     if (![JOB_STATES.RECEIVED, JOB_STATES.PLAN_REJECTED, JOB_STATES.ORG_VERIFICATION_FAILED].includes(job.status)) return conflict(res, 'Job is not ready for analysis.');
     if (job.status === JOB_STATES.PLAN_REJECTED) await invalidateForPlanChange(job.jobId, req.actor.id);
     await enqueueAgentJob({ jobId: job.jobId, action: 'analyze', actor: req.actor.id }, { jobId: `${job.jobId}:analyze:${Date.now()}` });
@@ -140,9 +157,9 @@ export function createApp() {
     await enqueueAgentJob({ jobId: job.jobId, action: 'deploy', actor: req.actor.id }, { jobId: `${job.jobId}:deploy:${Date.now()}` });
     res.status(202).json({ jobId: job.jobId, message: 'Approved deployment queued.' });
   }));
-  app.post('/api/jobs/:jobId/cancel', requireRole('developer', 'deployer', 'admin'), jobRoute(async (req, res, job) => {
-    await transitionJob(job.jobId, JOB_STATES.CANCELLED, { actor: req.actor.id, reason: sanitizeUntrustedText(req.body?.reason, 500) || 'Cancelled by user.' });
-    res.json({ jobId: job.jobId, status: JOB_STATES.CANCELLED });
+  app.post('/api/jobs/:jobId/cancel', jobRoute(async (req, res, job) => {
+    const outcome = await conversations.cancel({ job, actor: req.actor, reason: sanitizeUntrustedText(req.body?.reason, 500).trim() });
+    res.json(outcome);
   }));
 
   app.use(errorHandler);
@@ -167,15 +184,23 @@ async function jiraWebhook(req, res, next) {
 }
 
 function queueAction(action, states) { return jobRoute(async (req, res, job) => { if (!states.includes(job.status)) return conflict(res, `Job is not ready to ${action}.`); await enqueueAgentJob({ jobId: job.jobId, action, actor: req.actor.id }, { jobId: `${job.jobId}:${action}:${Date.now()}` }); res.status(202).json({ jobId: job.jobId, message: `${action} queued.` }); }); }
-function jobRoute(handler) { return asyncRoute(async (req, res) => { const job = await getJobRecord(req.params.jobId); if (!job) return res.status(404).json({ error: { message: 'Job not found.' } }); return handler(req, res, job); }); }
+function jobRoute(handler) { return asyncRoute(async (req, res) => { const job = await getJobRecord(req.params.jobId); if (!job || !canAccessJob(req.actor, job)) return res.status(404).json({ error: { message: 'Job not found.' } }); return handler(req, res, job); }); }
 function asyncRoute(handler) { return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next); }
 function approvalRecord(job, req, type, extra) { return { approvalId: nanoid(), jobId: job.jobId, jiraIssueKey: job.jiraIssueKey, approvalType: type, planVersion: job.plan?.planVersion, planHash: job.plan?.planHash, materialChangeHash: job.plan?.materialChangeHash || '', metadataScopeHash: job.metadataScope?.hash, orgRegistryId: job.orgContext?.orgRegistryId, salesforceOrganizationId: job.orgContext?.expectedOrgId, environment: job.orgContext?.environment, approverIdentity: req.actor.id, comments: sanitizeUntrustedText(req.body?.comments, 1000), approvalTimestamp: new Date().toISOString(), ...extra }; }
 function safeContext(context) { return { selectedOrgRegistryId: String(context?.selectedOrgRegistryId || ''), customerName: String(context?.customerName || ''), environment: String(context?.environment || '') }; }
-function normalizeIssueKey(value) { const key = String(value || '').trim().toUpperCase(); if (key && !/^[A-Z][A-Z0-9_]{1,19}-[1-9][0-9]{0,9}$/.test(key)) throw Object.assign(new Error('Invalid Jira issue key.'), { statusCode: 422 }); return key; }
 function conflict(res, message) { return res.status(409).json({ error: { message } }); }
 function errorHandler(error, req, res, _next) { req.log?.error({ err: error, code: error.code }, 'Request failed'); res.status(error.statusCode || 500).json({ error: { code: error.code || 'REQUEST_FAILED', message: error.message || 'Unexpected middleware error.' } }); }
+function canAccessJob(actor, job) { return actor?.role === 'admin' || job.userId === actor?.id; }
+function jobStoreRepository() {
+  return {
+    create: createJobRecord,
+    appendConversation,
+    appendAudit,
+    transition: transitionJob
+  };
+}
 
 if (process.env.NODE_ENV !== 'test') createApp().listen(config.port, () => {
   logger.info({ port: config.port }, 'Agent middleware listening');
-  startJiraPoller();
+  if (config.jiraEnabled) startJiraPoller();
 });

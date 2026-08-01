@@ -22,12 +22,18 @@ import { SPECIALIST_AGENT_IDS, SPECIALIST_MESSAGE_TYPES, WORK_ITEM_STATUSES, imp
 export async function processAgentJob(message) {
   const job = await requiredJob(message.jobId);
   const actor = message.actor || 'system';
+  if (message.action === 'understand') return { jobId: job.jobId, status: job.status };
   if (message.action === 'sync-jira') {
+    assertJiraEnabled();
     const result = await syncJiraComments(job, actor);
     if (result.reanalysisRequired) return analyze(await requiredJob(job.jobId), actor);
     return result;
   }
-  if (message.action === 'analyze') return analyze(job, actor);
+  if (message.action === 'analyze') {
+    if (job.jiraIssueKey) assertJiraEnabled();
+    if (job.source === 'salesforce-chat') throw Object.assign(new Error('Direct Salesforce chat jobs do not use the legacy Jira analysis action.'), { statusCode: 409 });
+    return analyze(job, actor);
+  }
   if (message.action === 'implement') return implement(job, actor);
   if (message.action === 'validate') return validate(job, actor);
   if (message.action === 'deploy') return deploy(job, actor);
@@ -122,7 +128,7 @@ async function analyze(job, actor) {
     await transitionJob(job.jobId, JOB_STATES.AWAITING_PLAN_APPROVAL, { actor, reason: 'Versioned implementation plan generated.' });
   }
   await auditEvent({ ...auditOptions(job, actor), orgRegistryId: orgContext.orgRegistryId, salesforceOrgId: orgContext.expectedOrgId, environment: orgContext.environment, action: 'PLAN_GENERATED', result: 'success', safeMetadata: { planVersion: plan.planVersion, planHash: plan.planHash, metadataScopeHash: scope.hash } });
-  if (job.jiraIssueKey) {
+  if (config.jiraEnabled && job.jiraIssueKey) {
     try {
       await addJiraComment(job.jiraIssueKey, planReviewComment(job, plan, orgContext, Boolean(carriedApproval)));
     } catch (error) {
@@ -130,7 +136,7 @@ async function analyze(job, actor) {
     }
   }
   if (carriedApproval) return implement(await requiredJob(job.jobId), actor);
-  if (await activatePendingJiraRevision(job.jobId, actor)) return analyze(await requiredJob(job.jobId), actor);
+  if (await activatePendingJiraRevisionWhenEnabled(job.jobId, actor)) return analyze(await requiredJob(job.jobId), actor);
 }
 
 async function implement(job, actor) {
@@ -238,8 +244,8 @@ async function validate(job, actor) {
       await completeImplementationWorkItems(current.jobId);
       await transitionAgentWorkItem(current.jobId, SPECIALIST_AGENT_IDS.TESTING, WORK_ITEM_STATUSES.COMPLETED, validation.result);
       await transitionAgentWorkItem(current.jobId, SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT, WORK_ITEM_STATUSES.COMPLETED, validation.result);
-      await transitionAgentWorkItem(current.jobId, SPECIALIST_AGENT_IDS.DOCUMENTATION_EXPLANATION, WORK_ITEM_STATUSES.COMPLETED, 'The no-change completion result was consolidated for the user and Jira.');
-      if (current.jiraIssueKey) await addJiraComment(current.jiraIssueKey, noChangeCompletionComment(current, validation));
+      await transitionAgentWorkItem(current.jobId, SPECIALIST_AGENT_IDS.DOCUMENTATION_EXPLANATION, WORK_ITEM_STATUSES.COMPLETED, documentationSummary(current));
+      if (config.jiraEnabled && current.jiraIssueKey) await addJiraComment(current.jiraIssueKey, noChangeCompletionComment(current, validation));
       await transitionJob(current.jobId, JOB_STATES.COMPLETED, { actor, reason: 'Validation completed with no source changes; deployment was not required.' });
       return;
     }
@@ -252,7 +258,7 @@ async function validate(job, actor) {
       await transitionAgentWorkItem(current.jobId, SPECIALIST_AGENT_IDS.TESTING, WORK_ITEM_STATUSES.COMPLETED, validation.result);
       await transitionAgentWorkItem(current.jobId, SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT, WORK_ITEM_STATUSES.IMPLEMENTATION_COMPLETE, 'Structured data operations passed read-only validation. Deployment approval is still required.');
       await transitionJob(current.jobId, JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL, { actor, reason: 'Data operations validated; separate execution approval required.' });
-      if (await activatePendingJiraRevision(current.jobId, actor)) return analyze(await requiredJob(current.jobId), actor);
+      if (await activatePendingJiraRevisionWhenEnabled(current.jobId, actor)) return analyze(await requiredJob(current.jobId), actor);
       return;
     }
     const result = await runSfCommand('deployDryRun', { manifest: current.manifest }, { ...sfOptions(current, current.orgContext, paths, actor, current.metadataScope), cwd: implementationProject });
@@ -266,7 +272,7 @@ async function validate(job, actor) {
     await transitionAgentWorkItem(current.jobId, SPECIALIST_AGENT_IDS.TESTING, WORK_ITEM_STATUSES.COMPLETED, 'The combined solution passed the selected Salesforce validation and regression checks.');
     await transitionAgentWorkItem(current.jobId, SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT, WORK_ITEM_STATUSES.IMPLEMENTATION_COMPLETE, 'The minimal package passed validation against the verified target org. Deployment approval is still required.');
     await transitionJob(current.jobId, JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL, { actor, reason: 'Validation passed.' });
-    if (await activatePendingJiraRevision(current.jobId, actor)) return analyze(await requiredJob(current.jobId), actor);
+    if (await activatePendingJiraRevisionWhenEnabled(current.jobId, actor)) return analyze(await requiredJob(current.jobId), actor);
   } catch (error) {
     await updateJob(job.jobId, { validation: { status: 'FAILED', error: error.message, failureReason: humanizeValidationFailure(error.message), timestamp: new Date().toISOString() } });
     await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.TESTING, WORK_ITEM_STATUSES.CHANGES_REQUIRED, humanizeValidationFailure(error.message));
@@ -282,7 +288,7 @@ async function validate(job, actor) {
       await auditEvent(specialistAuditEvent(current, validationItem, 'SPECIALIST_VALIDATION_FAILED', 'failed', { failureReason: humanizeValidationFailure(error.message) }));
     }
     await transitionJob(job.jobId, JOB_STATES.VALIDATION_FAILED, { actor, reason: 'Validation failed.', error: error.message });
-    if (await activatePendingJiraRevision(job.jobId, actor)) return analyze(await requiredJob(job.jobId), actor);
+    if (await activatePendingJiraRevisionWhenEnabled(job.jobId, actor)) return analyze(await requiredJob(job.jobId), actor);
   }
 }
 
@@ -326,9 +332,9 @@ async function deploy(job, actor) {
   await updateJob(job.jobId, { deployment: finalDeployment });
   await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT, WORK_ITEM_STATUSES.COMPLETED, componentSummary.summary);
   await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.DOCUMENTATION_EXPLANATION, WORK_ITEM_STATUSES.COMPLETED, 'Implementation, validation, and deployment results were consolidated into one human-readable summary.');
-  if (job.jiraIssueKey) await addJiraComment(job.jiraIssueKey, completionComment(job, finalDeployment));
-  await transitionJob(job.jobId, JOB_STATES.COMPLETED, { actor, reason: dataOperations.length ? 'Approved record operations executed and Jira updated.' : 'Approved package deployed and Jira updated.', approvalId: approval.approvalId });
-  if (await activatePendingJiraRevision(job.jobId, actor)) return analyze(await requiredJob(job.jobId), actor);
+  if (config.jiraEnabled && job.jiraIssueKey) await addJiraComment(job.jiraIssueKey, completionComment(job, finalDeployment));
+  await transitionJob(job.jobId, JOB_STATES.COMPLETED, { actor, reason: dataOperations.length ? completionReason('Approved record operations executed.', job) : completionReason('Approved package deployed.', job), approvalId: approval.approvalId });
+  if (await activatePendingJiraRevisionWhenEnabled(job.jobId, actor)) return analyze(await requiredJob(job.jobId), actor);
 }
 
 function validApproval(job, type) {
@@ -352,6 +358,10 @@ function assertDeploymentGuard(job, approval) {
 }
 
 function assertState(job, ...states) { if (!states.includes(job.status)) throw Object.assign(new Error(`Job must be in ${states.join(' or ')}.`), { statusCode: 409 }); }
+function assertJiraEnabled() { if (!config.jiraEnabled) throw Object.assign(new Error('Jira worker actions are disabled.'), { statusCode: 409 }); }
+async function activatePendingJiraRevisionWhenEnabled(jobId, actor) { return config.jiraEnabled && activatePendingJiraRevision(jobId, actor); }
+function completionReason(base, job) { return config.jiraEnabled && job.jiraIssueKey ? `${base} Jira updated.` : base; }
+function documentationSummary(job) { return config.jiraEnabled && job.jiraIssueKey ? 'The no-change completion result was consolidated for the user and Jira.' : 'The no-change completion result was consolidated for the user.'; }
 function auditOptions(job, actor) { return { jobId: job.jobId, jiraIssueKey: job.jiraIssueKey, actor }; }
 function sfOptions(job, orgContext, paths, actor, scope, approved = false) { return { ...auditOptions(job, actor), orgContext, jobPaths: paths, metadataScope: scope, approved }; }
 async function requiredJob(jobId) { const job = await getJobRecord(jobId); if (!job) throw Object.assign(new Error('Job not found.'), { statusCode: 404 }); return job; }

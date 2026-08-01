@@ -2,7 +2,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { config } from '../config.js';
 import { loadOrgRegistry } from '../services/orgRegistry.js';
 
-const TRUSTED_ROLES = new Set(['developer', 'deployer', 'admin']);
+const TRUSTED_ROLES = new Set(['viewer', 'developer', 'deployer', 'admin']);
 
 export async function requireApiAuth(req, res, next) {
   if (config.nodeEnv === 'test' && !config.apiAuthToken) {

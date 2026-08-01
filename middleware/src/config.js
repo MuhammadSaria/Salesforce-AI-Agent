@@ -11,6 +11,7 @@ export const config = {
   apiAuthToken: process.env.MIDDLEWARE_API_TOKEN || '',
   allowedOrigins: String(process.env.ALLOWED_ORIGINS || '').split(',').map((value) => value.trim()).filter(Boolean),
   jiraBaseUrl: process.env.JIRA_BASE_URL || '',
+  jiraEnabled: process.env.JIRA_ENABLED === 'true',
   jiraEmail: process.env.JIRA_EMAIL || '',
   jiraApiToken: process.env.JIRA_API_TOKEN || '',
   jiraAgentAccountId: process.env.JIRA_AGENT_ACCOUNT_ID || '',

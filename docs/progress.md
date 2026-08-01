@@ -13,9 +13,21 @@
 ## Current Task
 
 - Task: Phase 1 Task 3
-- Status: Not started
+- Status: Complete
 
 ## Completed Tasks
+
+- Phase 1 Task 3: Introduce direct conversation APIs and isolate Jira
+  - Commit: pending
+  - Verification date: 2026-08-01
+  - Verification:
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/conversationApi.test.js test/runtimeHealth.test.js` - RED first, failed for expected missing/direct-chat/Jira-readiness reasons.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/conversationApi.test.js test/apiAuth.test.js test/security.test.js test/runtimeHealth.test.js` - PASS, 27 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 92 passing tests and 0 skipped.
+  - Review:
+    - New manual jobs use `source: salesforce-chat`, ignore Jira issue keys, and cannot enter the legacy Jira analyze path.
+    - Jira webhook registration, poller startup, readiness checks, Jira comments, Jira revision activation, and Jira sync worker actions are gated by `JIRA_ENABLED=true`; default is false.
+    - Owner/admin access isolation is enforced for job reads, conversation messages, and cancellation; approval routes remain role-gated.
 
 - Phase 1 Task 2: Add durable PostgreSQL job persistence
   - Implementation commit: e0eadeac118cee6a7c498d57f7813741b345520f

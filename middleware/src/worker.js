@@ -12,6 +12,10 @@ if (config.queueDriver !== 'redis') {
   process.exit(0);
 }
 
+if (!config.jiraEnabled) {
+  logger.info('Jira worker actions are disabled because JIRA_ENABLED is not true.');
+}
+
 const worker = new Worker(
   AGENT_QUEUE_NAME,
   async (queueJob) => {
