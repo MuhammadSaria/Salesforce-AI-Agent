@@ -5,6 +5,7 @@ import { config } from '../config.js';
 import { redactSecrets } from '../utils/sanitize.js';
 import { isPathInside } from '../utils/paths.js';
 import { auditSalesforceOperation } from './auditLog.js';
+import { assertTrustedOrgContext } from './orgContextTrust.js';
 
 const COMMANDS = {
   writeMetadataFile: {
@@ -140,6 +141,7 @@ export async function runSfCommand(command, params = {}, options = {}) {
   if (!orgContext?.salesforceAlias || !orgContext?.expectedOrgId) {
     throw new Error('A verified Salesforce org context is required before running Salesforce commands.');
   }
+  assertTrustedOrgContext(orgContext);
   assertNonProductionOrgContext(orgContext);
 
   if (definition.requiresApproval && !options.approved) {
@@ -276,6 +278,7 @@ function resolveMetadataPath(path) {
 }
 
 export async function verifySelectedOrg(orgContext, options = {}) {
+  assertTrustedOrgContext(orgContext);
   assertNonProductionOrgContext(orgContext);
   const started = new Date().toISOString();
   const result = await executeSf(['org', 'display', '--target-org', orgContext.salesforceAlias, '--json'], config.sfCommandTimeoutMs);
@@ -295,8 +298,8 @@ export async function verifySelectedOrg(orgContext, options = {}) {
     !connected ||
     normalizeOrgId(actualOrgId) !== normalizeOrgId(orgContext.expectedOrgId) ||
     (actualAlias && actualAlias !== orgContext.salesforceAlias) ||
-    (orgContext.instanceUrl && actualInstanceUrl && normalizeUrl(actualInstanceUrl) !== normalizeUrl(orgContext.instanceUrl)) ||
-    (orgContext.expectedUsername && actualUsername.toLowerCase() !== orgContext.expectedUsername.toLowerCase()) ||
+    (!orgContext.instanceUrl || !actualInstanceUrl || normalizeUrl(actualInstanceUrl) !== normalizeUrl(orgContext.instanceUrl)) ||
+    (!orgContext.expectedUsername || !actualUsername || actualUsername.toLowerCase() !== orgContext.expectedUsername.toLowerCase()) ||
     environmentMismatch;
 
   await auditSalesforceOperation({
@@ -407,7 +410,8 @@ function parseSfJson(stdout) {
 }
 
 function normalizeOrgId(value) {
-  return String(value || '').trim().slice(0, 15).toUpperCase();
+  const text = String(value || '').trim();
+  return /^[A-Za-z0-9]{15}(?:[A-Za-z0-9]{3})?$/.test(text) ? text.slice(0, 15).toUpperCase() : '';
 }
 
 function normalizeUrl(value) {

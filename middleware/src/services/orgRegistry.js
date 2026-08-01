@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { config } from '../config.js';
 import { isPathInside } from '../utils/paths.js';
+import { trustOrgContext } from './orgContextTrust.js';
 
 const VALID_ENVIRONMENTS = new Set(['developer', 'scratch', 'sandbox', 'partial-copy', 'full-copy', 'production']);
 let cachedRegistry;
@@ -99,7 +100,7 @@ export async function getRegisteredOrg(orgRegistryId) {
 }
 
 export function buildOrgContext(selection, job) {
-  return {
+  return trustOrgContext({
     orgRegistryId: selection.org.id,
     salesforceAlias: selection.org.salesforceAlias,
     expectedOrgId: selection.org.expectedOrgId,
@@ -122,7 +123,7 @@ export function buildOrgContext(selection, job) {
     selectionSource: selection.source,
     selectionTimestamp: new Date().toISOString(),
     selectingUser: job.userId || job.context?.username || 'system'
-  };
+  });
 }
 
 export function publicOrgOption(org) {

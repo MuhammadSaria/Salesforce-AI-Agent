@@ -66,12 +66,12 @@ private class AgentControllerTest {
             lastEndpoint = request.getEndpoint();
             System.assert(request.getEndpoint().startsWith('callout:Agent_Middleware/api/'));
             System.assertEquals('true', request.getHeader('ngrok-skip-browser-warning'));
-            System.assertNotEquals(null, request.getHeader('X-Agent-User-Id'));
-            System.assertNotEquals(null, request.getHeader('X-Agent-Org-Id'));
+            System.assertEquals(UserInfo.getUserId(), request.getHeader('X-Agent-User-Id'));
+            System.assertEquals(UserInfo.getOrganizationId(), request.getHeader('X-Agent-Org-Id'));
             System.assertEquals('Salesforce-Apex', request.getHeader('X-Agent-Source'));
             System.assertNotEquals(null, request.getHeader('X-Agent-Role'));
-            System.assertNotEquals(null, request.getHeader('X-Agent-Can-Implement'));
-            System.assertNotEquals(null, request.getHeader('X-Agent-Can-Deploy'));
+            System.assertEquals(String.valueOf(FeatureManagement.checkPermission('AI_Agent_Admin')), request.getHeader('X-Agent-Can-Implement'));
+            System.assertEquals(String.valueOf(FeatureManagement.checkPermission('AI_Agent_Deploy')), request.getHeader('X-Agent-Can-Deploy'));
             HttpResponse response = new HttpResponse(); response.setStatusCode(statusCode); response.setBody(body); return response;
         }
     }

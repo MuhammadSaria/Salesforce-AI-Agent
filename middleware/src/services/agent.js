@@ -11,6 +11,7 @@ import { ensureJobWorkspace, writeOrgContext } from './jobWorkspace.js';
 import { addJiraComment, getJiraIssue } from './jira.js';
 import { analyzeDependencies, buildMetadataScope, buildPlan, expandScopeForFileOperations, extractRequirement, writeManifest } from './planning.js';
 import { runSfCommand, verifySelectedOrg } from './sfExecutor.js';
+import { resolveSameOrg } from './sameOrgService.js';
 import { runGit } from './gitExecutor.js';
 import { enrichPlanWithCodex } from './codexExecutor.js';
 import { latestApprovedApproval } from '../domain/approval.js';
@@ -18,6 +19,12 @@ import { humanizeValidationFailure } from '../utils/validationFailure.js';
 import { activatePendingJiraRevision, syncJiraComments } from './jiraSync.js';
 import { approveSpecialistWorkItems, buildSpecialistOrchestration, specialistAuditEvent, structuredSpecialistMessage, workItemForFile } from './orchestrator.js';
 import { SPECIALIST_AGENT_IDS, SPECIALIST_MESSAGE_TYPES, WORK_ITEM_STATUSES, implementationAgentIds, ownerForMetadataType } from '../domain/specialistAgents.js';
+
+let sameOrgResolver = resolveSameOrg;
+
+export function setSameOrgResolverForTest(resolver) {
+  sameOrgResolver = resolver || resolveSameOrg;
+}
 
 export async function processAgentJob(message) {
   const job = await requiredJob(message.jobId);
@@ -141,6 +148,7 @@ async function analyze(job, actor) {
 }
 
 async function implement(job, actor) {
+  job = await reResolveDirectOrgContext(job, actor);
   assertState(job, JOB_STATES.IMPLEMENTING, JOB_STATES.VALIDATION_FAILED);
   const approval = validApproval(job, 'IMPLEMENTATION');
   if (job.status === JOB_STATES.VALIDATION_FAILED) {
@@ -222,6 +230,7 @@ async function implement(job, actor) {
 }
 
 async function validate(job, actor) {
+  job = await reResolveDirectOrgContext(job, actor);
   assertState(job, JOB_STATES.IMPLEMENTING, JOB_STATES.VALIDATION_FAILED);
   validApproval(job, 'IMPLEMENTATION');
   await transitionJob(job.jobId, JOB_STATES.VALIDATING, { actor, reason: 'Validation requested.' });
@@ -294,6 +303,7 @@ async function validate(job, actor) {
 }
 
 async function deploy(job, actor) {
+  job = await reResolveDirectOrgContext(job, actor);
   assertState(job, JOB_STATES.DEPLOYING);
   const approval = validApproval(job, 'DEPLOYMENT');
   assertDeploymentGuard(job, approval);
@@ -359,6 +369,12 @@ function assertDeploymentGuard(job, approval) {
 }
 
 function assertState(job, ...states) { if (!states.includes(job.status)) throw Object.assign(new Error(`Job must be in ${states.join(' or ')}.`), { statusCode: 409 }); }
+async function reResolveDirectOrgContext(job, actor) {
+  if (job.source !== 'salesforce-chat') return job;
+  const orgContext = await sameOrgResolver({ authenticatedOrgId: job.orgId, actorId: actor });
+  await updateJob(job.jobId, { orgContext });
+  return { ...job, orgContext };
+}
 function assertJiraEnabled() { if (!config.jiraEnabled) throw jiraDisabledError(); }
 function assertJiraActionAllowed(job) { if (!config.jiraEnabled && isJiraSource(job)) throw jiraDisabledError(); }
 function isJiraSource(job) { return Boolean(job.jiraIssueKey || String(job.source || '').startsWith('jira-')); }

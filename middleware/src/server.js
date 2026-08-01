@@ -8,7 +8,7 @@ import { logger } from './logger.js';
 import { enqueueAgentJob } from './queue/agentQueue.js';
 import { appendAudit, appendConversation, createJobRecord, getJobRecord, invalidateForOrgChange, invalidateForPlanChange, listJobRecords, transitionJob, updateJob } from './services/jobStore.js';
 import { sanitizePrompt, sanitizeUntrustedText } from './utils/sanitize.js';
-import { requireApiAuth, requireRole } from './middleware/auth.js';
+import { requireApiAuth, requireRole, requireSalesforceClaims } from './middleware/auth.js';
 import { getRegisteredOrg, listPublicOrgs } from './services/orgRegistry.js';
 import { claimWebhookEvent, parseJiraWebhook, verifyJiraWebhook } from './services/jira.js';
 import { JOB_STATES } from './domain/jobState.js';
@@ -19,9 +19,11 @@ import { WORK_ITEM_STATUSES } from './domain/specialistAgents.js';
 import { publicJob } from './services/jobPresentation.js';
 import { conversationService } from './services/conversationService.js';
 import { runtimeReadiness } from './services/runtimeHealth.js';
+import { resolveSameOrg } from './services/sameOrgService.js';
 
-export function createApp() {
+export function createApp(options = {}) {
   const app = express();
+  const sameOrgResolver = options.resolveSameOrg || resolveSameOrg;
   app.use(helmet());
   app.use(cors({ origin: config.allowedOrigins.length ? config.allowedOrigins : false }));
   app.use(express.json({ limit: '64kb', verify: (req, res, buffer) => { req.rawBody = buffer; } }));
@@ -46,10 +48,14 @@ export function createApp() {
     res.json({ org: { orgRegistryId: org.id, displayName: org.displayName, customerName: org.customerName, environment: org.environment, expectedOrgId: org.expectedOrgId, instanceUrl: org.instanceUrl, deploymentPermission: org.deploymentPermission, productionApprovalRequired: org.productionApprovalRequired } });
   }));
 
-  app.post('/api/jobs', asyncRoute(async (req, res) => {
+  app.post('/api/jobs', requireDirectSalesforceClaims, asyncRoute(async (req, res) => {
     if (!String(req.body?.prompt || '').trim()) return promptRequired(res);
     const prompt = sanitizePrompt(req.body.prompt, config.maxPromptLength).trim();
+    const orgContext = req.actor.authMethod === 'test-bypass' && !req.actor.orgId
+      ? null
+      : await sameOrgResolver({ authenticatedOrgId: req.actor.orgId, actorId: req.actor.id });
     const outcome = await conversations.start({ actor: req.actor, prompt, orgId: req.actor?.orgId || '', context: safeContext() });
+    if (orgContext) await updateJob(outcome.jobId, { orgContext });
     res.status(201).json(outcome);
   }));
 
@@ -187,6 +193,7 @@ async function jiraWebhook(req, res, next) {
 }
 
 function queueAction(action, states) { return mutableJobRoute(async (req, res, job) => { if (!states.includes(job.status)) return conflict(res, `Job is not ready to ${action}.`); await enqueueAgentJob({ jobId: job.jobId, action, actor: req.actor.id }, { jobId: `${job.jobId}:${action}:${Date.now()}` }); res.status(202).json({ jobId: job.jobId, message: `${action} queued.` }); }); }
+function requireDirectSalesforceClaims(req, res, next) { return req.actor?.authMethod === 'test-bypass' && !req.get('x-agent-source') ? next() : requireSalesforceClaims(req, res, next); }
 function requireImplementationPermission(req, res, next) { return hasImplementationPermission(req.actor) ? next() : res.status(403).json({ error: { code: 'FORBIDDEN', message: 'This action is not permitted.' } }); }
 function requireDeploymentPermission(req, res, next) { return hasDeploymentPermission(req.actor) ? next() : res.status(403).json({ error: { code: 'FORBIDDEN', message: 'This action is not permitted.' } }); }
 function jobRoute(handler) { return asyncRoute(async (req, res) => { const job = await getJobRecord(req.params.jobId); if (!job || !canAccessJob(req.actor, job)) return res.status(404).json({ error: { message: 'Job not found.' } }); return handler(req, res, job); }); }
@@ -199,8 +206,8 @@ function promptRequired(res) { return res.status(422).json({ error: { code: 'PRO
 function jiraDisabled(res) { return res.status(409).json({ error: { code: 'JIRA_DISABLED', message: 'Jira workflows are disabled.' } }); }
 function errorHandler(error, req, res, _next) { req.log?.error({ err: error, code: error.code }, 'Request failed'); res.status(error.statusCode || 500).json({ error: { code: error.code || 'REQUEST_FAILED', message: error.message || 'Unexpected middleware error.' } }); }
 function canAccessJob(actor, job) { return actor?.role === 'admin' || job.userId === actor?.id; }
-function hasImplementationPermission(actor) { return actor?.canImplement === true || actor?.role === 'admin'; }
-function hasDeploymentPermission(actor) { return actor?.canDeploy === true || actor?.role === 'admin' || actor?.role === 'deployer'; }
+function hasImplementationPermission(actor) { return actor?.canImplement === true || (actor?.authMethod !== 'salesforce-apex' && actor?.role === 'admin'); }
+function hasDeploymentPermission(actor) { return actor?.canDeploy === true || (actor?.authMethod !== 'salesforce-apex' && (actor?.role === 'admin' || actor?.role === 'deployer')); }
 function isJiraSource(job) { return Boolean(job.jiraIssueKey || String(job.source || '').startsWith('jira-')); }
 function jobStoreRepository() {
   return {

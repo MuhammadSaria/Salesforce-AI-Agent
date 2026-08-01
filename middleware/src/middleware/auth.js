@@ -1,10 +1,10 @@
 import { timingSafeEqual } from 'node:crypto';
 import { config } from '../config.js';
-import { loadOrgRegistry } from '../services/orgRegistry.js';
 
 export async function requireApiAuth(req, res, next) {
   if (config.nodeEnv === 'test' && !config.apiAuthToken) {
     req.actor = actorFromHeaders(req);
+    req.actor.authMethod = 'test-bypass';
     next();
     return;
   }
@@ -12,18 +12,21 @@ export async function requireApiAuth(req, res, next) {
   const bearer = String(req.get('authorization') || '').replace(/^Bearer\s+/i, '');
   if (config.apiAuthToken && safeEqual(bearer, config.apiAuthToken)) {
     req.actor = actorFromHeaders(req);
-    next();
-    return;
-  }
-
-  if (await isTrustedSalesforceContext(req)) {
-    req.actor = actorFromHeaders(req);
-    req.actor.authMethod = 'salesforce-apex';
+    req.actor.authMethod = 'bearer-token';
     next();
     return;
   }
 
   res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Authentication required.' } });
+}
+
+export function requireSalesforceClaims(req, res, next) {
+  try {
+    req.actor = salesforceActorFromHeaders(req);
+    next();
+  } catch (error) {
+    res.status(401).json({ error: { code: 'UNAUTHORIZED', message: error.message } });
+  }
 }
 
 export function requireRole(...roles) {
@@ -37,16 +40,39 @@ export function requireRole(...roles) {
 }
 
 function actorFromHeaders(req) {
-  const canImplement = headerBoolean(req.get('x-agent-can-implement'));
-  const canDeploy = headerBoolean(req.get('x-agent-can-deploy'));
-  const source = String(req.get('x-agent-source') || '').trim().toLowerCase();
-  const headerRole = String(req.get('x-agent-role') || '').toLowerCase();
+  if (String(req.get('x-agent-source') || '').trim().toLowerCase() === 'salesforce-apex') {
+    try {
+      return salesforceActorFromHeaders(req);
+    } catch {
+      return { id: 'salesforce-user', role: 'developer', canImplement: false, canDeploy: false, orgId: '' };
+    }
+  }
   return {
     id: String(req.get('x-agent-user-id') || 'salesforce-user').slice(0, 80),
-    orgId: normalizeOrgId(req.get('x-agent-org-id')),
+    orgId: '',
+    canImplement: false,
+    canDeploy: false,
+    role: String(req.get('x-agent-role') || 'developer').toLowerCase()
+  };
+}
+
+function salesforceActorFromHeaders(req) {
+  const source = String(req.get('x-agent-source') || '').trim().toLowerCase();
+  if (source !== 'salesforce-apex') throw new Error('Salesforce Apex source header is required.');
+  const userId = requireSalesforceId(req.get('x-agent-user-id'), 'Salesforce user ID');
+  const orgId = requireSalesforceOrgId(req.get('x-agent-org-id'));
+  const canImplement = headerBoolean(req.get('x-agent-can-implement'));
+  const canDeploy = headerBoolean(req.get('x-agent-can-deploy'));
+  if (!isBooleanHeader(req.get('x-agent-can-implement')) || !isBooleanHeader(req.get('x-agent-can-deploy'))) {
+    throw new Error('Salesforce permission claim headers are required.');
+  }
+  return {
+    id: userId,
+    orgId,
     canImplement,
     canDeploy,
-    role: canImplement ? 'admin' : (canDeploy ? 'deployer' : (source === 'salesforce-apex' ? 'developer' : (headerRole || 'developer')))
+    role: 'developer',
+    authMethod: 'salesforce-apex'
   };
 }
 
@@ -56,29 +82,24 @@ function safeEqual(left, right) {
   return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
 }
 
-async function isTrustedSalesforceContext(req) {
-  const source = String(req.get('x-agent-source') || '').trim().toLowerCase();
-  const orgId = normalizeOrgId(req.get('x-agent-org-id'));
-  const userId = String(req.get('x-agent-user-id') || '').trim();
-  const canImplement = req.get('x-agent-can-implement');
-  const canDeploy = req.get('x-agent-can-deploy');
-  if (source !== 'salesforce-apex' || !orgId || !userId || !isBooleanHeader(canImplement) || !isBooleanHeader(canDeploy)) {
-    return false;
-  }
-
-  const registry = await loadOrgRegistry().catch(() => null);
-  if (!registry) return false;
-  return registry.orgs.some((org) => org.active && org.authenticationStatus === 'connected' && normalizeOrgId(org.expectedOrgId) === orgId);
-}
-
-function normalizeOrgId(value) {
-  return String(value || '').trim().slice(0, 15).toUpperCase();
-}
-
 function headerBoolean(value) {
   return String(value || '').trim().toLowerCase() === 'true';
 }
 
 function isBooleanHeader(value) {
   return ['true', 'false'].includes(String(value || '').trim().toLowerCase());
+}
+
+function requireSalesforceOrgId(value) {
+  const id = requireSalesforceId(value, 'Salesforce org ID');
+  if (!id.startsWith('00D')) throw new Error('Salesforce org ID header is malformed.');
+  return id;
+}
+
+function requireSalesforceId(value, label) {
+  const text = String(value || '');
+  if (text !== text.trim() || !/^[A-Za-z0-9]{15}(?:[A-Za-z0-9]{3})?$/.test(text.trim())) {
+    throw new Error(`${label} header is malformed.`);
+  }
+  return text.trim();
 }

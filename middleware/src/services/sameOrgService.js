@@ -1,5 +1,9 @@
+import { URL } from 'node:url';
 import { loadOrgRegistry } from './orgRegistry.js';
 import { verifySelectedOrg } from './sfExecutor.js';
+import { isTrustedOrgContext, trustOrgContext } from './orgContextTrust.js';
+
+export { isTrustedOrgContext };
 
 const PUBLIC_CONTEXT_FIELDS = [
   'orgRegistryId',
@@ -30,10 +34,11 @@ export async function resolveSameOrg({
   registryOrgs,
   observed
 }) {
-  if (!authenticatedOrgId) {
+  const normalizedAuthenticatedOrgId = requireSalesforceOrgId(authenticatedOrgId, 'Authenticated Salesforce org ID');
+  if (!normalizedAuthenticatedOrgId) {
     throw sameSandboxError('Authenticated Salesforce org ID is required.');
   }
-  if (requestedOrgId && normalizeOrgId(requestedOrgId) !== normalizeOrgId(authenticatedOrgId)) {
+  if (requestedOrgId && requireSalesforceOrgId(requestedOrgId, 'Requested Salesforce org ID') !== normalizedAuthenticatedOrgId) {
     throw sameSandboxError('Requested org IDs cannot select another Salesforce sandbox.');
   }
 
@@ -41,7 +46,7 @@ export async function resolveSameOrg({
   const matches = orgs.filter((org) =>
     org.active &&
     org.authenticationStatus === 'connected' &&
-    normalizeOrgId(org.expectedOrgId) === normalizeOrgId(authenticatedOrgId)
+    requireSalesforceOrgId(org.expectedOrgId, 'Registry Salesforce org ID') === normalizedAuthenticatedOrgId
   );
   if (matches.length !== 1) {
     throw sameSandboxError('Expected exactly one active registry entry for the authenticated same Salesforce sandbox.');
@@ -51,12 +56,12 @@ export async function resolveSameOrg({
   }
 
   const orgContext = publicContext(matches[0], actorId);
-  const verificationContext = { ...orgContext, expectedUsername: matches[0].expectedUsername };
+  const verificationContext = trustOrgContext({ ...orgContext, expectedUsername: matches[0].expectedUsername });
   const verified = observed
     ? assertSameVerifiedOrg(verificationContext, observed)
     : await verifySelectedOrg(verificationContext, { actor: actorId });
 
-  return Object.freeze({ ...orgContext, verified: Object.freeze(verified) });
+  return trustOrgContext(deepFreeze({ ...orgContext, verified }));
 }
 
 export function assertSameVerifiedOrg(orgContext, observed) {
@@ -66,16 +71,22 @@ export function assertSameVerifiedOrg(orgContext, observed) {
   if (String(orgContext.environment || '').toLowerCase() === 'production' || orgContext.productionApprovalRequired === true) {
     throw sameSandboxError('Production Salesforce orgs are not allowed in Phase 1.');
   }
+  const expectedOrgId = requireSalesforceOrgId(orgContext.expectedOrgId, 'Configured Salesforce org ID');
+  const observedOrgId = requireSalesforceOrgId(observed?.organizationId || observed?.orgId || observed?.id, 'Observed Salesforce org ID');
+  const expectedInstanceUrl = requireString(orgContext.instanceUrl, 'Configured instance URL');
+  const observedInstanceUrl = requireString(observed?.instanceUrl, 'Observed instance URL');
+  const expectedUsername = requireString(orgContext.expectedUsername, 'Configured username');
+  const observedUsername = requireString(observed?.username, 'Observed username');
   if (!observed?.connected) {
     throw sameSandboxError('Salesforce CLI org must be connected.');
   }
-  if (normalizeOrgId(observed.organizationId || observed.orgId || observed.id) !== normalizeOrgId(orgContext.expectedOrgId)) {
+  if (observedOrgId !== expectedOrgId) {
     throw sameSandboxError('Salesforce organization ID does not match the authenticated same Salesforce sandbox.');
   }
-  if (orgContext.instanceUrl && observed.instanceUrl && normalizeUrl(orgContext.instanceUrl) !== normalizeUrl(observed.instanceUrl)) {
+  if (normalizeUrl(expectedInstanceUrl) !== normalizeUrl(observedInstanceUrl)) {
     throw sameSandboxError('Salesforce instance URL does not match the authenticated same Salesforce sandbox.');
   }
-  if (orgContext.expectedUsername && observed.username && String(orgContext.expectedUsername).toLowerCase() !== String(observed.username).toLowerCase()) {
+  if (expectedUsername.toLowerCase() !== observedUsername.toLowerCase()) {
     throw sameSandboxError('Salesforce username does not match the configured integration user.');
   }
   if (observed.isProduction === true || observed.environment === 'production') {
@@ -85,10 +96,10 @@ export function assertSameVerifiedOrg(orgContext, observed) {
     throw sameSandboxError('Salesforce CLI org must be a non-production sandbox.');
   }
 
-  return Object.freeze({
-    organizationId: observed.organizationId || observed.orgId || observed.id,
-    instanceUrl: observed.instanceUrl,
-    username: observed.username,
+  return deepFreeze({
+    organizationId: observedOrgId,
+    instanceUrl: observedInstanceUrl,
+    username: observedUsername,
     connected: true,
     environment: orgContext.environment,
     verifiedAt: observed.verifiedAt || new Date().toISOString()
@@ -119,7 +130,7 @@ function publicContext(org, actorId) {
     selectionTimestamp: new Date().toISOString(),
     selectingUser: actorId || 'system'
   };
-  return Object.freeze(Object.fromEntries(PUBLIC_CONTEXT_FIELDS.concat(['selectionSource', 'selectionTimestamp', 'selectingUser'])
+  return deepFreeze(Object.fromEntries(PUBLIC_CONTEXT_FIELDS.concat(['selectionSource', 'selectionTimestamp', 'selectingUser'])
     .map((field) => [field, context[field]])));
 }
 
@@ -130,10 +141,34 @@ function sameSandboxError(message) {
   return error;
 }
 
-function normalizeOrgId(value) {
-  return String(value || '').trim().slice(0, 15).toUpperCase();
+function requireSalesforceOrgId(value, label) {
+  const text = String(value || '');
+  if (text !== text.trim() || !/^[A-Za-z0-9]{15}(?:[A-Za-z0-9]{3})?$/.test(text.trim()) || !text.trim().startsWith('00D')) {
+    throw sameSandboxError(`${label} must be a valid Salesforce org ID.`);
+  }
+  return text.trim();
 }
 
 function normalizeUrl(value) {
-  return String(value || '').trim().replace(/\/$/, '').toLowerCase();
+  try {
+    const parsed = new URL(String(value || '').trim());
+    parsed.hash = '';
+    parsed.search = '';
+    parsed.pathname = parsed.pathname.replace(/\/+$/, '');
+    return parsed.toString().replace(/\/$/, '').toLowerCase();
+  } catch {
+    throw sameSandboxError('Salesforce instance URL is invalid.');
+  }
+}
+
+function requireString(value, label) {
+  const text = String(value || '').trim();
+  if (!text) throw sameSandboxError(`${label} is required.`);
+  return text;
+}
+
+function deepFreeze(value) {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value)) deepFreeze(child);
+  return Object.freeze(value);
 }
