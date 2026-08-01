@@ -19,6 +19,7 @@
 
 - Phase 1 Task 2: Add durable PostgreSQL job persistence
   - Implementation commit: e0eadeac118cee6a7c498d57f7813741b345520f
+  - Verification/fix commit: 822ac011f13976d96c5ec93535680906595ba02d
   - Verification date: 2026-08-01
   - Verification:
     - `cd middleware && docker compose ps` - PASS, `middleware-postgres-1` running and publishing `5432`.
