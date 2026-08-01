@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { config } from '../src/config.js';
 import { createApp } from '../src/server.js';
-import { createJobRecord, updateJob } from '../src/services/jobStore.js';
+import { createJobRecord, getJobRecord, updateJob } from '../src/services/jobStore.js';
 
 const promptRequired = {
   error: {
@@ -185,6 +185,83 @@ test('generic action routes reject Jira-source jobs when Jira is disabled', asyn
   assert.equal(deployment.body.error.code, 'JIRA_DISABLED');
 });
 
+test('Jira-source messages are immutable when Jira is disabled', async (t) => {
+  const { base, close } = await testServer(t);
+  t.after(close);
+  const jobId = `jira-disabled-message-${Date.now()}`;
+  await createJobRecord({
+    jobId,
+    userId: '005-owner',
+    source: 'jira-webhook',
+    jiraIssueKey: 'SAPA-126',
+    prompt: 'Analyze Jira issue SAPA-126'
+  });
+  const before = await getJobRecord(jobId);
+
+  const response = await postJson(`${base}/api/jobs/${jobId}/messages`, {
+    text: 'Please add more context.'
+  }, viewerHeaders('005-owner'));
+  await waitForQueueTick();
+  const after = await getJobRecord(jobId);
+
+  assert.equal(response.status, 409);
+  assert.equal(response.body.error.code, 'JIRA_DISABLED');
+  assert.deepEqual(after.conversation, before.conversation);
+  assert.deepEqual(after.audit, before.audit);
+  assert.deepEqual(after.stateHistory, before.stateHistory);
+  assert.deepEqual(after.logs, before.logs);
+  assert.equal(after.status, before.status);
+});
+
+test('Salesforce chat messages still append when Jira is disabled', async (t) => {
+  const { base, close } = await testServer(t);
+  t.after(close);
+
+  const created = await postJson(`${base}/api/jobs`, {
+    prompt: 'Create a validation rule'
+  }, viewerHeaders('005-owner'));
+  assert.equal(created.status, 201);
+  const before = await getJobRecord(created.body.jobId);
+
+  const response = await postJson(`${base}/api/jobs/${created.body.jobId}/messages`, {
+    text: 'It should apply only to active accounts.'
+  }, viewerHeaders('005-owner'));
+  const after = await getJobRecord(created.body.jobId);
+
+  assert.equal(response.status, 202);
+  assert.equal(after.conversation.length, before.conversation.length + 1);
+  assert.equal(after.audit.length, before.audit.length + 1);
+  assert.equal(after.status, before.status);
+});
+
+test('Jira-source messages still append when Jira is enabled', async (t) => {
+  config.jiraEnabled = true;
+  const { base, close } = await testServer(t);
+  t.after(() => {
+    config.jiraEnabled = false;
+    close();
+  });
+  const jobId = `jira-enabled-message-${Date.now()}`;
+  await createJobRecord({
+    jobId,
+    userId: '005-owner',
+    source: 'jira-webhook',
+    jiraIssueKey: 'SAPA-127',
+    prompt: 'Analyze Jira issue SAPA-127'
+  });
+  const before = await getJobRecord(jobId);
+
+  const response = await postJson(`${base}/api/jobs/${jobId}/messages`, {
+    text: 'Preserve historical Jira conversation behavior.'
+  }, viewerHeaders('005-owner'));
+  const after = await getJobRecord(jobId);
+
+  assert.equal(response.status, 202);
+  assert.equal(after.conversation.length, before.conversation.length + 1);
+  assert.equal(after.audit.length, before.audit.length + 1);
+  assert.equal(after.status, before.status);
+});
+
 test('Salesforce chat jobs continue through generic action routes when Jira is disabled', async (t) => {
   const { base, close } = await testServer(t);
   t.after(close);
@@ -256,4 +333,8 @@ async function postJson(url, body, headers) {
 async function getJson(url, headers) {
   const response = await fetch(url, { headers });
   return { status: response.status, body: await response.json().catch(() => ({})) };
+}
+
+function waitForQueueTick() {
+  return new Promise((resolve) => setTimeout(resolve, 25));
 }

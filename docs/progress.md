@@ -20,6 +20,7 @@
 - Phase 1 Task 3: Introduce direct conversation APIs and isolate Jira
   - Implementation commit: 4e7e42b
   - Correction commit: d12272ba1abfd23299545e6e74dde1076a114f18
+  - Final message-isolation correction commit: pending
   - Verification date: 2026-08-01
   - Verification:
     - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/conversationApi.test.js test/runtimeHealth.test.js` - RED first, failed for expected missing/direct-chat/Jira-readiness reasons.
@@ -30,6 +31,10 @@
     - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/conversationApi.test.js test/agentJiraIsolation.test.js` - PASS, 12 tests, 0 skipped.
     - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/conversationApi.test.js test/apiAuth.test.js test/security.test.js test/agentQueue.test.js test/agentQueueFallback.test.js test/agentJiraIsolation.test.js test/runtimeHealth.test.js` - PASS, 36 tests, 0 skipped.
     - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 99 tests and 0 skipped.
+  - Final message-isolation correction verification:
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/conversationApi.test.js test/agentJiraIsolation.test.js` - RED first, failed for expected disabled Jira `/messages` bypass with 202 response and fallback worker error.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/conversationApi.test.js test/agentJiraIsolation.test.js` - PASS, 15 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 102 tests and 0 skipped.
   - Review:
     - New manual jobs use `source: salesforce-chat`, ignore Jira issue keys, and cannot enter the legacy Jira analyze path.
     - Jira webhook registration, poller startup, readiness checks, Jira comments, Jira revision activation, and Jira sync worker actions are gated by `JIRA_ENABLED=true`; default is false.
@@ -38,6 +43,9 @@
     - Missing, empty, and whitespace-only prompts return stable 422 `PROMPT_REQUIRED` responses before sanitization; bounded-length and untrusted-input sanitization still run for present prompts.
     - Jira-specific analyze and instructions routes are unavailable when `JIRA_ENABLED=false`, while historical Jira job records remain readable.
     - Jira-source API mutations and queued implementation, validation, and deployment actions reject with stable 409 `JIRA_DISABLED` responses while Salesforce-chat workflows remain source-allowed.
+  - Final message-isolation correction review:
+    - Disabled Jira-source `/messages` requests now use the same mutable-job guard, return stable 409 `JIRA_DISABLED`, and leave conversation, audit, state history, status, and logs unchanged.
+    - Salesforce-chat `/messages` still appends normally when Jira is disabled, and historical Jira `/messages` behavior remains available when Jira is enabled.
 
 - Phase 1 Task 2: Add durable PostgreSQL job persistence
   - Implementation commit: e0eadeac118cee6a7c498d57f7813741b345520f

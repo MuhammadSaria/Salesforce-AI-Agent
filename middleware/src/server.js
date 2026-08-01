@@ -66,7 +66,7 @@ export function createApp() {
   app.get('/api/jobs/:jobId/work-items', jobRoute((req, res, job) => res.json({ overallStatus: overallSpecialistStatus(job.workItems || []), workItems: job.workItems || [] })));
   app.get('/api/jobs/:jobId/specialist-messages', jobRoute((req, res, job) => res.json({ messages: job.specialistMessages || [] })));
 
-  app.post('/api/jobs/:jobId/messages', jobRoute(async (req, res, job) => {
+  app.post('/api/jobs/:jobId/messages', mutableJobRoute(async (req, res, job) => {
     const text = sanitizeUntrustedText(req.body?.text, 4000).trim();
     if (!text) return res.status(422).json({ error: { code: 'MESSAGE_REQUIRED', message: 'Enter a message.' } });
     const outcome = await conversations.append({ job, actor: req.actor, text });
