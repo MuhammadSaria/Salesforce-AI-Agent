@@ -12,10 +12,24 @@
 
 ## Current Task
 
-- Task: Phase 1 Task 4
+- Task: Phase 1 Task 5
 - Status: Not started
 
 ## Completed Tasks
+
+- Phase 1 Task 4: Enforce same-sandbox identity and permission claims
+  - Implementation commit: 17f1a71dc4d746bc6093ba708a8dc934e1d506ed
+  - Verification date: 2026-08-01
+  - Verification:
+    - `cd middleware && node --import ./test/setup.js --test test/sameOrgService.test.js test/apiAuth.test.js test/security.test.js` - RED first, failed for expected missing same-org service, missing production executor preflight, and permission-claim enforcement gaps.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/sameOrgService.test.js test/orgRouting.test.js test/apiAuth.test.js test/security.test.js test/conversationApi.test.js test/agentJiraIsolation.test.js` - PASS, 47 tests, 0 skipped.
+    - `sf.cmd apex run test --tests AgentControllerTest --result-format human --wait 10 --target-org $env:PHASE1_SALESFORCE_ALIAS` - PASS against explicit alias `Developer-org`, 14 tests, 0 skipped, Org Id `00Dg500000E07e9EAB`.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 108 tests and 0 skipped.
+  - Review:
+    - `resolveSameOrg({ authenticatedOrgId, actorId })` resolves exactly one active connected registry entry matching the authenticated Salesforce org ID and rejects body/prompt/org-registry attempts to switch orgs.
+    - `assertSameVerifiedOrg(orgContext, observed)` verifies organization ID, normalized instance URL, configured username, connected status, and non-production context before returning a frozen public context.
+    - Salesforce Apex callouts send `X-Agent-User-Id`, `X-Agent-Org-Id`, `X-Agent-Can-Implement`, and `X-Agent-Can-Deploy`; middleware derives direct-action permissions from authenticated headers and ignores JSON-body role/org/permission claims.
+    - Salesforce executor operations still require explicit org context, force `--target-org`, reject target mismatches, and block production contexts before CLI lookup.
 
 - Phase 1 Task 3: Introduce direct conversation APIs and isolate Jira
   - Implementation commit: 4e7e42b
@@ -87,7 +101,7 @@
 
 ## Next Task
 
-Phase 1 Task 4: Enforce same-sandbox identity and permission claims.
+Phase 1 Task 5: Reliable same-sandbox org inspection.
 
 ## Update Rules
 
