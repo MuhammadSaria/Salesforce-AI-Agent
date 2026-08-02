@@ -23,6 +23,7 @@
   - Tooling/large-object/retrieval-evidence correction commit: 9469387
   - Deterministic FieldDefinition/picklist/retrieve-adapter correction commit: 054528c
   - Real `result.files` retrieve-adapter correction commit: 5c0ff5c2df165c0d0dd94ca637115fb567599f8f
+  - Fail-closed retrieval evidence correction commit: 50854de1a93bb07a054dd9927ff44181f6be455d
   - Verification date: 2026-08-02
   - Verification:
     - `cd middleware && node --import ./test/setup.js --test test/orgInspectionService.test.js` - RED first, failed for expected missing `orgInspectionService.js`.
@@ -55,6 +56,12 @@
     - `cd middleware && node --import ./test/setup.js --test test/orgInspectionService.test.js test/metadataScope.test.js test/metadataCapabilities.test.js` - PASS, 27 tests, 0 skipped.
     - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/orgInspectionService.test.js test/metadataScope.test.js test/metadataCapabilities.test.js test/sameOrgService.test.js test/security.test.js test/agentSameOrg.test.js test/apiAuth.test.js test/conversationApi.test.js test/developmentJob.test.js test/jobState.test.js test/jobStore.test.js test/orchestrator.test.js test/sfFailureMessage.test.js` - PASS, 124 tests, 0 skipped.
     - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 174 tests and 0 skipped.
+  - Fail-closed retrieval evidence correction verification:
+    - `cd middleware && node --import ./test/setup.js --test test/orgInspectionService.test.js test/metadataCapabilities.test.js` - RED first, failed for expected missing strict success status enforcement, exact retrieval-evidence matching, and path/type consistency rejection.
+    - `cd middleware && node --import ./test/setup.js --test test/orgInspectionService.test.js test/metadataCapabilities.test.js` - PASS, 28 tests, 0 skipped.
+    - `cd middleware && node --import ./test/setup.js --test test/orgInspectionService.test.js test/metadataScope.test.js test/metadataCapabilities.test.js` - PASS, 31 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/orgInspectionService.test.js test/metadataScope.test.js test/metadataCapabilities.test.js test/sameOrgService.test.js test/security.test.js test/agentSameOrg.test.js test/apiAuth.test.js test/conversationApi.test.js test/developmentJob.test.js test/jobState.test.js test/jobStore.test.js test/orchestrator.test.js test/sfFailureMessage.test.js` - PASS, 128 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 178 tests, 0 skipped.
   - Review:
     - `inspectFlowRequirement({ requirement, orgContext })` returns deterministic Flow inspection sections for objects, fields, relationships, status candidates, flows, Apex automation, validation rules, layouts, permission sets, evidence, and ambiguities.
     - Org inspection requires a WeakSet-trusted same-org context with fresh verified org evidence, rejects production contexts, and ignores prompt/body org or target-org values.
@@ -78,6 +85,9 @@
     - Required field discovery now uses exact bounded `FieldDefinition` queries for candidate relationship and status field API names instead of relying on the first page of broad lookup/picklist results.
     - Paid and Completed values are verified only from bounded Tooling API `PicklistValueInfo` rows with object, field, value, operation, observed timestamp, and verified org provenance; missing or unusable values produce material ambiguity and skip retrieval.
     - Retrieval verification normalizes Salesforce CLI `sf project retrieve start --json` `result.files` paths as the primary component-evidence contract, retains `fileResponses` only as compatibility, rejects empty, partial, failed, canceled, malformed, duplicate-only, and unexpected output, and performs same-org verification before retrieval.
+  - Fail-closed retrieval evidence correction review:
+    - Retrieval success now requires exact allowed CLI success values (`Succeeded` result status and per-file `Changed`, `Created`, `Deleted`, or `Unchanged` states) instead of failure denylists or inferred success from zero exit/status alone.
+    - Retrieved component evidence must exactly match the verified requested component set, rejects unrelated recognized components, rejects malformed or contradictory paths even with matching type/fullName claims, and deduplicates only valid identical entries.
 
 - Phase 1 Task 4: Enforce same-sandbox identity and permission claims
   - Implementation commit: 17f1a71dc4d746bc6093ba708a8dc934e1d506ed
