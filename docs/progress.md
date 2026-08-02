@@ -21,7 +21,7 @@
   - Implementation commit: 70bea0deb1605fd32d4ef784f5711e77e486d88b
   - Correction commit: d1ad742
   - Tooling/large-object/retrieval-evidence correction commit: 9469387
-  - Deterministic FieldDefinition/picklist/retrieve-adapter correction commit: pending push
+  - Deterministic FieldDefinition/picklist/retrieve-adapter correction commit: 054528c
   - Verification date: 2026-08-02
   - Verification:
     - `cd middleware && node --import ./test/setup.js --test test/orgInspectionService.test.js` - RED first, failed for expected missing `orgInspectionService.js`.
