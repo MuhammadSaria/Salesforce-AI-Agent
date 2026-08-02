@@ -12,8 +12,8 @@
 
 ## Current Task
 
-- Task: Phase 1 Task 4 final approval-ordering correction
-- Status: Correction implemented; full completion verification blocked by unavailable local PostgreSQL/Docker and missing explicit `PHASE1_SALESFORCE_ALIAS`
+- Task: Phase 1 Task 5
+- Status: Not started
 
 ## Completed Tasks
 
@@ -23,7 +23,7 @@
   - Final authorization correction commit: 3434f8c5776c378e54eca06bf3a53f87ab311e8a
   - Final cross-org correction commit: c1c559679e11326e48646a5f5a7f9a86371b25fe
   - Final approval-ordering correction commit: 10368e78bf5392ef674a56e5856069e8aafe1282
-  - Verification date: 2026-08-01
+  - Verification date: 2026-08-02
   - Verification:
     - `cd middleware && node --import ./test/setup.js --test test/sameOrgService.test.js test/apiAuth.test.js test/security.test.js` - RED first, failed for expected missing same-org service, missing production executor preflight, and permission-claim enforcement gaps.
     - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/sameOrgService.test.js test/orgRouting.test.js test/apiAuth.test.js test/security.test.js test/conversationApi.test.js test/agentJiraIsolation.test.js` - PASS, 47 tests, 0 skipped.
@@ -67,8 +67,10 @@
     - `cd middleware && node --import ./test/setup.js --test test/agentSameOrg.test.js test/conversationApi.test.js` - RED first, failed for expected worker `orgContext` persistence before approval rejection and `/deploy` returning 202 for missing/mismatched approval org bindings.
     - `cd middleware && node --import ./test/setup.js --test test/agentSameOrg.test.js test/conversationApi.test.js` - PASS, 25 tests, 0 skipped.
     - `cd middleware && $env:WORKSPACE_ROOT='C:\Users\ESHOP\Documents\Projects\Salesforce-AI-Agent\middleware\.tmp\providus-nexus-test-workspace'; $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/apiAuth.test.js test/agentSameOrg.test.js test/conversationApi.test.js test/approval.test.js test/salesforceId.test.js test/sameOrgService.test.js test/orgRouting.test.js test/security.test.js test/agentJiraIsolation.test.js test/agentQueue.test.js test/agentQueueFallback.test.js` - PASS, 90 tests, 0 skipped.
-    - `cd middleware && $env:WORKSPACE_ROOT='C:\Users\ESHOP\Documents\Projects\Salesforce-AI-Agent\middleware\.tmp\providus-nexus-test-workspace'; $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - BLOCKED after lint passed and 141 tests passed; six required PostgreSQL integration tests failed because `127.0.0.1:5432` refused connections.
-    - `sf.cmd apex run test --tests AgentControllerTest --result-format human --wait 10 --target-org $env:PHASE1_SALESFORCE_ALIAS` - NOT RUN because `PHASE1_SALESFORCE_ALIAS` is not set in this shell.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --input-type=module -e "import pg from 'pg'; const c = new pg.Client({ connectionString: process.env.TEST_DATABASE_URL }); await c.connect(); const r = await c.query('select current_database() as db, inet_server_addr() as addr, inet_server_port() as port'); console.log(JSON.stringify(r.rows[0])); await c.end();"` - PASS, connected to `providus_nexus_test` on PostgreSQL port 5432.
+    - `cd middleware && $env:WORKSPACE_ROOT='C:\Users\ESHOP\Documents\Projects\Salesforce-AI-Agent\middleware\.tmp\providus-nexus-test-workspace'; $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 147 tests and 0 skipped.
+    - `sf.cmd org display --target-org $env:PHASE1_SALESFORCE_ALIAS --json` - PASS, explicit alias `Developer-org` resolved to Org Id `00Dg500000E07e9EAB`.
+    - `sf.cmd apex run test --tests AgentControllerTest --result-format human --wait 10 --target-org $env:PHASE1_SALESFORCE_ALIAS` - PASS against explicit alias `Developer-org`, 14 tests, 0 skipped, Org Id `00Dg500000E07e9EAB`.
   - Final approval-ordering correction review:
     - Worker implementation, validation, and deployment resolve fresh direct Salesforce org context without persistence, validate org-bound approvals and required hashes first, then persist the safe org context only after guards pass.
     - `/api/jobs/:jobId/deploy` validates the complete org-bound deployment approval before status transition, state history append, audit/log append, org-context persistence, or queue submission.
@@ -140,12 +142,11 @@
 
 ## Blockers
 
-- Required PostgreSQL completion checks are blocked because PostgreSQL is not listening on `127.0.0.1:5432`; Docker Desktop Service is stopped and could not be started from this session.
-- Apex completion verification is blocked because `PHASE1_SALESFORCE_ALIAS` is not set; no default org was used.
+- None.
 
 ## Next Task
 
-Complete Phase 1 Task 4 final approval-ordering correction verification, then Phase 1 Task 5: Reliable same-sandbox org inspection.
+Phase 1 Task 5: Reliable same-sandbox org inspection.
 
 ## Update Rules
 
