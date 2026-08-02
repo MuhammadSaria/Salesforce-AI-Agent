@@ -8,6 +8,8 @@ const DEFAULT_MAX_OBJECTS = 4;
 const DEFAULT_MAX_FIELDS_PER_OBJECT = 50;
 const DEFAULT_MAX_VERIFICATION_AGE_MS = 10 * 60 * 1000;
 const DONATION_OBJECT_CANDIDATES = ['GiftCommitment', 'GiftTransaction'];
+const RETRIEVE_RESULT_SUCCESS_STATUSES = new Set(['Succeeded']);
+const RETRIEVE_FILE_SUCCESS_STATES = new Set(['Changed', 'Created', 'Deleted', 'Unchanged']);
 
 export async function inspectFlowRequirement({ requirement, orgContext }, dependencies = {}) {
   const clock = dependencies.clock || (() => new Date());
@@ -329,8 +331,8 @@ async function retrieveAndMark(state, sf, orgContext) {
   const result = await sf.retrieveMetadata({ components: state.componentKeys, targetOrg: orgContext.salesforceAlias, orgContext });
   const parsed = parseJson(result.stdout, 'ORG_INSPECTION_RETRIEVAL_FAILED');
   const evidence = normalizeRetrieveEvidence(parsed, result.exitCode);
-  const allComponentsRetrieved = state.componentKeys.every((component) => evidence.componentKeys.has(`${component.type}:${component.apiName}`));
-  if (!allComponentsRetrieved) throw retrievalError();
+  const requestedComponentKeys = new Set(state.componentKeys.map((component) => `${component.type}:${component.apiName}`));
+  if (!setsEqual(evidence.componentKeys, requestedComponentKeys)) throw retrievalError();
   for (const component of state.components.values()) component.retrievalStatus = 'retrieved';
 }
 
@@ -451,9 +453,7 @@ function parseJson(stdout, code) {
 
 function normalizeRetrieveEvidence(parsed, exitCode) {
   const result = parsed.result || {};
-  const statusText = String(result.status || '').toLowerCase();
-  const failed = ['failed', 'canceled', 'cancelled'].includes(statusText);
-  const success = exitCode === 0 && parsed.status === 0 && result.done === true && !failed;
+  const success = exitCode === 0 && parsed.status === 0 && result.done === true && RETRIEVE_RESULT_SUCCESS_STATUSES.has(result.status);
   const files = Array.isArray(result.files) ? result.files : [];
   const compatibilityFileResponses = files.length === 0 && Array.isArray(result.fileResponses) ? result.fileResponses : [];
   const retrievedFiles = files.length > 0 ? files : compatibilityFileResponses;
@@ -471,13 +471,32 @@ function normalizeRetrieveEvidence(parsed, exitCode) {
 
 function retrieveFileSucceeded(file) {
   if (!file || typeof file !== 'object') return false;
-  const state = String(file.state || file.status || '').toLowerCase();
-  return !['failed', 'canceled', 'cancelled', 'error'].includes(state);
+  const state = file.state ?? file.status;
+  return RETRIEVE_FILE_SUCCESS_STATES.has(state);
 }
 
 function componentFromRetrieveFile(file) {
-  if (file.type && file.fullName) return { type: file.type, apiName: file.fullName };
   const path = String(file.filePath || file.path || '').replace(/\\/g, '/');
+  const pathComponent = path ? componentFromRetrievePath(path) : null;
+  const claimedComponent = componentFromRetrieveClaim(file);
+  if (path && !pathComponent) return null;
+  if (pathComponent && claimedComponent && !sameComponent(pathComponent, claimedComponent)) return null;
+  return pathComponent || claimedComponent;
+}
+
+function componentFromRetrieveClaim(file) {
+  if (!file.type || !file.fullName) return null;
+  const component = { type: String(file.type), apiName: String(file.fullName) };
+  if (!isAllowedFamily(component)) return null;
+  try {
+    validateComponentName(component.type, component.apiName);
+  } catch {
+    return null;
+  }
+  return component;
+}
+
+function componentFromRetrievePath(path) {
   let match = path.match(/\/classes\/([^/]+)\.cls$/);
   if (match) return { type: 'ApexClass', apiName: match[1] };
   match = path.match(/\/triggers\/([^/]+)\.trigger$/);
@@ -495,6 +514,10 @@ function componentFromRetrieveFile(file) {
   match = path.match(/\/objects\/([^/]+)\/validationRules\/([^/]+)\.validationRule-meta\.xml$/);
   if (match) return { type: 'ValidationRule', apiName: `${match[1]}.${match[2]}` };
   return null;
+}
+
+function sameComponent(left, right) {
+  return left.type === right.type && left.apiName === right.apiName;
 }
 
 function quotedObjects(state) {
@@ -528,6 +551,10 @@ function compareComponent(left, right) {
 
 function compareEvidence(left, right) {
   return left.evidenceId.localeCompare(right.evidenceId) || left.kind.localeCompare(right.kind);
+}
+
+function setsEqual(left, right) {
+  return left.size === right.size && [...left].every((item) => right.has(item));
 }
 
 function controlledInspectionError(message) {

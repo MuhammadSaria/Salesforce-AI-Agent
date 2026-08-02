@@ -226,11 +226,77 @@ test('retrieval failures are controlled and do not mark components retrieved', a
   }
 });
 
+test('retrieval requires explicit supported successful result and file states', async () => {
+  for (const retrieval of [
+    retrieveFilesResult(successRetrieveFiles(), { status: undefined }),
+    retrieveFilesResult(successRetrieveFiles(), { status: '' }),
+    retrieveFilesResult(successRetrieveFiles(), { status: 'Complete' }),
+    retrieveFilesResult(successRetrieveFiles(), { status: 'InProgress' }),
+    retrieveFilesResult(successRetrieveFiles(), { status: 'Pending' }),
+    retrieveFilesResult(successRetrieveFiles(), { status: 'Error' }),
+    retrieveFilesResult(successRetrieveFiles(), { status: 'Errored' }),
+    retrieveFilesResult(successRetrieveFiles(), { status: 'Failed' }),
+    retrieveFilesResult(successRetrieveFiles(), { status: 'Canceled' }),
+    retrieveFilesResult(successRetrieveFiles(), { status: 'Cancelled' }),
+    retrieveFilesResult(successRetrieveFiles().map((file, index) => index === 0 ? { ...file, state: undefined } : file)),
+    retrieveFilesResult(successRetrieveFiles().map((file, index) => index === 0 ? { ...file, state: '' } : file)),
+    retrieveFilesResult(successRetrieveFiles().map((file, index) => index === 0 ? { ...file, state: 'Updated' } : file)),
+    retrieveFilesResult(successRetrieveFiles().map((file, index) => index === 0 ? { ...file, state: 'InProgress' } : file)),
+    retrieveFilesResult(successRetrieveFiles().map((file, index) => index === 0 ? { ...file, state: 'Pending' } : file)),
+    retrieveFilesResult(successRetrieveFiles().map((file, index) => index === 0 ? { ...file, state: 'Error' } : file)),
+    retrieveFilesResult(successRetrieveFiles().map((file, index) => index === 0 ? { ...file, state: 'Errored' } : file)),
+    retrieveFilesResult(successRetrieveFiles().map((file, index) => index === 0 ? { ...file, state: 'Failed' } : file)),
+    retrieveFilesResult(successRetrieveFiles().map((file, index) => index === 0 ? { ...file, state: 'Canceled' } : file)),
+    retrieveFilesResult(successRetrieveFiles().map((file, index) => index === 0 ? { ...file, state: 'Cancelled' } : file))
+  ]) {
+    await assert.rejects(
+      inspectFlowRequirement({
+        requirement: requirement('When a Donation related to a Recurring Donation becomes Paid/Completed, assign its permanent sequential installment number.'),
+        orgContext: trustedContext()
+      }, { sf: realisticSf([], { retrieval }), clock: fixedClock }),
+      (error) => error.code === 'ORG_INSPECTION_RETRIEVAL_FAILED'
+    );
+  }
+});
+
 test('real Salesforce CLI result.files retrieve output is normalized to component evidence', async () => {
   const inspection = await inspectFlowRequirement({
     requirement: requirement('When a Donation related to a Recurring Donation becomes Paid/Completed, assign its permanent sequential installment number.'),
     orgContext: trustedContext()
   }, { sf: realisticSf([], { retrieval: retrieveSuccessCliResult() }), clock: fixedClock });
+
+  assert.ok(inspection.primaryMetadata.every((item) => item.retrievalStatus === 'retrieved'));
+});
+
+test('result.files retrieval requires exact requested component evidence only', async () => {
+  for (const files of [
+    [...successRetrieveFiles(), { path: 'force-app/main/default/flows/Unexpected_Flow.flow-meta.xml', state: 'Changed' }],
+    [...successRetrieveFiles(), { path: 'force-app/main/default/classes/UnexpectedClass.cls', state: 'Changed' }],
+    successRetrieveFiles().map((file, index) => index === 0 ? { ...file, type: 'ApexClass', fullName: 'OtherClass' } : file),
+    successRetrieveFiles().map((file, index) => index === 0 ? { ...file, path: 'force-app/main/default/bad/GiftAutomation.cls', type: 'ApexClass', fullName: 'GiftAutomation' } : file),
+    successRetrieveFiles().map((file, index) => index === 0 ? { ...file, path: 'force-app/main/default/classes/OtherClass.cls', type: 'ApexClass', fullName: 'GiftAutomation' } : file),
+    successRetrieveFiles().filter((file) => !file.path.includes('/flows/')),
+    []
+  ]) {
+    await assert.rejects(
+      inspectFlowRequirement({
+        requirement: requirement('When a Donation related to a Recurring Donation becomes Paid/Completed, assign its permanent sequential installment number.'),
+        orgContext: trustedContext()
+      }, { sf: realisticSf([], { retrieval: retrieveFilesResult(files) }), clock: fixedClock }),
+      (error) => error.code === 'ORG_INSPECTION_RETRIEVAL_FAILED'
+    );
+  }
+});
+
+test('consistent path and type/fullName result.files evidence is accepted', async () => {
+  const files = successRetrieveFiles().map((file) => {
+    const component = componentClaimForPath(file.path);
+    return { ...file, type: component.type, fullName: component.apiName };
+  });
+  const inspection = await inspectFlowRequirement({
+    requirement: requirement('When a Donation related to a Recurring Donation becomes Paid/Completed, assign its permanent sequential installment number.'),
+    orgContext: trustedContext()
+  }, { sf: realisticSf([], { retrieval: retrieveFilesResult(files) }), clock: fixedClock });
 
   assert.ok(inspection.primaryMetadata.every((item) => item.retrievalStatus === 'retrieved'));
 });
@@ -247,6 +313,21 @@ test('duplicate result.files entries are deduplicated as component evidence', as
   }, { sf: realisticSf([], { retrieval }), clock: fixedClock });
 
   assert.ok(inspection.primaryMetadata.every((item) => item.retrievalStatus === 'retrieved'));
+});
+
+test('conflicting duplicate result.files entries are rejected', async () => {
+  const files = [
+    ...successRetrieveFiles(),
+    { path: 'force-app/main/default/classes/GiftAutomation.cls', type: 'ApexClass', fullName: 'OtherClass', state: 'Changed' }
+  ];
+
+  await assert.rejects(
+    inspectFlowRequirement({
+      requirement: requirement('When a Donation related to a Recurring Donation becomes Paid/Completed, assign its permanent sequential installment number.'),
+      orgContext: trustedContext()
+    }, { sf: realisticSf([], { retrieval: retrieveFilesResult(files) }), clock: fixedClock }),
+    (error) => error.code === 'ORG_INSPECTION_RETRIEVAL_FAILED'
+  );
 });
 
 test('fileResponses compatibility retrieve output remains accepted after same-org verification', async () => {
@@ -347,7 +428,7 @@ function realisticSf(calls = [], options = {}) {
     async retrieveMetadata({ components, targetOrg, orgContext }) {
       assert.equal(orgContext.expectedOrgId, ORG_ID);
       calls.push({ command: 'retrieveMetadata', targetOrg, components: components.map((item) => `${item.type}:${item.apiName}`) });
-      return options.retrieval || retrieveSuccessCliResult();
+      return options.retrieval || retrieveSuccessForComponents(components);
     }
   };
 }
@@ -446,7 +527,15 @@ function jsonResult(result) {
 }
 
 function retrieveSuccessCliResult() {
-  return retrieveFilesResult([
+  return retrieveFilesResult(successRetrieveFiles());
+}
+
+function retrieveSuccessForComponents(components) {
+  return retrieveFilesResult(components.map((component) => ({ path: pathForComponent(component), state: 'Changed' })));
+}
+
+function successRetrieveFiles() {
+  return [
     { path: 'force-app/main/default/classes/GiftAutomation.cls', state: 'Changed' },
     { path: 'force-app/main/default/triggers/GiftTransactionTrigger.trigger', state: 'Changed' },
     { path: 'force-app/main/default/objects/GiftTransaction/fields/GiftCommitmentId.field-meta.xml', state: 'Changed' },
@@ -457,7 +546,43 @@ function retrieveSuccessCliResult() {
     { path: 'force-app/main/default/layouts/GiftTransaction-Gift Transaction Layout.layout-meta.xml', state: 'Changed' },
     { path: 'force-app/main/default/permissionsets/Gift_Operations.permissionset-meta.xml', state: 'Changed' },
     { path: 'force-app/main/default/objects/GiftTransaction/validationRules/Require_Status.validationRule-meta.xml', state: 'Changed' }
-  ]);
+  ];
+}
+
+function pathForComponent(component) {
+  if (component.type === 'ApexClass') return `force-app/main/default/classes/${component.apiName}.cls`;
+  if (component.type === 'ApexTrigger') return `force-app/main/default/triggers/${component.apiName}.trigger`;
+  if (component.type === 'CustomField') {
+    const [objectApiName, fieldApiName] = component.apiName.split('.');
+    return `force-app/main/default/objects/${objectApiName}/fields/${fieldApiName}.field-meta.xml`;
+  }
+  if (component.type === 'CustomObject') return `force-app/main/default/objects/${component.apiName}/${component.apiName}.object-meta.xml`;
+  if (component.type === 'Flow') return `force-app/main/default/flows/${component.apiName}.flow-meta.xml`;
+  if (component.type === 'Layout') return `force-app/main/default/layouts/${component.apiName}.layout-meta.xml`;
+  if (component.type === 'PermissionSet') return `force-app/main/default/permissionsets/${component.apiName}.permissionset-meta.xml`;
+  if (component.type === 'ValidationRule') {
+    const [objectApiName, ruleApiName] = component.apiName.split('.');
+    return `force-app/main/default/objects/${objectApiName}/validationRules/${ruleApiName}.validationRule-meta.xml`;
+  }
+  throw new Error(`No retrieve fixture path for ${component.type}:${component.apiName}`);
+}
+
+function componentClaimForPath(path) {
+  const matches = [
+    [/\/classes\/([^/]+)\.cls$/, 'ApexClass', (match) => match[1]],
+    [/\/triggers\/([^/]+)\.trigger$/, 'ApexTrigger', (match) => match[1]],
+    [/\/objects\/([^/]+)\/fields\/([^/]+)\.field-meta\.xml$/, 'CustomField', (match) => `${match[1]}.${match[2]}`],
+    [/\/objects\/([^/]+)\/\1\.object-meta\.xml$/, 'CustomObject', (match) => match[1]],
+    [/\/flows\/([^/]+)\.flow-meta\.xml$/, 'Flow', (match) => match[1]],
+    [/\/layouts\/([^/]+)\.layout-meta\.xml$/, 'Layout', (match) => match[1]],
+    [/\/permissionsets\/([^/]+)\.permissionset-meta\.xml$/, 'PermissionSet', (match) => match[1]],
+    [/\/objects\/([^/]+)\/validationRules\/([^/]+)\.validationRule-meta\.xml$/, 'ValidationRule', (match) => `${match[1]}.${match[2]}`]
+  ];
+  for (const [pattern, type, apiName] of matches) {
+    const match = String(path).match(pattern);
+    if (match) return { type, apiName: apiName(match) };
+  }
+  throw new Error(`No component claim fixture for ${path}`);
 }
 
 function retrieveFilesResult(files, resultOverrides = {}) {
