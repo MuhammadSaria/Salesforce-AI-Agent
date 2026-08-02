@@ -132,14 +132,14 @@ test('Salesforce permission claims come from authenticated headers and ignore JS
   assert.equal((await getJobRecord(createdBody.jobId)).orgId, '00Dg500000E07e9EAB');
   await updateJob(createdBody.jobId, {
     status: 'AWAITING_PLAN_APPROVAL',
-    plan: { planVersion: 1, planHash: 'plan-hash', materialChangeHash: 'material-hash' },
+    plan: architectureReadyPlan(),
     metadataScope: { hash: 'scope-hash' },
     orgContext: { orgRegistryId: 'providus_orgfarm_dev', expectedOrgId: '00Dg500000E07e9EAB', environment: 'developer' }
   });
   const approval = await fetch(`${base}/api/jobs/${createdBody.jobId}/approve-implementation`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ planVersion: 1, canImplement: true, role: 'admin' })
+    body: JSON.stringify({ planVersion: 1, planHash: 'plan-hash', scopeHash: 'scope-hash', canImplement: true, role: 'admin' })
   });
 
   assert.equal(approval.status, 403);
@@ -164,14 +164,14 @@ test('viewer and split permission claims cannot widen approval access', async (t
   const viewer = await fetch(`${base}/api/jobs/${jobId}/approve-implementation`, {
     method: 'POST',
     headers: salesforceHeaders({ authorization: 'Bearer unit-test-token' }),
-    body: JSON.stringify({ planVersion: 1 })
+    body: JSON.stringify({ planVersion: 1, planHash: 'plan-hash', scopeHash: 'scope-hash' })
   });
   assert.equal(viewer.status, 403);
 
   const deployOnly = await fetch(`${base}/api/jobs/${jobId}/approve-implementation`, {
     method: 'POST',
     headers: salesforceHeaders({ authorization: 'Bearer unit-test-token', canDeploy: true }),
-    body: JSON.stringify({ planVersion: 1 })
+    body: JSON.stringify({ planVersion: 1, planHash: 'plan-hash', scopeHash: 'scope-hash' })
   });
   assert.equal(deployOnly.status, 403);
 
@@ -207,7 +207,7 @@ test('bearer token with caller supplied admin role cannot access Salesforce chat
   assert.equal((await fetch(`${base}/api/jobs/${jobId}/approve-implementation`, {
     method: 'POST',
     headers: genericAdminHeaders,
-    body: JSON.stringify({ planVersion: 1 })
+    body: JSON.stringify({ planVersion: 1, planHash: 'plan-hash', scopeHash: 'scope-hash' })
   })).status, 401);
   assert.equal((await fetch(`${base}/api/jobs/${jobId}/implement`, {
     method: 'POST',
@@ -274,7 +274,7 @@ test('Salesforce claims false stay unprivileged even when X-Agent-Role is admin'
   const response = await fetch(`${base}/api/jobs/${jobId}/approve-implementation`, {
     method: 'POST',
     headers: { ...salesforceHeaders({ authorization: 'Bearer unit-test-token' }), 'X-Agent-Role': 'admin' },
-    body: JSON.stringify({ planVersion: 1, role: 'admin', canImplement: true })
+    body: JSON.stringify({ planVersion: 1, planHash: 'plan-hash', scopeHash: 'scope-hash', role: 'admin', canImplement: true })
   });
 
   assert.equal(response.status, 403);
@@ -292,7 +292,7 @@ test('Salesforce implementation and deployment permission claims are independent
   const implementation = await fetch(`${base}/api/jobs/${implementJobId}/approve-implementation`, {
     method: 'POST',
     headers: salesforceHeaders({ authorization: 'Bearer unit-test-token', canImplement: true, canDeploy: false }),
-    body: JSON.stringify({ planVersion: 1 })
+    body: JSON.stringify({ planVersion: 1, planHash: 'plan-hash', scopeHash: 'scope-hash' })
   });
   assert.equal(implementation.status, 201);
 
@@ -310,7 +310,7 @@ test('Salesforce implementation and deployment permission claims are independent
   const implementationBlocked = await fetch(`${base}/api/jobs/${deployJobId}/approve-implementation`, {
     method: 'POST',
     headers: salesforceHeaders({ authorization: 'Bearer unit-test-token', canImplement: false, canDeploy: true }),
-    body: JSON.stringify({ planVersion: 1 })
+    body: JSON.stringify({ planVersion: 1, planHash: 'plan-hash', scopeHash: 'scope-hash' })
   });
   assert.equal(implementationBlocked.status, 403);
 
@@ -341,7 +341,7 @@ test('Salesforce owner without implementation or deployment permissions can conv
   const approval = await fetch(`${base}/api/jobs/${jobId}/approve-implementation`, {
     method: 'POST',
     headers: salesforceHeaders({ authorization: 'Bearer unit-test-token' }),
-    body: JSON.stringify({ planVersion: 1, role: 'admin', canImplement: true })
+    body: JSON.stringify({ planVersion: 1, planHash: 'plan-hash', scopeHash: 'scope-hash', role: 'admin', canImplement: true })
   });
   assert.equal(approval.status, 403);
 });
@@ -464,7 +464,7 @@ test('cross-org Salesforce actor cannot read, message, cancel, approve, reject, 
     fetch(`${base}/api/jobs/${implementationJobId}`, { headers: orgAImplementAdmin }),
     fetch(`${base}/api/jobs/${implementationJobId}/messages`, { method: 'POST', headers: orgAImplementAdmin, body: JSON.stringify({ text: 'cross-org message' }) }),
     fetch(`${base}/api/jobs/${implementationJobId}/cancel`, { method: 'POST', headers: orgAImplementAdmin, body: JSON.stringify({ reason: 'cross-org cancel' }) }),
-    fetch(`${base}/api/jobs/${implementationJobId}/approve-implementation`, { method: 'POST', headers: orgAImplementAdmin, body: JSON.stringify({ planVersion: 1 }) }),
+    fetch(`${base}/api/jobs/${implementationJobId}/approve-implementation`, { method: 'POST', headers: orgAImplementAdmin, body: JSON.stringify({ planVersion: 1, planHash: 'plan-hash', scopeHash: 'scope-hash' }) }),
     fetch(`${base}/api/jobs/${implementationJobId}/reject-plan`, { method: 'POST', headers: orgAImplementAdmin, body: JSON.stringify({ comments: 'cross-org reject' }) }),
     fetch(`${base}/api/jobs/${implementationJobId}/implement`, { method: 'POST', headers: orgAImplementAdmin, body: JSON.stringify({}) }),
     fetch(`${base}/api/jobs/${implementationJobId}/validate`, { method: 'POST', headers: orgAImplementAdmin, body: JSON.stringify({}) }),
@@ -501,7 +501,7 @@ test('same-org Salesforce claims retain owner, implementation, and deployment pe
   const implementationApproval = await fetch(`${base}/api/jobs/${implementationJobId}/approve-implementation`, {
     method: 'POST',
     headers: salesforceHeaders({ authorization: 'Bearer unit-test-token', orgId: ORG_A_ID, userId: ORG_A_USER_ID, canImplement: true }),
-    body: JSON.stringify({ planVersion: 1 })
+    body: JSON.stringify({ planVersion: 1, planHash: 'plan-hash', scopeHash: 'scope-hash' })
   });
   assert.equal(implementationApproval.status, 201);
 
@@ -525,7 +525,7 @@ async function createApprovalReadyJob(jobId, { userId = ORG_A_USER_ID, orgId = O
   });
   await updateJob(jobId, {
     status: 'AWAITING_IMPLEMENTATION_APPROVAL',
-    plan: { planVersion: 1, planHash: 'plan-hash', materialChangeHash: 'material-hash' },
+    plan: architectureReadyPlan(),
     metadataScope: { hash: 'scope-hash' },
     orgContext: { orgRegistryId: 'providus_orgfarm_dev', expectedOrgId: orgId, environment: 'developer' }
   });
@@ -545,6 +545,24 @@ function trustedTestContext(expectedOrgId) {
     expectedOrgId,
     environment: 'developer',
     salesforceAlias: 'orgfarm-dev'
+  };
+}
+
+function architectureReadyPlan() {
+  return {
+    planVersion: 1,
+    planHash: 'plan-hash',
+    materialChangeHash: 'scope-hash',
+    scopeHash: 'scope-hash',
+    requirement: 'Create a Flow',
+    acceptanceCriteria: ['The approved behavior is observable.'],
+    assumptions: [],
+    evidenceIds: ['evidence:relationship'],
+    components: [{ operation: 'modify', metadataType: 'Flow', apiName: 'Test_Flow', owner: 'flow-specialist', reason: 'Implement the approved behavior.' }],
+    expectedBehavior: ['The approved behavior runs in the verified org.'],
+    testingStrategy: ['Validate in the verified org.'],
+    risks: [],
+    rollbackStrategy: 'Do not deploy the generated metadata.'
   };
 }
 

@@ -3,7 +3,7 @@ import { JOB_STATES } from '../domain/jobState.js';
 
 export function conversationService({ repository, enqueue }) {
   return {
-    async start({ actor, prompt, orgId = '', context = {} }) {
+    async start({ actor, prompt, orgId = '', context = {}, orgContext = null }) {
       const jobId = nanoid();
       const job = await repository.create({
         jobId,
@@ -12,7 +12,8 @@ export function conversationService({ repository, enqueue }) {
         source: 'salesforce-chat',
         orgId,
         userId: actor.id,
-        context
+        context,
+        orgContext
       });
       await repository.appendConversation(jobId, {
         role: 'user',

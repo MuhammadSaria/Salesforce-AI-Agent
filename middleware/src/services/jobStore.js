@@ -24,7 +24,7 @@ export async function createJobRecord(input) {
     orgId: input.orgId || '',
     userId: input.userId || '',
     context: input.context || {},
-    orgContext: null,
+    orgContext: input.orgContext || null,
     orgCandidates: [],
     orgRoutingEvidence: [],
     jira: input.jira || null,

@@ -32,6 +32,7 @@ test('worker re-resolves direct Salesforce org context before validation executi
       approvalId: 'approval-1',
       approvalType: 'IMPLEMENTATION',
       decision: 'APPROVED',
+      planVersion: 1,
       planHash: 'plan-hash',
       metadataScopeHash: 'scope-hash',
       salesforceOrganizationId: '00Dg500000E07e9EAB'
@@ -338,6 +339,7 @@ function implementationApproval(overrides = {}) {
     approvalId: 'approval-1',
     approvalType: 'IMPLEMENTATION',
     decision: 'APPROVED',
+    planVersion: 1,
     planHash: 'plan-hash',
     metadataScopeHash: 'scope-hash',
     salesforceOrganizationId: '00Dg500000E07e9EAB',

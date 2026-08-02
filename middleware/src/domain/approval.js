@@ -21,8 +21,10 @@ export function orgBoundApproval(job, approvalType, options = {}) {
     code: 'APPROVAL_REQUIRED'
   });
 
-  const planMatches = approval?.planHash === job.plan?.planHash
-    || (approvalType === 'IMPLEMENTATION' && approval?.materialChangeHash && approval.materialChangeHash === job.plan?.materialChangeHash);
+  const planMatches = approvalType === 'IMPLEMENTATION' && job.source === 'salesforce-chat'
+    ? approval?.planHash === job.plan?.planHash && Number(approval?.planVersion) === Number(job.plan?.planVersion)
+    : approval?.planHash === job.plan?.planHash
+      || (approvalType === 'IMPLEMENTATION' && approval?.materialChangeHash && approval.materialChangeHash === job.plan?.materialChangeHash);
   if (!approval || approval.decision !== 'APPROVED' || !planMatches || approval.metadataScopeHash !== job.metadataScope?.hash) throw approvalError();
   if (!sameSalesforceId(approval.salesforceOrganizationId, orgContext?.expectedOrgId)) throw approvalError();
   if (job.source === 'salesforce-chat') {

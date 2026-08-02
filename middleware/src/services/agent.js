@@ -10,11 +10,14 @@ import { buildOrgContext, isDataObjectAllowed, selectOrgForJob } from './orgRegi
 import { ensureJobWorkspace, writeOrgContext } from './jobWorkspace.js';
 import { addJiraComment, getJiraIssue } from './jira.js';
 import { analyzeDependencies, buildMetadataScope, buildPlan, expandScopeForFileOperations, extractRequirement, writeManifest } from './planning.js';
+import { inspectFlowRequirement } from './orgInspectionService.js';
+import { createArchitecturePlan } from './architecturePlanner.js';
 import { runSfCommand, verifySelectedOrg } from './sfExecutor.js';
 import { resolveSameOrg } from './sameOrgService.js';
 import { runGit } from './gitExecutor.js';
 import { enrichPlanWithCodex } from './codexExecutor.js';
 import { orgBoundApproval } from '../domain/approval.js';
+import { assertArchitecturePlanActionable } from '../domain/planActionability.js';
 import { humanizeValidationFailure } from '../utils/validationFailure.js';
 import { activatePendingJiraRevision, syncJiraComments } from './jiraSync.js';
 import { approveSpecialistWorkItems, buildSpecialistOrchestration, specialistAuditEvent, structuredSpecialistMessage, workItemForFile } from './orchestrator.js';
@@ -22,16 +25,30 @@ import { SPECIALIST_AGENT_IDS, SPECIALIST_MESSAGE_TYPES, WORK_ITEM_STATUSES, imp
 import { sameSalesforceId } from '../utils/salesforceId.js';
 
 let sameOrgResolver = resolveSameOrg;
+let directAnalysisDependencies = {
+  inspectFlowRequirement,
+  createArchitecturePlan
+};
 
 export function setSameOrgResolverForTest(resolver) {
   sameOrgResolver = resolver || resolveSameOrg;
+}
+
+export function setDirectAnalysisDependenciesForTest(dependencies = null) {
+  directAnalysisDependencies = {
+    inspectFlowRequirement: dependencies?.inspectFlowRequirement || inspectFlowRequirement,
+    createArchitecturePlan: dependencies?.createArchitecturePlan || createArchitecturePlan
+  };
 }
 
 export async function processAgentJob(message) {
   const job = await requiredJob(message.jobId);
   const actor = message.actor || 'system';
   assertJiraActionAllowed(job);
-  if (message.action === 'understand') return { jobId: job.jobId, status: job.status };
+  if (message.action === 'understand') {
+    if (job.source === 'salesforce-chat') return analyzeDirectSalesforceChat(job, actor);
+    return { jobId: job.jobId, status: job.status };
+  }
   if (message.action === 'sync-jira') {
     assertJiraEnabled();
     const result = await syncJiraComments(job, actor);
@@ -357,6 +374,72 @@ async function deploy(job, actor) {
 
 function validApproval(job, type, options = {}) {
   return orgBoundApproval(job, type, options);
+}
+
+async function analyzeDirectSalesforceChat(job, actor) {
+  if (!job.orgId && !job.orgContext) return { jobId: job.jobId, status: job.status };
+  const orgContext = job.orgContext || await sameOrgResolver({ authenticatedOrgId: job.orgId, actorId: actor });
+  if (!orgContext?.verified) return { jobId: job.jobId, status: job.status };
+  const requirement = directRequirement(job);
+  await transitionForDirectPlanning(job, JOB_STATES.UNDERSTANDING, actor, 'Understanding direct Salesforce requirement.');
+  job = await requiredJob(job.jobId);
+  await updateJob(job.jobId, { requirement, orgContext });
+
+  await transitionJob(job.jobId, JOB_STATES.INSPECTING_ORG, { actor, reason: 'Inspecting the authenticated Salesforce sandbox.' });
+  const inspection = await directAnalysisDependencies.inspectFlowRequirement({ requirement, orgContext });
+  await updateJob(job.jobId, { inspection });
+
+  await transitionJob(job.jobId, JOB_STATES.PLANNING, { actor, reason: 'Preparing source-free architecture plan from verified inspection evidence.' });
+  try {
+    let architecturePlan = await directAnalysisDependencies.createArchitecturePlan({
+      requirement,
+      inspection,
+      answers: (job.conversation || []).filter((entry) => entry.role === 'user').map((entry) => entry.text)
+    });
+    const planVersion = Number(job.nextPlanVersion || job.iteration || 1);
+    architecturePlan = {
+      ...architecturePlan,
+      planVersion,
+      materialChangeHash: architecturePlan.materialChangeHash || architecturePlan.scopeHash
+    };
+    assertArchitecturePlanActionable(architecturePlan);
+    await updateJob(job.jobId, {
+      plan: architecturePlan,
+      metadataScope: { hash: architecturePlan.scopeHash, source: 'architecture-plan', components: architecturePlan.components },
+      iteration: planVersion,
+      orchestration: null,
+      workItems: [],
+      specialistMessages: [],
+      fileOwnership: [],
+      approvals: []
+    });
+    await transitionJob(job.jobId, JOB_STATES.AWAITING_IMPLEMENTATION_APPROVAL, { actor, reason: 'Source-free architecture plan generated.' });
+    return { jobId: job.jobId, status: JOB_STATES.AWAITING_IMPLEMENTATION_APPROVAL };
+  } catch (error) {
+    if (error.code === 'MATERIAL_CLARIFICATION_REQUIRED') {
+      await transitionJob(job.jobId, JOB_STATES.AWAITING_CLARIFICATION, { actor, reason: error.message, error: error.message });
+      return { jobId: job.jobId, status: JOB_STATES.AWAITING_CLARIFICATION, clarificationRequired: true };
+    }
+    throw error;
+  }
+}
+
+async function transitionForDirectPlanning(job, state, actor, reason) {
+  if (job.status === state) return;
+  await transitionJob(job.jobId, state, { actor, reason });
+}
+
+function directRequirement(job) {
+  const messages = (job.conversation || [])
+    .filter((entry) => entry.role === 'user')
+    .map((entry) => entry.text)
+    .filter(Boolean);
+  const prompt = String(job.prompt || messages[0] || '').trim();
+  return {
+    summary: prompt,
+    businessRequirement: [prompt, ...messages.slice(1)].filter(Boolean).join('\n'),
+    acceptanceCriteria: messages.slice(1)
+  };
 }
 
 function assertDeploymentGuard(job, approval) {

@@ -12,10 +12,24 @@
 
 ## Current Task
 
-- Task: Phase 1 Task 6
+- Task: Phase 1 Task 7
 - Status: Not started
 
 ## Completed Tasks
+
+- Phase 1 Task 6: Separate source-free architecture planning from source generation
+  - Implementation commit: pending first commit SHA
+  - Verification date: 2026-08-02
+  - Verification:
+    - `cd middleware && node --import ./test/setup.js --test test/architecturePlanner.test.js test/planActionability.test.js test/approval.test.js test/agentClarificationEvidence.test.js` - RED first, failed for expected missing architecture schema/actionability modules, missing direct-planner test hook, missing plan/hash/scope approval binding, empty evidence/component approval acceptance, and missing worker plan-version guard.
+    - `cd middleware && node --import ./test/setup.js --test test/architecturePlanner.test.js test/planActionability.test.js test/approval.test.js test/agentClarificationEvidence.test.js` - PASS, 17 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/conversationApi.test.js test/sameOrgService.test.js test/apiAuth.test.js test/agentJiraIsolation.test.js test/orgInspectionService.test.js test/metadataScope.test.js test/metadataCapabilities.test.js test/agentSameOrg.test.js test/agentQueue.test.js test/agentQueueFallback.test.js test/approval.test.js` - PASS, 96 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 197 tests and 0 skipped.
+  - Review:
+    - Added strict source-free architecture plan schema with required requirement, acceptance criteria, assumptions, evidence IDs, component intents, expected behavior, testing strategy, risks, and rollback strategy fields.
+    - `createArchitecturePlan({ requirement, inspection, answers })` requires verified non-empty Task 5 inspection evidence, rejects material ambiguity and unverified paid/completed status assumptions, validates evidence IDs, and returns deterministic plan/scope hashes without source fields.
+    - Direct Salesforce-chat `understand` jobs now use org inspection plus architecture planning and persist component intent only; legacy Jira analysis remains on the historical Codex/source-generation compatibility path.
+    - Implementation approval now requires current plan version, exact plan hash, exact scope hash, authenticated same Salesforce org ID, non-empty evidence/components, and implementation permission before any approval persistence, work-item mutation, state transition, queue submission, Salesforce command, or source generation.
 
 - Phase 1 Task 5: Build deterministic org inspection for Flow work
   - Implementation commit: 70bea0deb1605fd32d4ef784f5711e77e486d88b

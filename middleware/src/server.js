@@ -14,6 +14,7 @@ import { claimWebhookEvent, parseJiraWebhook, verifyJiraWebhook } from './servic
 import { JOB_STATES } from './domain/jobState.js';
 import { startJiraPoller } from './services/jiraPoller.js';
 import { orgBoundApproval } from './domain/approval.js';
+import { assertArchitecturePlanActionable } from './domain/planActionability.js';
 import { approveSpecialistWorkItems, overallSpecialistStatus } from './services/orchestrator.js';
 import { WORK_ITEM_STATUSES } from './domain/specialistAgents.js';
 import { publicJob } from './services/jobPresentation.js';
@@ -56,8 +57,7 @@ export function createApp(options = {}) {
     const orgContext = req.actor.authMode === 'test-bypass' && !req.actor.orgId
       ? null
       : await sameOrgResolver({ authenticatedOrgId: req.actor.orgId, actorId: req.actor.id });
-    const outcome = await conversations.start({ actor: req.actor, prompt, orgId: req.actor?.orgId || '', context: safeContext() });
-    if (orgContext) await updateJob(outcome.jobId, { orgContext });
+    const outcome = await conversations.start({ actor: req.actor, prompt, orgId: req.actor?.orgId || '', context: safeContext(), orgContext });
     res.status(201).json(outcome);
   }));
 
@@ -128,7 +128,7 @@ export function createApp(options = {}) {
   app.post('/api/jobs/:jobId/approve-implementation', mutableJobRoute(async (req, res, job) => {
     if (!requireImplementationPermission(req, res, job)) return;
     if (!isAwaitingImplementationApproval(job)) return conflict(res, 'Job is not awaiting implementation approval.');
-    if (Number(req.body?.planVersion) !== job.plan?.planVersion) return conflict(res, 'Approval must identify the current plan version.');
+    if (!assertImplementationApprovalBinding(req, res, job)) return;
     const approval = approvalRecord(job, req, 'IMPLEMENTATION', { decision: 'APPROVED' });
     await updateJob(job.jobId, { approvals: [...job.approvals, approval], workItems: approveSpecialistWorkItems(job.workItems || [], approval.approvalId) });
     await transitionJob(job.jobId, JOB_STATES.IMPLEMENTING, { actor: req.actor.id, reason: 'Explicit implementation approval recorded.', approvalId: approval.approvalId });
@@ -240,6 +240,27 @@ function jobRoute(handler) { return asyncRoute(async (req, res) => { const job =
 function mutableJobRoute(handler) { return jobRoute((req, res, job) => isJiraSource(job) && !config.jiraEnabled ? jiraDisabled(res) : handler(req, res, job)); }
 function asyncRoute(handler) { return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next); }
 function approvalRecord(job, req, type, extra) { return { approvalId: nanoid(), jobId: job.jobId, jiraIssueKey: job.jiraIssueKey, approvalType: type, planVersion: job.plan?.planVersion, planHash: job.plan?.planHash, materialChangeHash: job.plan?.materialChangeHash || '', metadataScopeHash: job.metadataScope?.hash, orgRegistryId: job.orgContext?.orgRegistryId, salesforceOrganizationId: isSalesforceChat(job) ? req.actor?.orgId : job.orgContext?.expectedOrgId, environment: job.orgContext?.environment, approverIdentity: req.actor.id, comments: sanitizeUntrustedText(req.body?.comments, 1000), approvalTimestamp: new Date().toISOString(), ...extra }; }
+function assertImplementationApprovalBinding(req, res, job) {
+  if (Number(req.body?.planVersion) !== job.plan?.planVersion) {
+    conflict(res, 'Approval must identify the current plan version.');
+    return false;
+  }
+  if (String(req.body?.planHash || '') !== String(job.plan?.planHash || '')) {
+    conflict(res, 'Approval must identify the current plan hash.');
+    return false;
+  }
+  if (String(req.body?.scopeHash || '') !== String(job.metadataScope?.hash || job.plan?.scopeHash || '')) {
+    conflict(res, 'Approval must identify the current scope hash.');
+    return false;
+  }
+  try {
+    assertArchitecturePlanActionable(job.plan);
+  } catch (error) {
+    res.status(error.statusCode || 409).json({ error: { code: error.code || 'PLAN_NOT_ACTIONABLE', message: error.message } });
+    return false;
+  }
+  return true;
+}
 function safeContext() { return { selectedOrgRegistryId: '', customerName: '', environment: '' }; }
 function conflict(res, message) { return res.status(409).json({ error: { message } }); }
 function promptRequired(res) { return res.status(422).json({ error: { code: 'PROMPT_REQUIRED', message: 'Enter a Salesforce development request.' } }); }
