@@ -1,7 +1,7 @@
 import { config } from '../config.js';
 import { stableHash } from '../utils/hash.js';
 import { assertTrustedOrgContext } from './orgContextTrust.js';
-import { retrieveMetadata as retrieveSfMetadata, runSfCommand } from './sfExecutor.js';
+import { retrieveMetadata as retrieveSfMetadata, runSfCommand, verifySelectedOrg } from './sfExecutor.js';
 
 const ALLOWED_METADATA_FAMILIES = new Set(['CustomObject', 'CustomField', 'Flow', 'ApexClass', 'ApexTrigger', 'ValidationRule', 'Layout', 'PermissionSet']);
 const DEFAULT_MAX_OBJECTS = 4;
@@ -9,7 +9,7 @@ const DEFAULT_MAX_FIELDS_PER_OBJECT = 50;
 const DEFAULT_MAX_VERIFICATION_AGE_MS = 10 * 60 * 1000;
 const DONATION_OBJECT_CANDIDATES = ['GiftCommitment', 'GiftTransaction'];
 
-export async function inspectFlowRequirement({ requirement: _requirement, orgContext }, dependencies = {}) {
+export async function inspectFlowRequirement({ requirement, orgContext }, dependencies = {}) {
   const clock = dependencies.clock || (() => new Date());
   assertInspectionOrgContext(orgContext, clock, dependencies.maxVerificationAgeMs ?? config.maxOrgVerificationAgeMs ?? DEFAULT_MAX_VERIFICATION_AGE_MS);
   const sf = dependencies.sf || defaultSf(orgContext);
@@ -27,7 +27,7 @@ export async function inspectFlowRequirement({ requirement: _requirement, orgCon
     const objectCandidates = objectRows.map((row) => parseObjectCandidate(row, orgContext, observedAt));
     spendComponents(state, objectCandidates);
 
-    await discoverFields(state, sf, orgContext, observedAt);
+    await discoverFields(state, sf, orgContext, observedAt, requirement);
 
     for (const operationFactory of [flowOperation, apexClassOperation, apexTriggerOperation, validationRuleOperation, layoutOperation, permissionSetOperation]) {
       if (state.budgetRemaining <= 0) break;
@@ -70,6 +70,7 @@ export function validateMetadataComponents(components, options = {}) {
 function defaultSf(orgContext) {
   return {
     query: ({ query, useToolingApi }) => runSfCommand(useToolingApi ? 'toolingQuery' : 'dataQuery', { query }, { orgContext }),
+    verifyOrg: () => verifySelectedOrg(orgContext),
     retrieveMetadata: ({ components }) => retrieveSfMetadata({ components, orgContext })
   };
 }
@@ -91,6 +92,7 @@ function inspectionState(orgContext, observedAt, limits) {
     layouts: [],
     permissionSets: [],
     evidence: [],
+    statusValueEvidence: [],
     ambiguities: []
   };
 }
@@ -150,10 +152,17 @@ function permissionSetOperation(state) {
     true);
 }
 
-function fieldDefinitionOperation(objectApiName, limit) {
-  return queryDescriptor(`field-definition-discovery:${objectApiName}`, 'FieldDefinition.records', 'CustomField', limit,
-    `SELECT EntityDefinition.QualifiedApiName, QualifiedApiName, Label, DataType, RelationshipName, ReferenceTo, ValueSet.Name FROM FieldDefinition WHERE EntityDefinition.QualifiedApiName = '${objectApiName}' AND (QualifiedApiName IN ('GiftCommitmentId','Status') OR DataType IN ('Lookup','MasterDetail','Picklist')) LIMIT ${limit}`,
+function fieldDefinitionExactOperation(objectApiName, fieldApiName) {
+  return queryDescriptor(`field-definition-exact:${objectApiName}.${fieldApiName}`, 'FieldDefinition.records', 'CustomField', 1,
+    `SELECT EntityDefinition.QualifiedApiName, QualifiedApiName, Label, DataType, RelationshipName, ReferenceTo FROM FieldDefinition WHERE EntityDefinition.QualifiedApiName = '${objectApiName}' AND QualifiedApiName = '${fieldApiName}' LIMIT 1`,
     (row, orgContext, observedAt) => parseFieldDefinition(row, objectApiName, orgContext, observedAt),
+    true);
+}
+
+function picklistValuesOperation(objectApiName, fieldApiName, limit) {
+  return queryDescriptor(`picklist-values:${objectApiName}.${fieldApiName}`, 'PicklistValueInfo.records', 'PicklistValueInfo', limit,
+    `SELECT EntityParticle.EntityDefinition.QualifiedApiName, EntityParticle.QualifiedApiName, Value, Label, IsActive FROM PicklistValueInfo WHERE EntityParticle.EntityDefinition.QualifiedApiName = '${objectApiName}' AND EntityParticle.QualifiedApiName = '${fieldApiName}' LIMIT ${limit}`,
+    parsePicklistValue,
     true);
 }
 
@@ -170,12 +179,20 @@ async function runQueryOperation(sf, operation, orgContext) {
   return records;
 }
 
-async function discoverFields(state, sf, orgContext, observedAt) {
-  for (const object of state.objects.slice(0, state.limits.maxObjects)) {
+async function discoverFields(state, sf, orgContext, observedAt, requirement) {
+  const candidates = fieldCandidates(state, requirement);
+  for (const candidate of candidates) {
     if (state.budgetRemaining <= 0) break;
-    const operation = fieldDefinitionOperation(object.apiName, Math.min(state.limits.maxFieldsPerObject, state.budgetRemaining));
+    const operation = fieldDefinitionExactOperation(candidate.objectApiName, candidate.fieldApiName);
     const rows = await runQueryOperation(sf, operation, orgContext);
     spendComponents(state, rows.map((row) => operation.parser(row, orgContext, observedAt)));
+  }
+
+  for (const statusField of state.fields.filter((field) => /status/i.test(field.apiName))) {
+    const operation = picklistValuesOperation(statusField.objectApiName, statusField.apiName, Math.min(state.limits.maxFieldsPerObject, 4));
+    const rows = await runQueryOperation(sf, operation, orgContext);
+    const values = rows.map((row) => operation.parser(row, orgContext, observedAt));
+    applyPicklistValues(state, statusField, values, operation.operationId);
   }
 }
 
@@ -200,8 +217,55 @@ function parseFieldDefinition(row, objectApiName, orgContext, observedAt) {
     dataType: row.DataType || '',
     referenceTo: referenceTarget(row.ReferenceTo),
     relationshipName: row.RelationshipName || '',
-    values: parseFieldValues(row)
+    values: []
   });
+}
+
+function parsePicklistValue(row) {
+  const objectApiName = row.EntityParticle?.EntityDefinition?.QualifiedApiName;
+  const fieldApiName = row.EntityParticle?.QualifiedApiName;
+  const value = row.Value;
+  if (!objectApiName || !fieldApiName || !value || typeof row.IsActive !== 'boolean') throw codedError('ORG_INSPECTION_RESULT_SHAPE', 'PicklistValueInfo row is missing required value evidence.');
+  return { objectApiName, fieldApiName, value, label: row.Label || value, active: row.IsActive };
+}
+
+function fieldCandidates(state, requirement) {
+  const requirementText = [requirement?.summary, requirement?.businessRequirement, ...(requirement?.acceptanceCriteria || [])].join(' ');
+  const wantsStatus = /\b(status|paid|completed)\b/i.test(requirementText);
+  const candidates = [];
+  const objects = state.objects.map((item) => item.apiName);
+  for (const sourceObject of objects) {
+    for (const targetObject of objects) {
+      if (sourceObject === targetObject) continue;
+      candidates.push({ objectApiName: sourceObject, fieldApiName: `${targetObject}Id` });
+      candidates.push({ objectApiName: sourceObject, fieldApiName: `${targetObject}__c` });
+    }
+    if (wantsStatus) candidates.push({ objectApiName: sourceObject, fieldApiName: 'Status' });
+  }
+  return uniqueSorted(candidates, (item) => `${item.objectApiName}.${item.fieldApiName}`)
+    .slice(0, state.limits.maxObjects * 3);
+}
+
+function applyPicklistValues(state, statusField, values, operationId) {
+  const activeValues = uniqueSorted(
+    values.filter((item) => item.active && item.objectApiName === statusField.objectApiName && item.fieldApiName === statusField.apiName),
+    'value'
+  );
+  const candidate = state.statusCandidates.find((item) => item.objectApiName === statusField.objectApiName && item.fieldApiName === statusField.apiName);
+  if (candidate) candidate.values = activeValues.map((item) => item.value).sort();
+  for (const item of activeValues) {
+    state.statusValueEvidence.push({
+      evidenceId: `statusValue:${item.objectApiName}.${item.fieldApiName}.${item.value}`,
+      kind: 'STATUS_VALUE',
+      objectApiName: item.objectApiName,
+      fieldApiName: item.fieldApiName,
+      value: item.value,
+      label: item.label,
+      operationId,
+      sourceOrgId: state.orgContext.expectedOrgId,
+      observedAt: state.observedAt
+    });
+  }
 }
 
 function spendComponents(state, rows) {
@@ -251,17 +315,22 @@ function finalizeInspection(state) {
       question: 'Confirm which verified Donation object relationship connects to the verified Recurring Donation object before planning source changes.'
     });
   }
+  if (!hasRequiredStatusValues(state)) {
+    state.ambiguities.push({
+      ambiguityId: 'material:status-values',
+      material: true,
+      question: 'Confirm the verified Donation status values that represent paid or completed donations before planning source changes.'
+    });
+  }
 }
 
 async function retrieveAndMark(state, sf, orgContext) {
+  if (sf.verifyOrg) await sf.verifyOrg(orgContext);
   const result = await sf.retrieveMetadata({ components: state.componentKeys, targetOrg: orgContext.salesforceAlias, orgContext });
   const parsed = parseJson(result.stdout, 'ORG_INSPECTION_RETRIEVAL_FAILED');
-  const success = result.exitCode === 0 && parsed.status === 0 && (parsed.result?.success === true || parsed.result?.done === true || Array.isArray(parsed.result?.files));
-  const targetOrgMatches = parsed.result?.targetOrgId === orgContext.expectedOrgId;
-  const files = parsed.result?.files;
-  const retrievedKeys = Array.isArray(files) && files.length ? new Set(files.map((file) => `${file.type || file.metadataType}:${file.fullName || file.name}`)) : null;
-  const allComponentsRetrieved = retrievedKeys ? state.componentKeys.every((component) => retrievedKeys.has(`${component.type}:${component.apiName}`)) : false;
-  if (!success || !targetOrgMatches || !allComponentsRetrieved) throw retrievalError();
+  const evidence = normalizeRetrieveEvidence(parsed, result.exitCode);
+  const allComponentsRetrieved = state.componentKeys.every((component) => evidence.componentKeys.has(`${component.type}:${component.apiName}`));
+  if (!allComponentsRetrieved) throw retrievalError();
   for (const component of state.components.values()) component.retrievalStatus = 'retrieved';
 }
 
@@ -296,6 +365,7 @@ function buildEvidence(state) {
     ...state.fields.map((item) => evidenceRecord('FIELD', item, state)),
     ...state.relationships.map((item) => evidenceRecord('RELATIONSHIP', item, state)),
     ...state.statusCandidates.map((item) => evidenceRecord('STATUS_CANDIDATE', item, state)),
+    ...state.statusValueEvidence,
     ...state.flows.map((item) => evidenceRecord('FLOW', item, state)),
     ...state.apexAutomation.map((item) => evidenceRecord('APEX_AUTOMATION', item, state)),
     ...state.validationRules.map((item) => evidenceRecord('VALIDATION_RULE', item, state)),
@@ -311,6 +381,13 @@ function evidenceRecord(kind, item, state) {
 function hasConnectedRelationship(state) {
   const objects = new Set(state.objects.map((item) => item.apiName));
   return state.relationships.some((item) => objects.has(item.objectApiName) && objects.has(item.referenceTo));
+}
+
+function hasRequiredStatusValues(state) {
+  return state.statusCandidates.some((item) => {
+    const values = new Set((item.values || []).map((value) => String(value).toLowerCase()));
+    return values.has('paid') && values.has('completed');
+  });
 }
 
 function isRelevant(row) {
@@ -372,6 +449,45 @@ function parseJson(stdout, code) {
   }
 }
 
+function normalizeRetrieveEvidence(parsed, exitCode) {
+  const result = parsed.result || {};
+  const statusText = String(result.status || '').toLowerCase();
+  const failed = ['failed', 'canceled', 'cancelled'].includes(statusText);
+  const success = exitCode === 0 && parsed.status === 0 && result.done === true && !failed;
+  const fileResponses = Array.isArray(result.fileResponses) ? result.fileResponses : [];
+  if (!success || !fileResponses.length) throw retrievalError();
+  const componentKeys = new Set();
+  for (const file of fileResponses) {
+    if (String(file.state || '').toLowerCase() === 'failed') throw retrievalError();
+    const component = componentFromRetrieveFile(file);
+    if (component) componentKeys.add(`${component.type}:${component.apiName}`);
+  }
+  if (!componentKeys.size) throw retrievalError();
+  return { componentKeys };
+}
+
+function componentFromRetrieveFile(file) {
+  if (file.type && file.fullName) return { type: file.type, apiName: file.fullName };
+  const path = String(file.filePath || file.path || '').replace(/\\/g, '/');
+  let match = path.match(/\/classes\/([^/]+)\.cls$/);
+  if (match) return { type: 'ApexClass', apiName: match[1] };
+  match = path.match(/\/triggers\/([^/]+)\.trigger$/);
+  if (match) return { type: 'ApexTrigger', apiName: match[1] };
+  match = path.match(/\/objects\/([^/]+)\/fields\/([^/]+)\.field-meta\.xml$/);
+  if (match) return { type: 'CustomField', apiName: `${match[1]}.${match[2]}` };
+  match = path.match(/\/objects\/([^/]+)\/\1\.object-meta\.xml$/);
+  if (match) return { type: 'CustomObject', apiName: match[1] };
+  match = path.match(/\/flows\/([^/]+)\.flow-meta\.xml$/);
+  if (match) return { type: 'Flow', apiName: match[1] };
+  match = path.match(/\/layouts\/([^/]+)\.layout-meta\.xml$/);
+  if (match) return { type: 'Layout', apiName: match[1] };
+  match = path.match(/\/permissionsets\/([^/]+)\.permissionset-meta\.xml$/);
+  if (match) return { type: 'PermissionSet', apiName: match[1] };
+  match = path.match(/\/objects\/([^/]+)\/validationRules\/([^/]+)\.validationRule-meta\.xml$/);
+  if (match) return { type: 'ValidationRule', apiName: `${match[1]}.${match[2]}` };
+  return null;
+}
+
 function quotedObjects(state) {
   return state.objects.map((item) => `'${item.apiName}'`).join(',');
 }
@@ -381,14 +497,6 @@ function referenceTarget(value) {
   const text = String(value || '');
   if (!text) return '';
   return text.split(',').map((item) => item.trim()).find(Boolean) || '';
-}
-
-function parseFieldValues(row) {
-  const directValues = row.PicklistValues || row.picklistValues;
-  if (Array.isArray(directValues)) return directValues.map((item) => item.value || item.Value || item.fullName || item).filter(Boolean);
-  const valueSet = row.ValueSet?.ValueSetValues || row.ValueSet?.values;
-  if (Array.isArray(valueSet)) return valueSet.map((item) => item.ValueName || item.value || item.FullName).filter(Boolean);
-  return [];
 }
 
 function objectApiNameFromLabel(label) {

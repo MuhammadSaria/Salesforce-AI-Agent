@@ -55,17 +55,71 @@ test('realistic discovery sequence identifies GiftTransaction to GiftCommitment 
   assert.ok(inspection.primaryMetadata.every((item) => item.retrievalStatus === 'retrieved'));
 });
 
-test('large object describe responses do not exceed budget before relevant field filtering', async () => {
+test('large FieldDefinition result pages do not hide required fields', async () => {
   const calls = [];
   const inspection = await inspectFlowRequirement({
     requirement: requirement('When a Donation related to a Recurring Donation becomes Paid/Completed, assign its permanent sequential installment number.'),
     orgContext: trustedContext()
-  }, { sf: realisticSf(calls, { largeDescribe: true }), clock: fixedClock, maxComponents: 7, maxObjects: 2, maxFieldsPerObject: 3 });
+  }, { sf: realisticSf(calls, { irrelevantFieldsBeforeRequired: true }), clock: fixedClock, maxComponents: 7, maxObjects: 2, maxFieldsPerObject: 3 });
 
   assert.deepEqual(inspection.relationships.map((item) => `${item.objectApiName}.${item.fieldApiName}->${item.referenceTo}`), ['GiftTransaction.GiftCommitmentId->GiftCommitment']);
   assert.ok(inspection.statusCandidates.some((item) => item.fieldApiName === 'Status' && item.values.includes('Paid')));
   assert.equal(inspection.primaryMetadata.length <= 7, true);
-  assert.ok(calls.some((call) => call.operationId?.startsWith('field-definition-discovery:') && call.useToolingApi === true));
+  assert.ok(calls.some((call) => call.operationId === 'field-definition-exact:GiftTransaction.GiftCommitmentId' && call.useToolingApi === true));
+  assert.ok(calls.some((call) => call.operationId === 'field-definition-exact:GiftTransaction.Status' && call.useToolingApi === true));
+  assert.equal(calls.some((call) => /\bDataType\s+IN\b/.test(call.query || '')), false);
+  assert.equal(calls.some((call) => call.command === 'describe'), false);
+});
+
+test('missing deterministic field proof returns material ambiguity without retrieval', async () => {
+  const calls = [];
+  const inspection = await inspectFlowRequirement({
+    requirement: requirement('When a Donation related to a Recurring Donation becomes Paid/Completed, assign its permanent sequential installment number.'),
+    orgContext: trustedContext()
+  }, { sf: realisticSf(calls, { noRelationship: true }), clock: fixedClock, maxComponents: 25 });
+
+  assert.ok(inspection.ambiguities.some((item) => item.material && item.ambiguityId === 'material:flow-object-relationship'));
+  assert.equal(calls.some((call) => call.command === 'retrieveMetadata'), false);
+});
+
+test('status values are verified only from bounded PicklistValueInfo evidence', async () => {
+  const calls = [];
+  const inspection = await inspectFlowRequirement({
+    requirement: requirement('When a Donation related to a Recurring Donation becomes Paid/Completed, assign its permanent sequential installment number.'),
+    orgContext: trustedContext()
+  }, { sf: realisticSf(calls), clock: fixedClock, maxComponents: 25 });
+
+  const picklistCall = calls.find((call) => call.operationId === 'picklist-values:GiftTransaction.Status');
+  assert.ok(picklistCall.useToolingApi);
+  assert.match(picklistCall.query, /SELECT EntityParticle\.EntityDefinition\.QualifiedApiName, EntityParticle\.QualifiedApiName, Value, Label, IsActive FROM PicklistValueInfo/);
+  assert.match(picklistCall.query, /LIMIT\s+\d+/);
+  assert.ok(inspection.statusCandidates.some((item) => item.fieldApiName === 'Status' && item.values.includes('Paid') && item.values.includes('Completed')));
+  assert.ok(inspection.evidence.some((item) => item.kind === 'STATUS_VALUE' && item.objectApiName === 'GiftTransaction' && item.fieldApiName === 'Status' && item.value === 'Paid' && item.operationId === 'picklist-values:GiftTransaction.Status'));
+});
+
+test('missing or unusable picklist value evidence returns material ambiguity', async () => {
+  for (const options of [{ noPicklistValues: true }, { noPaidCompletedValues: true }]) {
+    const calls = [];
+    const inspection = await inspectFlowRequirement({
+      requirement: requirement('When a Donation related to a Recurring Donation becomes Paid/Completed, assign its permanent sequential installment number.'),
+      orgContext: trustedContext()
+    }, { sf: realisticSf(calls, options), clock: fixedClock, maxComponents: 25 });
+
+    assert.ok(inspection.ambiguities.some((item) => item.material && item.ambiguityId === 'material:status-values'));
+    assert.equal(calls.some((call) => call.command === 'retrieveMetadata'), false);
+  }
+});
+
+test('malformed or excessive picklist value responses are controlled failures', async () => {
+  for (const options of [{ malformedPicklistValues: true }, { excessivePicklistValues: true }]) {
+    await assert.rejects(
+      inspectFlowRequirement({
+        requirement: requirement('When a Donation related to a Recurring Donation becomes Paid/Completed, assign its permanent sequential installment number.'),
+        orgContext: trustedContext()
+      }, { sf: realisticSf([], options), clock: fixedClock, maxComponents: 25 }),
+      (error) => ['ORG_INSPECTION_RESULT_SHAPE', 'ORG_INSPECTION_LIMIT_EXCEEDED'].includes(error.code)
+    );
+  }
 });
 
 test('EntityDefinition fake CustomField rows fail instead of fabricating fields', async () => {
@@ -109,7 +163,7 @@ test('query limits never exceed the remaining component budget', async () => {
   for (const call of calls.filter((item) => item.command === 'query' || item.command === 'describe')) {
     assert.ok(call.limit <= remaining);
     if (call.command === 'query' && call.operationId === 'object-candidates') remaining -= 2;
-    if (call.command === 'query' && call.operationId === 'field-definition-discovery:GiftTransaction') remaining -= 2;
+    if (call.command === 'query' && call.operationId === 'field-definition-exact:GiftTransaction.GiftCommitmentId') remaining -= 1;
   }
 });
 
@@ -155,20 +209,38 @@ test('retrieval failures are controlled and do not mark components retrieved', a
     { exitCode: 0, stdout: '{not-json', stderr: '' },
     { exitCode: 0, stdout: JSON.stringify({ status: 1, message: 'failed' }), stderr: '' },
     { exitCode: 0, stdout: JSON.stringify({ status: 0, result: {} }), stderr: '' },
-    { exitCode: 0, stdout: JSON.stringify({ status: 0, result: { files: [] } }), stderr: '' },
-    { exitCode: 0, stdout: JSON.stringify({ status: 0, result: { targetOrgId: ORG_ID } }), stderr: '' },
-    { exitCode: 0, stdout: JSON.stringify({ status: 0, result: { targetOrgId: '00Dg500000E07fAEAR', files: [] } }), stderr: '' },
-    { exitCode: 0, stdout: JSON.stringify({ status: 0, result: { targetOrgId: ORG_ID, files: [] } }), stderr: '' },
-    { exitCode: 0, stdout: JSON.stringify({ status: 0, result: { targetOrgId: ORG_ID, files: [{ fullName: 'GiftTransaction', type: 'CustomObject' }] } }), stderr: '' }
+    { exitCode: 0, stdout: JSON.stringify({ status: 0, result: { done: true, fileResponses: [] } }), stderr: '' },
+    { exitCode: 0, stdout: JSON.stringify({ status: 0, result: { done: true, fileResponses: [{ filePath: 'force-app/main/default/objects/GiftTransaction/GiftTransaction.object-meta.xml', state: 'Changed' }] } }), stderr: '' },
+    { exitCode: 0, stdout: JSON.stringify({ status: 0, result: { done: false, status: 'Canceled', fileResponses: [] } }), stderr: '' },
+    { exitCode: 0, stdout: JSON.stringify({ status: 0, result: { done: true, fileResponses: [{ filePath: 'force-app/main/default/objects/GiftTransaction/fields/GiftCommitmentId.field-meta.xml', state: 'Failed' }] } }), stderr: '' }
   ]) {
     await assert.rejects(
       inspectFlowRequirement({
-        requirement: requirement('Create a recurring donation installment Flow for Donation.'),
+        requirement: requirement('When a Donation related to a Recurring Donation becomes Paid/Completed, assign its permanent sequential installment number.'),
         orgContext: trustedContext()
       }, { sf: realisticSf([], { retrieval }), clock: fixedClock }),
       (error) => error.code === 'ORG_INSPECTION_RETRIEVAL_FAILED' && !/secret-token|Authorization/i.test(error.message)
     );
   }
+});
+
+test('real Salesforce CLI retrieve output is normalized to component evidence', async () => {
+  const inspection = await inspectFlowRequirement({
+    requirement: requirement('When a Donation related to a Recurring Donation becomes Paid/Completed, assign its permanent sequential installment number.'),
+    orgContext: trustedContext()
+  }, { sf: realisticSf([], { retrieval: retrieveSuccessCliResult() }), clock: fixedClock });
+
+  assert.ok(inspection.primaryMetadata.every((item) => item.retrievalStatus === 'retrieved'));
+});
+
+test('wrong org retrieval execution is rejected through verified org check', async () => {
+  await assert.rejects(
+    inspectFlowRequirement({
+      requirement: requirement('When a Donation related to a Recurring Donation becomes Paid/Completed, assign its permanent sequential installment number.'),
+      orgContext: trustedContext()
+    }, { sf: realisticSf([], { rejectRetrievalOrg: true }), clock: fixedClock }),
+    (error) => error.code === 'ORG_VERIFICATION_FAILED'
+  );
 });
 
 test('empty scope, missing relationship, and unrelated relationship block planning', async () => {
@@ -192,7 +264,7 @@ test('empty scope, missing relationship, and unrelated relationship block planni
 
 test('verified connected relationship allows planning guard to pass', async () => {
   const inspection = await inspectFlowRequirement({
-    requirement: requirement('Create a recurring donation installment Flow for Donation.'),
+    requirement: requirement('When a Donation related to a Recurring Donation becomes Paid/Completed, assign its permanent sequential installment number.'),
     orgContext: trustedContext()
   }, { sf: realisticSf(), clock: fixedClock });
 
@@ -200,7 +272,7 @@ test('verified connected relationship allows planning guard to pass', async () =
     jobId: 'job-1',
     nextPlanVersion: 1,
     orgContext: { customerName: 'Providus', displayName: 'Sandbox', expectedOrgId: ORG_ID, environment: 'developer' }
-  }, requirement('Create a recurring donation installment Flow for Donation.'), inspection, []));
+  }, requirement('When a Donation related to a Recurring Donation becomes Paid/Completed, assign its permanent sequential installment number.'), inspection, []));
 });
 
 test('inspection requires fresh verified org context timestamp', async () => {
@@ -231,15 +303,24 @@ function realisticSf(calls = [], options = {}) {
     async query(request) {
       calls.push({ command: 'query', ...request });
       if (options.failQuery) return { exitCode: 1, stdout: '', stderr: 'Authorization: Bearer secret-token' };
+      if (options.irrelevantFieldsBeforeRequired && /\bDataType\s+IN\b/.test(request.query || '')) {
+        return jsonResult(irrelevantQualifyingFieldRowsBeforeRequired().slice(0, request.limit));
+      }
       return jsonResult(recordsForOperation(request, options));
     },
-    async describeSObject(request) {
-      calls.push({ command: 'describe', ...request });
-      return jsonResult(describeForObject(request.objectApiName, options).result);
+    async verifyOrg() {
+      calls.push({ command: 'verifyOrg', targetOrg: 'verified-alias' });
+      if (options.rejectRetrievalOrg) {
+        const error = new Error('Salesforce org verification failed.');
+        error.code = 'ORG_VERIFICATION_FAILED';
+        throw error;
+      }
+      return { organizationId: ORG_ID };
     },
-    async retrieveMetadata({ components, targetOrg }) {
+    async retrieveMetadata({ components, targetOrg, orgContext }) {
+      assert.equal(orgContext.expectedOrgId, ORG_ID);
       calls.push({ command: 'retrieveMetadata', targetOrg, components: components.map((item) => `${item.type}:${item.apiName}`) });
-      return options.retrieval || jsonResult({ targetOrgId: ORG_ID, files: components.map((item) => ({ fullName: item.apiName, type: item.type })) });
+      return options.retrieval || retrieveSuccessCliResult();
     }
   };
 }
@@ -254,8 +335,15 @@ function recordsForOperation(request, options) {
     ];
     return options.oversizedObjects ? rows : rows.slice(0, request.limit);
   }
-  if (request.operationId?.startsWith('field-definition-discovery:')) {
-    return fieldDefinitionRows(request.operationId.split(':')[1], options).slice(0, request.limit);
+  if (request.operationId?.startsWith('field-definition-exact:')) {
+    const [, qualifiedName] = request.operationId.split(':');
+    const [objectApiName, fieldApiName] = qualifiedName.split('.');
+    return exactFieldDefinitionRows(objectApiName, fieldApiName, options).slice(0, request.limit);
+  }
+  if (request.operationId?.startsWith('picklist-values:')) {
+    if (options.malformedPicklistValues) return [{ EntityParticle: { QualifiedApiName: 'Status' } }];
+    const rows = picklistValueRows(options);
+    return options.excessivePicklistValues ? [...rows, { ...rows[0], Value: 'Extra' }] : rows.slice(0, request.limit);
   }
   const rows = {
     'flow-discovery': [
@@ -272,57 +360,88 @@ function recordsForOperation(request, options) {
   return rows.slice(0, request.limit);
 }
 
-function fieldDefinitionRows(objectApiName, options) {
+function exactFieldDefinitionRows(objectApiName, fieldApiName, options) {
   if (objectApiName !== 'GiftTransaction') return [];
-  return [
-    {
+  if (fieldApiName === 'GiftCommitmentId') {
+    if (options.noRelationship) return [];
+    return [{
       EntityDefinition: { QualifiedApiName: 'GiftTransaction' },
       QualifiedApiName: 'GiftCommitmentId',
       Label: 'Gift Commitment',
       DataType: 'Lookup',
-      ReferenceTo: options.noRelationship ? '' : options.unrelatedRelationship ? 'Account' : 'GiftCommitment',
-      RelationshipName: options.noRelationship ? null : options.unrelatedRelationship ? 'Account' : 'GiftCommitment',
+      ReferenceTo: options.unrelatedRelationship ? 'Account' : 'GiftCommitment',
+      RelationshipName: options.unrelatedRelationship ? 'Account' : 'GiftCommitment',
       dependencyLevel: options.tooDeepField ? 1 : 0
-    },
+    }];
+  }
+  if (fieldApiName !== 'Status') return [];
+  return [
     {
       EntityDefinition: { QualifiedApiName: 'GiftTransaction' },
       QualifiedApiName: 'Status',
       Label: 'Status',
-      DataType: 'Picklist',
-      ValueSet: { ValueSetValues: [{ ValueName: 'Pending' }, { ValueName: 'Paid' }, { ValueName: 'Completed' }, { ValueName: 'Reversed' }] }
-    },
-    ...(options.unrelatedRows ? [{
-      EntityDefinition: { QualifiedApiName: 'Account' },
-      QualifiedApiName: 'Unrelated__c',
-      Label: 'Unrelated',
-      DataType: 'Text'
-    }] : [])
+      DataType: 'Picklist'
+    }
   ];
 }
 
-function describeForObject(objectApiName, options) {
-  if (objectApiName === 'GiftTransaction') {
-    const fields = [
-      {
-        name: 'GiftCommitmentId',
-        label: 'Gift Commitment',
-        type: 'reference',
-        referenceTo: options.noRelationship ? [] : options.unrelatedRelationship ? ['Account'] : ['GiftCommitment'],
-        relationshipName: options.noRelationship ? null : options.unrelatedRelationship ? 'Account' : 'GiftCommitment'
-      },
-      { name: 'Status', label: 'Status', type: 'picklist', picklistValues: [{ value: 'Pending' }, { value: 'Paid' }, { value: 'Completed' }, { value: 'Reversed' }] }
-    ];
-    if (options.largeDescribe) {
-      const unrelatedFields = Array.from({ length: 40 }, (_, index) => ({ name: `Unrelated_${index}__c`, label: `Unrelated ${index}`, type: 'string' }));
-      return { result: { name: objectApiName, fields: [...unrelatedFields, ...fields] } };
-    }
-    return { result: { name: objectApiName, fields: options.tooDeepField ? fields.map((field) => ({ ...field, dependencyLevel: 1 })) : fields } };
-  }
-  return { result: { name: objectApiName, fields: [] } };
+function irrelevantQualifyingFieldRowsBeforeRequired() {
+  return [
+    ...Array.from({ length: 10 }, (_, index) => ({
+      EntityDefinition: { QualifiedApiName: 'GiftTransaction' },
+      QualifiedApiName: `IrrelevantLookup${index}Id`,
+      Label: `Irrelevant Lookup ${index}`,
+      DataType: 'Lookup',
+      ReferenceTo: 'Account',
+      RelationshipName: `IrrelevantLookup${index}`
+    })),
+    ...exactFieldDefinitionRows('GiftTransaction', 'GiftCommitmentId', {}),
+    ...exactFieldDefinitionRows('GiftTransaction', 'Status', {})
+  ];
+}
+
+function picklistValueRows(options = {}) {
+  if (options.noPicklistValues) return [];
+  const values = options.noPaidCompletedValues ? ['Pending', 'Reversed'] : ['Pending', 'Paid', 'Completed', 'Reversed'];
+  return values.map((value) => ({
+    EntityParticle: {
+      EntityDefinition: { QualifiedApiName: 'GiftTransaction' },
+      QualifiedApiName: 'Status'
+    },
+    Value: value,
+    Label: value,
+    IsActive: true
+  }));
 }
 
 function jsonResult(result) {
   return { exitCode: 0, stdout: JSON.stringify({ status: 0, result: Array.isArray(result) ? { records: result } : result }), stderr: '' };
+}
+
+function retrieveSuccessCliResult() {
+  return {
+    exitCode: 0,
+    stdout: JSON.stringify({
+      status: 0,
+      result: {
+        done: true,
+        status: 'Succeeded',
+        fileResponses: [
+          { filePath: 'force-app/main/default/classes/GiftAutomation.cls', state: 'Changed', type: 'ApexClass', fullName: 'GiftAutomation' },
+          { filePath: 'force-app/main/default/triggers/GiftTransactionTrigger.trigger', state: 'Changed', type: 'ApexTrigger', fullName: 'GiftTransactionTrigger' },
+          { filePath: 'force-app/main/default/objects/GiftTransaction/fields/GiftCommitmentId.field-meta.xml', state: 'Changed', type: 'CustomField', fullName: 'GiftTransaction.GiftCommitmentId' },
+          { filePath: 'force-app/main/default/objects/GiftTransaction/fields/Status.field-meta.xml', state: 'Changed', type: 'CustomField', fullName: 'GiftTransaction.Status' },
+          { filePath: 'force-app/main/default/objects/GiftCommitment/GiftCommitment.object-meta.xml', state: 'Changed', type: 'CustomObject', fullName: 'GiftCommitment' },
+          { filePath: 'force-app/main/default/objects/GiftTransaction/GiftTransaction.object-meta.xml', state: 'Changed', type: 'CustomObject', fullName: 'GiftTransaction' },
+          { filePath: 'force-app/main/default/flows/GiftTransaction_Numbering.flow-meta.xml', state: 'Changed', type: 'Flow', fullName: 'GiftTransaction_Numbering' },
+          { filePath: 'force-app/main/default/layouts/GiftTransaction-Gift Transaction Layout.layout-meta.xml', state: 'Changed', type: 'Layout', fullName: 'GiftTransaction-Gift Transaction Layout' },
+          { filePath: 'force-app/main/default/permissionsets/Gift_Operations.permissionset-meta.xml', state: 'Changed', type: 'PermissionSet', fullName: 'Gift_Operations' },
+          { filePath: 'force-app/main/default/objects/GiftTransaction/validationRules/Require_Status.validationRule-meta.xml', state: 'Changed', type: 'ValidationRule', fullName: 'GiftTransaction.Require_Status' }
+        ]
+      }
+    }),
+    stderr: ''
+  };
 }
 
 function requirement(text) {
