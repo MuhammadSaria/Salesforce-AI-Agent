@@ -268,6 +268,39 @@ test('real Salesforce CLI result.files retrieve output is normalized to componen
   assert.ok(inspection.primaryMetadata.every((item) => item.retrievalStatus === 'retrieved'));
 });
 
+test('canonical Salesforce project paths are required for retrieval evidence', async () => {
+  for (const files of [
+    successRetrieveFiles().map((file, index) => index === 0 ? { ...file, path: '../classes/GiftAutomation.cls' } : file),
+    successRetrieveFiles().map((file, index) => index === 0 ? { ...file, path: 'C:/outside/classes/GiftAutomation.cls' } : file),
+    successRetrieveFiles().map((file, index) => index === 0 ? { ...file, path: 'other-root/main/default/classes/GiftAutomation.cls' } : file),
+    successRetrieveFiles().map((file, index) => index === 0 ? { ...file, path: 'force-app//main/default/classes/GiftAutomation.cls' } : file),
+    successRetrieveFiles().map((file, index) => index === 0 ? { ...file, path: 'force-app/main/default/classes/GiftAutomation.cls-meta.xml' } : file),
+    successRetrieveFiles().map((file, index) => index === 0 ? { ...file, path: 'force-app/main/default/staticresources/GiftAutomation.resource-meta.xml' } : file)
+  ]) {
+    await assert.rejects(
+      inspectFlowRequirement({
+        requirement: requirement('When a Donation related to a Recurring Donation becomes Paid/Completed, assign its permanent sequential installment number.'),
+        orgContext: trustedContext()
+      }, { sf: realisticSf([], { retrieval: retrieveFilesResult(files) }), clock: fixedClock }),
+      (error) => error.code === 'ORG_INSPECTION_RETRIEVAL_FAILED'
+    );
+  }
+});
+
+test('canonical Salesforce project paths accept POSIX and Windows separators', async () => {
+  for (const files of [
+    successRetrieveFiles(),
+    successRetrieveFiles().map((file) => ({ ...file, path: file.path.replaceAll('/', '\\') }))
+  ]) {
+    const inspection = await inspectFlowRequirement({
+      requirement: requirement('When a Donation related to a Recurring Donation becomes Paid/Completed, assign its permanent sequential installment number.'),
+      orgContext: trustedContext()
+    }, { sf: realisticSf([], { retrieval: retrieveFilesResult(files) }), clock: fixedClock });
+
+    assert.ok(inspection.primaryMetadata.every((item) => item.retrievalStatus === 'retrieved'));
+  }
+});
+
 test('result.files retrieval requires exact requested component evidence only', async () => {
   for (const files of [
     [...successRetrieveFiles(), { path: 'force-app/main/default/flows/Unexpected_Flow.flow-meta.xml', state: 'Changed' }],
@@ -277,6 +310,23 @@ test('result.files retrieval requires exact requested component evidence only', 
     successRetrieveFiles().map((file, index) => index === 0 ? { ...file, path: 'force-app/main/default/classes/OtherClass.cls', type: 'ApexClass', fullName: 'GiftAutomation' } : file),
     successRetrieveFiles().filter((file) => !file.path.includes('/flows/')),
     []
+  ]) {
+    await assert.rejects(
+      inspectFlowRequirement({
+        requirement: requirement('When a Donation related to a Recurring Donation becomes Paid/Completed, assign its permanent sequential installment number.'),
+        orgContext: trustedContext()
+      }, { sf: realisticSf([], { retrieval: retrieveFilesResult(files) }), clock: fixedClock }),
+      (error) => error.code === 'ORG_INSPECTION_RETRIEVAL_FAILED'
+    );
+  }
+});
+
+test('retrieval evidence requires complete type/fullName claims when claims are present', async () => {
+  for (const files of [
+    successRetrieveFiles().map((file, index) => index === 0 ? { ...file, type: 'ApexClass' } : file),
+    successRetrieveFiles().map((file, index) => index === 0 ? { ...file, fullName: 'GiftAutomation' } : file),
+    [{ type: 'ApexClass', state: 'Changed' }, ...successRetrieveFiles().slice(1)],
+    [{ fullName: 'GiftAutomation', state: 'Changed' }, ...successRetrieveFiles().slice(1)]
   ]) {
     await assert.rejects(
       inspectFlowRequirement({
@@ -301,6 +351,15 @@ test('consistent path and type/fullName result.files evidence is accepted', asyn
   assert.ok(inspection.primaryMetadata.every((item) => item.retrievalStatus === 'retrieved'));
 });
 
+test('path-only valid result.files evidence is accepted', async () => {
+  const inspection = await inspectFlowRequirement({
+    requirement: requirement('When a Donation related to a Recurring Donation becomes Paid/Completed, assign its permanent sequential installment number.'),
+    orgContext: trustedContext()
+  }, { sf: realisticSf([], { retrieval: retrieveFilesResult(successRetrieveFiles()) }), clock: fixedClock });
+
+  assert.ok(inspection.primaryMetadata.every((item) => item.retrievalStatus === 'retrieved'));
+});
+
 test('duplicate result.files entries are deduplicated as component evidence', async () => {
   const retrieval = retrieveSuccessCliResult();
   const parsed = JSON.parse(retrieval.stdout);
@@ -316,18 +375,20 @@ test('duplicate result.files entries are deduplicated as component evidence', as
 });
 
 test('conflicting duplicate result.files entries are rejected', async () => {
-  const files = [
-    ...successRetrieveFiles(),
-    { path: 'force-app/main/default/classes/GiftAutomation.cls', type: 'ApexClass', fullName: 'OtherClass', state: 'Changed' }
-  ];
-
-  await assert.rejects(
-    inspectFlowRequirement({
-      requirement: requirement('When a Donation related to a Recurring Donation becomes Paid/Completed, assign its permanent sequential installment number.'),
-      orgContext: trustedContext()
-    }, { sf: realisticSf([], { retrieval: retrieveFilesResult(files) }), clock: fixedClock }),
-    (error) => error.code === 'ORG_INSPECTION_RETRIEVAL_FAILED'
-  );
+  for (const files of [
+    [...successRetrieveFiles(), { path: 'force-app/main/default/classes/GiftAutomation.cls', type: 'ApexClass', fullName: 'OtherClass', state: 'Changed' }],
+    [...successRetrieveFiles(), { path: 'force-app/main/default/classes/GiftAutomation.cls', state: 'Deleted' }],
+    [...successRetrieveFiles(), { path: 'force-app/main/default/classes/GiftAutomation.cls', state: 'Changed', type: 'ApexClass', fullName: 'GiftAutomation' }],
+    [...successRetrieveFiles(), { type: 'ApexClass', fullName: 'GiftAutomation', state: 'Changed' }]
+  ]) {
+    await assert.rejects(
+      inspectFlowRequirement({
+        requirement: requirement('When a Donation related to a Recurring Donation becomes Paid/Completed, assign its permanent sequential installment number.'),
+        orgContext: trustedContext()
+      }, { sf: realisticSf([], { retrieval: retrieveFilesResult(files) }), clock: fixedClock }),
+      (error) => error.code === 'ORG_INSPECTION_RETRIEVAL_FAILED'
+    );
+  }
 });
 
 test('fileResponses compatibility retrieve output remains accepted after same-org verification', async () => {

@@ -459,59 +459,87 @@ function normalizeRetrieveEvidence(parsed, exitCode) {
   const retrievedFiles = files.length > 0 ? files : compatibilityFileResponses;
   if (!success || !retrievedFiles.length) throw retrievalError();
   const componentKeys = new Set();
+  const recordsByComponent = new Map();
   for (const file of retrievedFiles) {
-    if (!retrieveFileSucceeded(file)) throw retrievalError();
-    const component = componentFromRetrieveFile(file);
-    if (!component) throw retrievalError();
-    componentKeys.add(`${component.type}:${component.apiName}`);
+    const record = normalizeRetrieveFileEvidence(file);
+    const duplicate = recordsByComponent.get(record.componentKey);
+    if (duplicate && stableHash(duplicate) !== stableHash(record)) throw retrievalError();
+    recordsByComponent.set(record.componentKey, record);
+    componentKeys.add(record.componentKey);
   }
   if (!componentKeys.size) throw retrievalError();
   return { componentKeys };
 }
 
-function retrieveFileSucceeded(file) {
-  if (!file || typeof file !== 'object') return false;
+function normalizeRetrieveFileEvidence(file) {
+  if (!file || typeof file !== 'object') throw retrievalError();
   const state = file.state ?? file.status;
-  return RETRIEVE_FILE_SUCCESS_STATES.has(state);
+  if (!RETRIEVE_FILE_SUCCESS_STATES.has(state)) throw retrievalError();
+  const canonicalPath = canonicalRetrievePath(file.filePath ?? file.path);
+  const claimedComponent = componentFromRetrieveClaim(file);
+  if (!canonicalPath && !claimedComponent) throw retrievalError();
+  const pathComponent = canonicalPath ? componentFromRetrievePath(canonicalPath) : null;
+  if (canonicalPath && !pathComponent) throw retrievalError();
+  if (pathComponent && claimedComponent && !sameComponent(pathComponent, claimedComponent)) throw retrievalError();
+  const component = pathComponent || claimedComponent;
+  validateRetrieveComponent(component);
+  return {
+    canonicalPath: canonicalPath || '',
+    claimPresent: Boolean(claimedComponent),
+    type: component.type,
+    fullName: component.apiName,
+    componentKey: `${component.type}:${component.apiName}`,
+    state
+  };
 }
 
-function componentFromRetrieveFile(file) {
-  const path = String(file.filePath || file.path || '').replace(/\\/g, '/');
-  const pathComponent = path ? componentFromRetrievePath(path) : null;
-  const claimedComponent = componentFromRetrieveClaim(file);
-  if (path && !pathComponent) return null;
-  if (pathComponent && claimedComponent && !sameComponent(pathComponent, claimedComponent)) return null;
-  return pathComponent || claimedComponent;
+function canonicalRetrievePath(value) {
+  if (value === undefined || value === null || value === '') return '';
+  const raw = String(value);
+  const normalized = raw.replace(/\\/g, '/');
+  if (!normalized || normalized.startsWith('/') || normalized.startsWith('//') || /^[A-Za-z]:\//.test(normalized)) throw retrievalError();
+  const segments = normalized.split('/');
+  if (segments.some((segment) => !segment || segment === '.' || segment === '..')) throw retrievalError();
+  if (segments[0] !== 'force-app' || segments[1] !== 'main' || segments[2] !== 'default') throw retrievalError();
+  if (segments.length < 5) throw retrievalError();
+  return segments.join('/');
 }
 
 function componentFromRetrieveClaim(file) {
-  if (!file.type || !file.fullName) return null;
+  const hasType = Object.hasOwn(file, 'type');
+  const hasFullName = Object.hasOwn(file, 'fullName');
+  if (hasType !== hasFullName) throw retrievalError();
+  if (!hasType && !hasFullName) return null;
   const component = { type: String(file.type), apiName: String(file.fullName) };
-  if (!isAllowedFamily(component)) return null;
-  try {
-    validateComponentName(component.type, component.apiName);
-  } catch {
-    return null;
-  }
+  validateRetrieveComponent(component);
   return component;
 }
 
+function validateRetrieveComponent(component) {
+  if (!component || !isAllowedFamily(component)) throw retrievalError();
+  try {
+    validateComponentName(component.type, component.apiName);
+  } catch {
+    throw retrievalError();
+  }
+}
+
 function componentFromRetrievePath(path) {
-  let match = path.match(/\/classes\/([^/]+)\.cls$/);
+  let match = path.match(/^force-app\/main\/default\/classes\/([^/]+)\.cls$/);
   if (match) return { type: 'ApexClass', apiName: match[1] };
-  match = path.match(/\/triggers\/([^/]+)\.trigger$/);
+  match = path.match(/^force-app\/main\/default\/triggers\/([^/]+)\.trigger$/);
   if (match) return { type: 'ApexTrigger', apiName: match[1] };
-  match = path.match(/\/objects\/([^/]+)\/fields\/([^/]+)\.field-meta\.xml$/);
+  match = path.match(/^force-app\/main\/default\/objects\/([^/]+)\/fields\/([^/]+)\.field-meta\.xml$/);
   if (match) return { type: 'CustomField', apiName: `${match[1]}.${match[2]}` };
-  match = path.match(/\/objects\/([^/]+)\/\1\.object-meta\.xml$/);
+  match = path.match(/^force-app\/main\/default\/objects\/([^/]+)\/\1\.object-meta\.xml$/);
   if (match) return { type: 'CustomObject', apiName: match[1] };
-  match = path.match(/\/flows\/([^/]+)\.flow-meta\.xml$/);
+  match = path.match(/^force-app\/main\/default\/flows\/([^/]+)\.flow-meta\.xml$/);
   if (match) return { type: 'Flow', apiName: match[1] };
-  match = path.match(/\/layouts\/([^/]+)\.layout-meta\.xml$/);
+  match = path.match(/^force-app\/main\/default\/layouts\/([^/]+)\.layout-meta\.xml$/);
   if (match) return { type: 'Layout', apiName: match[1] };
-  match = path.match(/\/permissionsets\/([^/]+)\.permissionset-meta\.xml$/);
+  match = path.match(/^force-app\/main\/default\/permissionsets\/([^/]+)\.permissionset-meta\.xml$/);
   if (match) return { type: 'PermissionSet', apiName: match[1] };
-  match = path.match(/\/objects\/([^/]+)\/validationRules\/([^/]+)\.validationRule-meta\.xml$/);
+  match = path.match(/^force-app\/main\/default\/objects\/([^/]+)\/validationRules\/([^/]+)\.validationRule-meta\.xml$/);
   if (match) return { type: 'ValidationRule', apiName: `${match[1]}.${match[2]}` };
   return null;
 }
