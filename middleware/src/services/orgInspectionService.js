@@ -454,16 +454,25 @@ function normalizeRetrieveEvidence(parsed, exitCode) {
   const statusText = String(result.status || '').toLowerCase();
   const failed = ['failed', 'canceled', 'cancelled'].includes(statusText);
   const success = exitCode === 0 && parsed.status === 0 && result.done === true && !failed;
-  const fileResponses = Array.isArray(result.fileResponses) ? result.fileResponses : [];
-  if (!success || !fileResponses.length) throw retrievalError();
+  const files = Array.isArray(result.files) ? result.files : [];
+  const compatibilityFileResponses = files.length === 0 && Array.isArray(result.fileResponses) ? result.fileResponses : [];
+  const retrievedFiles = files.length > 0 ? files : compatibilityFileResponses;
+  if (!success || !retrievedFiles.length) throw retrievalError();
   const componentKeys = new Set();
-  for (const file of fileResponses) {
-    if (String(file.state || '').toLowerCase() === 'failed') throw retrievalError();
+  for (const file of retrievedFiles) {
+    if (!retrieveFileSucceeded(file)) throw retrievalError();
     const component = componentFromRetrieveFile(file);
-    if (component) componentKeys.add(`${component.type}:${component.apiName}`);
+    if (!component) throw retrievalError();
+    componentKeys.add(`${component.type}:${component.apiName}`);
   }
   if (!componentKeys.size) throw retrievalError();
   return { componentKeys };
+}
+
+function retrieveFileSucceeded(file) {
+  if (!file || typeof file !== 'object') return false;
+  const state = String(file.state || file.status || '').toLowerCase();
+  return !['failed', 'canceled', 'cancelled', 'error'].includes(state);
 }
 
 function componentFromRetrieveFile(file) {

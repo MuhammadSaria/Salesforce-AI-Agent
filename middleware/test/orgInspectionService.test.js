@@ -209,10 +209,12 @@ test('retrieval failures are controlled and do not mark components retrieved', a
     { exitCode: 0, stdout: '{not-json', stderr: '' },
     { exitCode: 0, stdout: JSON.stringify({ status: 1, message: 'failed' }), stderr: '' },
     { exitCode: 0, stdout: JSON.stringify({ status: 0, result: {} }), stderr: '' },
-    { exitCode: 0, stdout: JSON.stringify({ status: 0, result: { done: true, fileResponses: [] } }), stderr: '' },
-    { exitCode: 0, stdout: JSON.stringify({ status: 0, result: { done: true, fileResponses: [{ filePath: 'force-app/main/default/objects/GiftTransaction/GiftTransaction.object-meta.xml', state: 'Changed' }] } }), stderr: '' },
-    { exitCode: 0, stdout: JSON.stringify({ status: 0, result: { done: false, status: 'Canceled', fileResponses: [] } }), stderr: '' },
-    { exitCode: 0, stdout: JSON.stringify({ status: 0, result: { done: true, fileResponses: [{ filePath: 'force-app/main/default/objects/GiftTransaction/fields/GiftCommitmentId.field-meta.xml', state: 'Failed' }] } }), stderr: '' }
+    retrieveFilesResult([]),
+    retrieveFilesResult([{ path: 'force-app/main/default/objects/GiftTransaction/GiftTransaction.object-meta.xml', state: 'Changed' }]),
+    retrieveFilesResult([], { done: false, status: 'Canceled' }),
+    retrieveFilesResult([{ path: 'force-app/main/default/objects/GiftTransaction/fields/GiftCommitmentId.field-meta.xml', state: 'Failed' }]),
+    retrieveFilesResult([{ state: 'Changed' }]),
+    retrieveFilesResult([{ path: 'force-app/main/default/staticresources/Unrelated.resource-meta.xml', state: 'Changed' }])
   ]) {
     await assert.rejects(
       inspectFlowRequirement({
@@ -224,12 +226,37 @@ test('retrieval failures are controlled and do not mark components retrieved', a
   }
 });
 
-test('real Salesforce CLI retrieve output is normalized to component evidence', async () => {
+test('real Salesforce CLI result.files retrieve output is normalized to component evidence', async () => {
   const inspection = await inspectFlowRequirement({
     requirement: requirement('When a Donation related to a Recurring Donation becomes Paid/Completed, assign its permanent sequential installment number.'),
     orgContext: trustedContext()
   }, { sf: realisticSf([], { retrieval: retrieveSuccessCliResult() }), clock: fixedClock });
 
+  assert.ok(inspection.primaryMetadata.every((item) => item.retrievalStatus === 'retrieved'));
+});
+
+test('duplicate result.files entries are deduplicated as component evidence', async () => {
+  const retrieval = retrieveSuccessCliResult();
+  const parsed = JSON.parse(retrieval.stdout);
+  parsed.result.files = [...parsed.result.files, parsed.result.files[0], parsed.result.files[2]];
+  retrieval.stdout = JSON.stringify(parsed);
+
+  const inspection = await inspectFlowRequirement({
+    requirement: requirement('When a Donation related to a Recurring Donation becomes Paid/Completed, assign its permanent sequential installment number.'),
+    orgContext: trustedContext()
+  }, { sf: realisticSf([], { retrieval }), clock: fixedClock });
+
+  assert.ok(inspection.primaryMetadata.every((item) => item.retrievalStatus === 'retrieved'));
+});
+
+test('fileResponses compatibility retrieve output remains accepted after same-org verification', async () => {
+  const calls = [];
+  const inspection = await inspectFlowRequirement({
+    requirement: requirement('When a Donation related to a Recurring Donation becomes Paid/Completed, assign its permanent sequential installment number.'),
+    orgContext: trustedContext()
+  }, { sf: realisticSf(calls, { retrieval: retrieveCompatibilityFileResponsesResult() }), clock: fixedClock });
+
+  assert.ok(calls.some((call) => call.command === 'verifyOrg'));
   assert.ok(inspection.primaryMetadata.every((item) => item.retrievalStatus === 'retrieved'));
 });
 
@@ -419,6 +446,21 @@ function jsonResult(result) {
 }
 
 function retrieveSuccessCliResult() {
+  return retrieveFilesResult([
+    { path: 'force-app/main/default/classes/GiftAutomation.cls', state: 'Changed' },
+    { path: 'force-app/main/default/triggers/GiftTransactionTrigger.trigger', state: 'Changed' },
+    { path: 'force-app/main/default/objects/GiftTransaction/fields/GiftCommitmentId.field-meta.xml', state: 'Changed' },
+    { path: 'force-app/main/default/objects/GiftTransaction/fields/Status.field-meta.xml', state: 'Changed' },
+    { path: 'force-app/main/default/objects/GiftCommitment/GiftCommitment.object-meta.xml', state: 'Changed' },
+    { path: 'force-app/main/default/objects/GiftTransaction/GiftTransaction.object-meta.xml', state: 'Changed' },
+    { path: 'force-app/main/default/flows/GiftTransaction_Numbering.flow-meta.xml', state: 'Changed' },
+    { path: 'force-app/main/default/layouts/GiftTransaction-Gift Transaction Layout.layout-meta.xml', state: 'Changed' },
+    { path: 'force-app/main/default/permissionsets/Gift_Operations.permissionset-meta.xml', state: 'Changed' },
+    { path: 'force-app/main/default/objects/GiftTransaction/validationRules/Require_Status.validationRule-meta.xml', state: 'Changed' }
+  ]);
+}
+
+function retrieveFilesResult(files, resultOverrides = {}) {
   return {
     exitCode: 0,
     stdout: JSON.stringify({
@@ -426,18 +468,24 @@ function retrieveSuccessCliResult() {
       result: {
         done: true,
         status: 'Succeeded',
-        fileResponses: [
-          { filePath: 'force-app/main/default/classes/GiftAutomation.cls', state: 'Changed', type: 'ApexClass', fullName: 'GiftAutomation' },
-          { filePath: 'force-app/main/default/triggers/GiftTransactionTrigger.trigger', state: 'Changed', type: 'ApexTrigger', fullName: 'GiftTransactionTrigger' },
-          { filePath: 'force-app/main/default/objects/GiftTransaction/fields/GiftCommitmentId.field-meta.xml', state: 'Changed', type: 'CustomField', fullName: 'GiftTransaction.GiftCommitmentId' },
-          { filePath: 'force-app/main/default/objects/GiftTransaction/fields/Status.field-meta.xml', state: 'Changed', type: 'CustomField', fullName: 'GiftTransaction.Status' },
-          { filePath: 'force-app/main/default/objects/GiftCommitment/GiftCommitment.object-meta.xml', state: 'Changed', type: 'CustomObject', fullName: 'GiftCommitment' },
-          { filePath: 'force-app/main/default/objects/GiftTransaction/GiftTransaction.object-meta.xml', state: 'Changed', type: 'CustomObject', fullName: 'GiftTransaction' },
-          { filePath: 'force-app/main/default/flows/GiftTransaction_Numbering.flow-meta.xml', state: 'Changed', type: 'Flow', fullName: 'GiftTransaction_Numbering' },
-          { filePath: 'force-app/main/default/layouts/GiftTransaction-Gift Transaction Layout.layout-meta.xml', state: 'Changed', type: 'Layout', fullName: 'GiftTransaction-Gift Transaction Layout' },
-          { filePath: 'force-app/main/default/permissionsets/Gift_Operations.permissionset-meta.xml', state: 'Changed', type: 'PermissionSet', fullName: 'Gift_Operations' },
-          { filePath: 'force-app/main/default/objects/GiftTransaction/validationRules/Require_Status.validationRule-meta.xml', state: 'Changed', type: 'ValidationRule', fullName: 'GiftTransaction.Require_Status' }
-        ]
+        files,
+        ...resultOverrides
+      }
+    }),
+    stderr: ''
+  };
+}
+
+function retrieveCompatibilityFileResponsesResult() {
+  const parsed = JSON.parse(retrieveSuccessCliResult().stdout);
+  return {
+    exitCode: 0,
+    stdout: JSON.stringify({
+      status: 0,
+      result: {
+        done: true,
+        status: 'Succeeded',
+        fileResponses: parsed.result.files.map((file) => ({ filePath: file.path, state: file.state }))
       }
     }),
     stderr: ''
