@@ -20,7 +20,7 @@
 - Phase 1 Task 5: Build deterministic org inspection for Flow work
   - Implementation commit: 70bea0deb1605fd32d4ef784f5711e77e486d88b
   - Correction commit: d1ad742
-  - Tooling/large-object/retrieval-evidence correction commit: pending push
+  - Tooling/large-object/retrieval-evidence correction commit: 9469387
   - Verification date: 2026-08-02
   - Verification:
     - `cd middleware && node --import ./test/setup.js --test test/orgInspectionService.test.js` - RED first, failed for expected missing `orgInspectionService.js`.
