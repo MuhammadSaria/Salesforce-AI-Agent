@@ -22,6 +22,7 @@
   - Correction commit: d1ad742
   - Tooling/large-object/retrieval-evidence correction commit: 9469387
   - Deterministic FieldDefinition/picklist/retrieve-adapter correction commit: 054528c
+  - Real `result.files` retrieve-adapter correction commit: 5c0ff5c2df165c0d0dd94ca637115fb567599f8f
   - Verification date: 2026-08-02
   - Verification:
     - `cd middleware && node --import ./test/setup.js --test test/orgInspectionService.test.js` - RED first, failed for expected missing `orgInspectionService.js`.
@@ -48,6 +49,12 @@
     - `cd middleware && node --import ./test/setup.js --test test/orgInspectionService.test.js test/metadataScope.test.js test/metadataCapabilities.test.js` - PASS, 25 tests, 0 skipped.
     - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/orgInspectionService.test.js test/metadataScope.test.js test/metadataCapabilities.test.js test/apiAuth.test.js test/sameOrgService.test.js test/security.test.js test/agentSameOrg.test.js test/conversationApi.test.js test/developmentJob.test.js test/jobState.test.js test/jobStore.test.js test/orchestrator.test.js test/sfFailureMessage.test.js` - PASS, 122 tests, 0 skipped.
     - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 172 tests and 0 skipped.
+  - Real `result.files` retrieve-adapter correction verification:
+    - `cd middleware && node --import ./test/setup.js --test test/orgInspectionService.test.js test/metadataCapabilities.test.js` - RED first, failed for expected `result.files` retrieval evidence adapter gap.
+    - `cd middleware && node --import ./test/setup.js --test test/orgInspectionService.test.js test/metadataCapabilities.test.js` - PASS, 24 tests, 0 skipped.
+    - `cd middleware && node --import ./test/setup.js --test test/orgInspectionService.test.js test/metadataScope.test.js test/metadataCapabilities.test.js` - PASS, 27 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/orgInspectionService.test.js test/metadataScope.test.js test/metadataCapabilities.test.js test/sameOrgService.test.js test/security.test.js test/agentSameOrg.test.js test/apiAuth.test.js test/conversationApi.test.js test/developmentJob.test.js test/jobState.test.js test/jobStore.test.js test/orchestrator.test.js test/sfFailureMessage.test.js` - PASS, 124 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 174 tests and 0 skipped.
   - Review:
     - `inspectFlowRequirement({ requirement, orgContext })` returns deterministic Flow inspection sections for objects, fields, relationships, status candidates, flows, Apex automation, validation rules, layouts, permission sets, evidence, and ambiguities.
     - Org inspection requires a WeakSet-trusted same-org context with fresh verified org evidence, rejects production contexts, and ignores prompt/body org or target-org values.
@@ -70,7 +77,7 @@
   - Deterministic FieldDefinition/picklist/retrieve-adapter correction review:
     - Required field discovery now uses exact bounded `FieldDefinition` queries for candidate relationship and status field API names instead of relying on the first page of broad lookup/picklist results.
     - Paid and Completed values are verified only from bounded Tooling API `PicklistValueInfo` rows with object, field, value, operation, observed timestamp, and verified org provenance; missing or unusable values produce material ambiguity and skip retrieval.
-    - Retrieval verification normalizes Salesforce CLI `sf project retrieve start --json` `fileResponses`/paths into component evidence, rejects empty, partial, failed, canceled, malformed, and unexpected output, and performs same-org verification before retrieval.
+    - Retrieval verification normalizes Salesforce CLI `sf project retrieve start --json` `result.files` paths as the primary component-evidence contract, retains `fileResponses` only as compatibility, rejects empty, partial, failed, canceled, malformed, duplicate-only, and unexpected output, and performs same-org verification before retrieval.
 
 - Phase 1 Task 4: Enforce same-sandbox identity and permission claims
   - Implementation commit: 17f1a71dc4d746bc6093ba708a8dc934e1d506ed
