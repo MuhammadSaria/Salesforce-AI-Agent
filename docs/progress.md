@@ -12,10 +12,28 @@
 
 ## Current Task
 
-- Task: Phase 1 Task 5
+- Task: Phase 1 Task 6
 - Status: Not started
 
 ## Completed Tasks
+
+- Phase 1 Task 5: Build deterministic org inspection for Flow work
+  - Implementation commit: pending push
+  - Verification date: 2026-08-02
+  - Verification:
+    - `cd middleware && node --import ./test/setup.js --test test/orgInspectionService.test.js` - RED first, failed for expected missing `orgInspectionService.js`.
+    - `cd middleware && node --import ./test/setup.js --test test/metadataCapabilities.test.js` - RED first for the operation-policy regression, failed because `retrieveMetadata` did not yet reject disallowed retrieve operations before CLI execution.
+    - `cd middleware && node --import ./test/setup.js --test test/orgInspectionService.test.js test/metadataScope.test.js test/metadataCapabilities.test.js` - PASS, 14 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --input-type=module -e "import pg from 'pg'; const c = new pg.Client({ connectionString: process.env.TEST_DATABASE_URL }); await c.connect(); const r = await c.query('select current_database() as db, inet_server_addr() as addr, inet_server_port() as port'); console.log(JSON.stringify(r.rows[0])); await c.end();"` - PASS, connected to `providus_nexus_test` on PostgreSQL port 5432.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/apiAuth.test.js test/sameOrgService.test.js test/security.test.js test/agentSameOrg.test.js test/conversationApi.test.js test/developmentJob.test.js test/jobState.test.js test/jobStore.test.js test/orchestrator.test.js test/sfFailureMessage.test.js` - PASS, 97 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 161 tests and 0 skipped.
+  - Review:
+    - `inspectFlowRequirement({ requirement, orgContext })` returns deterministic Flow inspection sections for objects, fields, relationships, status candidates, flows, Apex automation, validation rules, layouts, permission sets, evidence, and ambiguities.
+    - Org inspection requires a WeakSet-trusted same-org context with fresh verified org evidence, rejects production contexts, and ignores prompt/body org or target-org values.
+    - Discovery uses bounded static Salesforce queries and filters to allowed metadata families before validating component names, dependency depth, and component count.
+    - Targeted retrieval uses one explicit `--metadata` argument per verified component and explicit `--target-org` from the trusted org context; malformed or command-like component names reject before CLI execution.
+    - Evidence records include stable unique evidence IDs, kind, applicable component/object/field identity, source org ID matching the verified org, and observed timestamp; Flow entries carry the same verified source org ID.
+    - Empty verified object or relationship scope returns a material ambiguity, and planning rejects material ambiguities before source generation.
 
 - Phase 1 Task 4: Enforce same-sandbox identity and permission claims
   - Implementation commit: 17f1a71dc4d746bc6093ba708a8dc934e1d506ed

@@ -83,6 +83,19 @@ const COMMANDS = {
     ],
     validate: ({ manifest, outputDir }) => { validateManifestPath(manifest); validateJobOutputPath(outputDir); }
   },
+  retrieveMetadata: {
+    operation: 'retrieve',
+    args: ({ components, targetOrg }) => [
+      'project',
+      'retrieve',
+      'start',
+      ...components.flatMap((component) => ['--metadata', `${component.type}:${component.apiName}`]),
+      '--target-org',
+      targetOrg,
+      '--json'
+    ],
+    validate: ({ components }) => validateRetrieveComponents(components)
+  },
   runApexTests: {
     operation: 'validate',
     args: ({ tests, targetOrg }) => {
@@ -205,6 +218,24 @@ export async function runSfCommand(command, params = {}, options = {}) {
   return result;
 }
 
+export async function retrieveMetadata({ components, orgContext, executor, verifier, timeoutMs, cwd } = {}) {
+  assertTrustedOrgContext(orgContext);
+  assertNonProductionOrgContext(orgContext);
+  if (!orgContext.allowedOperations?.includes('retrieve')) {
+    throw new Error('Operation retrieve is not allowed for the selected Salesforce org.');
+  }
+  validateRetrieveComponents(components);
+  if (verifier) await verifier(orgContext);
+  else await verifySelectedOrg(orgContext);
+  const sortedComponents = [...components].sort((left, right) => `${left.type}:${left.apiName}`.localeCompare(`${right.type}:${right.apiName}`));
+  const args = COMMANDS.retrieveMetadata.args({ components: sortedComponents, targetOrg: orgContext.salesforceAlias });
+  if (!args.includes('--target-org') || !args.includes(orgContext.salesforceAlias)) {
+    throw new Error('Blocked Salesforce CLI command without explicit target org.');
+  }
+  if (executor) return executor(args, { timeoutMs, cwd });
+  return executeSf(args, timeoutMs || config.sfCommandTimeoutMs, cwd || config.projectRoot);
+}
+
 function validateManifestPath(manifest) {
   const fullPath = resolve(String(manifest || ''));
   const jobsRoot = resolve(config.workspaceRoot, 'jobs');
@@ -221,6 +252,23 @@ function validateJobOutputPath(path) {
 
 function validateApiName(value, label) {
   if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(String(value || ''))) throw new Error(`Invalid Salesforce ${label} API name.`);
+}
+
+function validateRetrieveComponents(components) {
+  if (!Array.isArray(components) || components.length === 0) {
+    throw new Error('At least one metadata component is required for retrieval.');
+  }
+  if (components.length > config.maxRetrievedComponents) {
+    throw new Error(`Metadata retrieval exceeds the configured limit of ${config.maxRetrievedComponents} components.`);
+  }
+  for (const component of components) {
+    const type = String(component?.type || '');
+    const apiName = String(component?.apiName || '');
+    if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(type)) throw new Error('Invalid Salesforce metadata type.');
+    if (!/^[A-Za-z][A-Za-z0-9_. ()/-]+$/.test(apiName) || /(?:;|&&|\|\||`|\$|<|>|\r|\n|--target-org|--metadata|\.\.)/i.test(apiName)) {
+      throw new Error('Invalid Salesforce metadata component name.');
+    }
+  }
 }
 
 function validateDataFields(fields) {

@@ -101,6 +101,12 @@ export async function analyzeDependencies(paths, scope) {
 }
 
 export function buildPlan(job, requirement, scope, dependencies) {
+  const materialAmbiguities = (scope.ambiguities || []).filter((ambiguity) => ambiguity?.material);
+  if (materialAmbiguities.length) {
+    const error = new Error(materialAmbiguities.map((ambiguity) => ambiguity.question || ambiguity.message || String(ambiguity)).join(' '));
+    error.code = 'MATERIAL_CLARIFICATION_REQUIRED';
+    throw error;
+  }
   const planCore = {
     jobId: job.jobId,
     jiraIssueKey: job.jiraIssueKey,
