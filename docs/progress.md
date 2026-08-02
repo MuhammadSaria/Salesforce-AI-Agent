@@ -24,6 +24,7 @@
   - Deterministic FieldDefinition/picklist/retrieve-adapter correction commit: 054528c
   - Real `result.files` retrieve-adapter correction commit: 5c0ff5c2df165c0d0dd94ca637115fb567599f8f
   - Fail-closed retrieval evidence correction commit: 50854de1a93bb07a054dd9927ff44181f6be455d
+  - Canonical retrieval evidence parser correction commit: cfd294d4f1d070ff1482f7a88c5a099c93802942
   - Verification date: 2026-08-02
   - Verification:
     - `cd middleware && node --import ./test/setup.js --test test/orgInspectionService.test.js` - RED first, failed for expected missing `orgInspectionService.js`.
@@ -62,6 +63,12 @@
     - `cd middleware && node --import ./test/setup.js --test test/orgInspectionService.test.js test/metadataScope.test.js test/metadataCapabilities.test.js` - PASS, 31 tests, 0 skipped.
     - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/orgInspectionService.test.js test/metadataScope.test.js test/metadataCapabilities.test.js test/sameOrgService.test.js test/security.test.js test/agentSameOrg.test.js test/apiAuth.test.js test/conversationApi.test.js test/developmentJob.test.js test/jobState.test.js test/jobStore.test.js test/orchestrator.test.js test/sfFailureMessage.test.js` - PASS, 128 tests, 0 skipped.
     - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 178 tests, 0 skipped.
+  - Canonical retrieval evidence parser correction verification:
+    - `cd middleware && node --import ./test/setup.js --test test/orgInspectionService.test.js test/metadataCapabilities.test.js` - RED first, failed for expected suffix-based path acceptance, partial claim acceptance, and conflicting duplicate acceptance.
+    - `cd middleware && node --import ./test/setup.js --test test/orgInspectionService.test.js test/metadataCapabilities.test.js` - PASS, 32 tests, 0 skipped.
+    - `cd middleware && node --import ./test/setup.js --test test/orgInspectionService.test.js test/metadataScope.test.js test/metadataCapabilities.test.js` - PASS, 35 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/orgInspectionService.test.js test/metadataScope.test.js test/metadataCapabilities.test.js test/sameOrgService.test.js test/security.test.js test/agentSameOrg.test.js test/apiAuth.test.js test/conversationApi.test.js test/developmentJob.test.js test/jobState.test.js test/jobStore.test.js test/orchestrator.test.js test/sfFailureMessage.test.js` - PASS, 132 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 182 tests, 0 skipped.
   - Review:
     - `inspectFlowRequirement({ requirement, orgContext })` returns deterministic Flow inspection sections for objects, fields, relationships, status candidates, flows, Apex automation, validation rules, layouts, permission sets, evidence, and ambiguities.
     - Org inspection requires a WeakSet-trusted same-org context with fresh verified org evidence, rejects production contexts, and ignores prompt/body org or target-org values.
@@ -88,6 +95,9 @@
   - Fail-closed retrieval evidence correction review:
     - Retrieval success now requires exact allowed CLI success values (`Succeeded` result status and per-file `Changed`, `Created`, `Deleted`, or `Unchanged` states) instead of failure denylists or inferred success from zero exit/status alone.
     - Retrieved component evidence must exactly match the verified requested component set, rejects unrelated recognized components, rejects malformed or contradictory paths even with matching type/fullName claims, and deduplicates only valid identical entries.
+  - Canonical retrieval evidence parser correction review:
+    - Retrieval file paths are normalized deterministically without filesystem access, require the canonical `force-app/main/default/...` source structure, and reject absolute, traversal, malformed, unsupported, arbitrary-root, empty-segment, and suffix-only matches.
+    - Retrieval entries normalize into structured records with canonical path, state, claim presence, type, fullName, and component key; partial claims fail, path and complete claims must agree exactly, and duplicate component evidence is accepted only when normalized records are identical.
 
 - Phase 1 Task 4: Enforce same-sandbox identity and permission claims
   - Implementation commit: 17f1a71dc4d746bc6093ba708a8dc934e1d506ed
