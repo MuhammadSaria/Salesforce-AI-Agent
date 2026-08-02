@@ -4,58 +4,59 @@ import { assertTrustedOrgContext } from './orgContextTrust.js';
 import { retrieveMetadata as retrieveSfMetadata, runSfCommand } from './sfExecutor.js';
 
 const ALLOWED_METADATA_FAMILIES = new Set(['CustomObject', 'CustomField', 'Flow', 'ApexClass', 'ApexTrigger', 'ValidationRule', 'Layout', 'PermissionSet']);
-const INSPECTION_QUERIES = [
-  "SELECT DurableId, QualifiedApiName FROM EntityDefinition WHERE QualifiedApiName IN ('GiftTransaction','GiftCommitment')",
-  "SELECT DeveloperName, Status FROM FlowDefinitionView WHERE ProcessType IN ('Flow','AutoLaunchedFlow','RecordTriggeredFlow')",
-  "SELECT Name FROM ApexClass WHERE Name LIKE 'Gift%'",
-  "SELECT ValidationName, EntityDefinition.QualifiedApiName FROM ValidationRule WHERE EntityDefinition.QualifiedApiName IN ('GiftTransaction','GiftCommitment')",
-  "SELECT Name, TableEnumOrId FROM Layout WHERE TableEnumOrId IN ('GiftTransaction','GiftCommitment')",
-  'SELECT Name FROM PermissionSet WHERE IsOwnedByProfile = false'
-];
+const DEFAULT_MAX_OBJECTS = 4;
+const DEFAULT_MAX_FIELDS_PER_OBJECT = 50;
+const DEFAULT_MAX_VERIFICATION_AGE_MS = 10 * 60 * 1000;
+const DONATION_OBJECT_CANDIDATES = ['GiftCommitment', 'GiftTransaction'];
 
-export async function inspectFlowRequirement({ requirement, orgContext }, dependencies = {}) {
-  assertInspectionOrgContext(orgContext);
-  const sf = dependencies.sf || defaultSf(orgContext);
+export async function inspectFlowRequirement({ requirement: _requirement, orgContext }, dependencies = {}) {
   const clock = dependencies.clock || (() => new Date());
-  const maxComponents = Number(dependencies.maxComponents || config.maxRetrievedComponents);
-  const maxDepth = Number(dependencies.maxDepth || config.maxDependencyDepth);
+  assertInspectionOrgContext(orgContext, clock, dependencies.maxVerificationAgeMs ?? config.maxOrgVerificationAgeMs ?? DEFAULT_MAX_VERIFICATION_AGE_MS);
+  const sf = dependencies.sf || defaultSf(orgContext);
+  const limits = {
+    maxComponents: Number(dependencies.maxComponents ?? config.maxRetrievedComponents),
+    maxDepth: Number(dependencies.maxDepth ?? config.maxDependencyDepth),
+    maxObjects: Number(dependencies.maxObjects ?? DEFAULT_MAX_OBJECTS),
+    maxFieldsPerObject: Number(dependencies.maxFieldsPerObject ?? DEFAULT_MAX_FIELDS_PER_OBJECT)
+  };
   const observedAt = clock().toISOString();
-  const rows = [];
+  const state = inspectionState(orgContext, observedAt, limits);
 
   try {
-    for (const query of INSPECTION_QUERIES) {
-      const result = await sf.query({ query, targetOrg: orgContext.salesforceAlias });
-      if (result.exitCode !== 0) throw controlledInspectionError();
-      rows.push(...parseRecords(result.stdout));
+    const objectRows = await runQueryOperation(sf, objectCandidateOperation(Math.min(limits.maxObjects, state.budgetRemaining)), orgContext);
+    const objectCandidates = objectRows.map((row) => parseObjectCandidate(row, orgContext, observedAt));
+    spendComponents(state, objectCandidates);
+
+    if (state.budgetRemaining > 0) {
+      for (const object of state.objects.slice(0, limits.maxObjects)) {
+        if (state.budgetRemaining <= 0) break;
+        const describe = await runDescribeOperation(sf, object.apiName, orgContext, Math.min(limits.maxFieldsPerObject, state.budgetRemaining));
+        const fields = parseDescribeFields(describe, object.apiName, orgContext, observedAt, limits);
+        spendComponents(state, fields);
+      }
     }
+
+    for (const operationFactory of [flowOperation, apexClassOperation, apexTriggerOperation, validationRuleOperation, layoutOperation, permissionSetOperation]) {
+      if (state.budgetRemaining <= 0) break;
+      const operation = operationFactory(state);
+      const rows = await runQueryOperation(sf, operation, orgContext);
+      spendComponents(state, rows.map((row) => operation.parser(row, orgContext, observedAt)));
+    }
+
+    finalizeInspection(state);
+    if (state.componentKeys.length && !state.ambiguities.some((item) => item.material)) {
+      await retrieveAndMark(state, sf, orgContext);
+    }
+    return toInspection(state);
   } catch (error) {
-    if (error.code === 'ORG_INSPECTION_FAILED') throw error;
-    throw controlledInspectionError();
+    if (error.code) throw error;
+    throw controlledInspectionError('Salesforce org inspection failed. Check the verified org connection and retry.');
   }
-
-  const allowedRows = rows.map((row) => normalizeRecord(row, orgContext, observedAt))
-    .filter((row) => row && isAllowedFamily(row, orgContext));
-  validateMetadataComponents(allowedRows.map(componentFromRecord), { maxComponents: Number.MAX_SAFE_INTEGER, maxDepth: Number.MAX_SAFE_INTEGER, orgContext });
-  const normalized = allowedRows.filter((row) => isRequirementRelevant(row, requirement));
-  const components = validateMetadataComponents(normalized.map(componentFromRecord), { maxComponents, maxDepth, orgContext });
-  const inspection = buildInspection(normalized, components, orgContext, observedAt, maxComponents, maxDepth);
-
-  if (!inspection.objects.length || !inspection.relationships.length) {
-    inspection.ambiguities.push({
-      ambiguityId: 'material:flow-object-scope',
-      material: true,
-      question: 'Confirm which object represents the generated Donation and which relationship connects it to the Recurring Donation before planning source changes.'
-    });
-  } else if (components.length) {
-    await sf.retrieveMetadata({ components, targetOrg: orgContext.salesforceAlias, orgContext });
-  }
-
-  return { ...inspection, hash: stableHash({ ...inspection, evidence: inspection.evidence.map((item) => ({ ...item, observedAt: '' })) }) };
 }
 
 export function validateMetadataComponents(components, options = {}) {
-  const maxComponents = Number(options.maxComponents || config.maxRetrievedComponents);
-  const maxDepth = Number(options.maxDepth || config.maxDependencyDepth);
+  const maxComponents = Number(options.maxComponents ?? config.maxRetrievedComponents);
+  const maxDepth = Number(options.maxDepth ?? config.maxDependencyDepth);
   const orgContext = options.orgContext || {};
   const deduped = new Map();
   for (const component of components || []) {
@@ -76,118 +77,289 @@ export function validateMetadataComponents(components, options = {}) {
 function defaultSf(orgContext) {
   return {
     query: ({ query }) => runSfCommand('dataQuery', { query }, { orgContext }),
+    describeSObject: ({ objectApiName }) => runSfCommand('sobjectDescribe', { objectApiName }, { orgContext }),
     retrieveMetadata: ({ components }) => retrieveSfMetadata({ components, orgContext })
   };
 }
 
-function assertInspectionOrgContext(orgContext) {
-  assertTrustedOrgContext(orgContext);
-  if (!orgContext.verified?.organizationId || orgContext.verified.organizationId !== orgContext.expectedOrgId) {
-    throw codedError('VERIFIED_ORG_CONTEXT_REQUIRED', 'A fresh verified Salesforce org context is required for org inspection.');
+function inspectionState(orgContext, observedAt, limits) {
+  return {
+    orgContext,
+    observedAt,
+    limits,
+    budgetRemaining: limits.maxComponents,
+    components: new Map(),
+    objects: [],
+    fields: [],
+    relationships: [],
+    statusCandidates: [],
+    flows: [],
+    apexAutomation: [],
+    validationRules: [],
+    layouts: [],
+    permissionSets: [],
+    evidence: [],
+    ambiguities: []
+  };
+}
+
+function objectCandidateOperation(limit) {
+  return {
+    operationId: 'object-candidates',
+    kind: 'query',
+    resultKind: 'EntityDefinition.records',
+    metadataType: 'CustomObject',
+    limit,
+    query: `SELECT DurableId, QualifiedApiName, Label FROM EntityDefinition WHERE QualifiedApiName IN ('${DONATION_OBJECT_CANDIDATES.join("','")}') LIMIT ${limit}`,
+    parser: parseObjectCandidate
+  };
+}
+
+function flowOperation(state) {
+  const limit = Math.max(0, state.budgetRemaining);
+  return queryDescriptor('flow-discovery', 'FlowDefinitionView.records', 'Flow', limit,
+    `SELECT DeveloperName, Label, Status, TableEnumOrId FROM FlowDefinitionView WHERE TableEnumOrId IN (${quotedObjects(state)}) AND DeveloperName LIKE '%Gift%' LIMIT ${limit}`,
+    (row, orgContext, observedAt) => rowFor('Flow', row.DeveloperName, orgContext, observedAt, 1, { label: row.Label || row.DeveloperName, status: row.Status || '', objectApiName: row.TableEnumOrId || '' }));
+}
+
+function apexClassOperation(state) {
+  const limit = Math.max(0, state.budgetRemaining);
+  return queryDescriptor('apex-class-discovery', 'ApexClass.records', 'ApexClass', limit,
+    `SELECT Name FROM ApexClass WHERE Name LIKE '%Gift%' LIMIT ${limit}`,
+    (row, orgContext, observedAt) => rowFor('ApexClass', row.Name, orgContext, observedAt, 1));
+}
+
+function apexTriggerOperation(state) {
+  const limit = Math.max(0, state.budgetRemaining);
+  return queryDescriptor('apex-trigger-discovery', 'ApexTrigger.records', 'ApexTrigger', limit,
+    `SELECT Name, TableEnumOrId FROM ApexTrigger WHERE TableEnumOrId IN (${quotedObjects(state)}) LIMIT ${limit}`,
+    (row, orgContext, observedAt) => rowFor('ApexTrigger', row.Name, orgContext, observedAt, 1, { objectApiName: row.TableEnumOrId || '' }));
+}
+
+function validationRuleOperation(state) {
+  const limit = Math.max(0, state.budgetRemaining);
+  return queryDescriptor('validation-rule-discovery', 'ValidationRule.records', 'ValidationRule', limit,
+    `SELECT ValidationName, EntityDefinition.QualifiedApiName FROM ValidationRule WHERE EntityDefinition.QualifiedApiName IN (${quotedObjects(state)}) LIMIT ${limit}`,
+    (row, orgContext, observedAt) => rowFor('ValidationRule', row.ValidationName, orgContext, observedAt, 1, { objectApiName: row.EntityDefinition?.QualifiedApiName || '' }));
+}
+
+function layoutOperation(state) {
+  const limit = Math.max(0, state.budgetRemaining);
+  return queryDescriptor('layout-discovery', 'Layout.records', 'Layout', limit,
+    `SELECT Name, TableEnumOrId FROM Layout WHERE TableEnumOrId IN (${quotedObjects(state)}) LIMIT ${limit}`,
+    (row, orgContext, observedAt) => rowFor('Layout', row.Name, orgContext, observedAt, 1, { objectApiName: row.TableEnumOrId || '' }));
+}
+
+function permissionSetOperation(state) {
+  const limit = Math.max(0, state.budgetRemaining);
+  return queryDescriptor('permission-set-discovery', 'PermissionSet.records', 'PermissionSet', limit,
+    `SELECT Name, Label FROM PermissionSet WHERE IsOwnedByProfile = false AND Name LIKE '%Gift%' LIMIT ${limit}`,
+    (row, orgContext, observedAt) => rowFor('PermissionSet', row.Name, orgContext, observedAt, 1, { label: row.Label || row.Name }));
+}
+
+function queryDescriptor(operationId, resultKind, metadataType, limit, query, parser) {
+  return { operationId, kind: 'query', resultKind, metadataType, limit, query, parser };
+}
+
+async function runQueryOperation(sf, operation, orgContext) {
+  validateOperationLimit(operation);
+  const result = await sf.query({ operationId: operation.operationId, resultKind: operation.resultKind, metadataType: operation.metadataType, query: operation.query, limit: operation.limit, targetOrg: orgContext.salesforceAlias });
+  if (result.exitCode !== 0) throw controlledInspectionError('Salesforce org inspection failed. Check the verified org connection and retry.');
+  const records = parseQueryRecords(result.stdout, operation);
+  if (records.length > operation.limit) throw codedError('ORG_INSPECTION_LIMIT_EXCEEDED', `Salesforce returned more ${operation.operationId} rows than the declared limit.`);
+  return records;
+}
+
+async function runDescribeOperation(sf, objectApiName, orgContext, limit) {
+  validateOperationLimit({ operationId: `describe-${objectApiName}`, query: `LIMIT ${limit}`, limit });
+  const result = await sf.describeSObject({ operationId: `describe-${objectApiName}`, objectApiName, limit, targetOrg: orgContext.salesforceAlias });
+  if (result.exitCode !== 0) throw controlledInspectionError('Salesforce org inspection failed. Check the verified org connection and retry.');
+  const parsed = parseJson(result.stdout, 'ORG_INSPECTION_RESULT_SHAPE');
+  const describe = parsed.result || parsed;
+  if (!Array.isArray(describe.fields)) throw codedError('ORG_INSPECTION_RESULT_SHAPE', `Describe for ${objectApiName} did not return fields.`);
+  if (describe.fields.length > limit) throw codedError('ORG_INSPECTION_LIMIT_EXCEEDED', `Salesforce returned more ${objectApiName} fields than the declared limit.`);
+  return describe;
+}
+
+function parseQueryRecords(stdout, operation) {
+  const parsed = parseJson(stdout, 'ORG_INSPECTION_RESULT_SHAPE');
+  const records = parsed.result?.records || parsed.records;
+  if (!Array.isArray(records)) throw codedError('ORG_INSPECTION_RESULT_SHAPE', `${operation.operationId} did not return Salesforce query records.`);
+  return records;
+}
+
+function parseObjectCandidate(row, orgContext, observedAt) {
+  const unexpectedFieldShape = row.DataType || String(row.DurableId || '').includes('.') || String(row.QualifiedApiName || '').includes('.');
+  if (unexpectedFieldShape) throw codedError('ORG_INSPECTION_RESULT_SHAPE', 'EntityDefinition discovery returned a field-shaped row.');
+  return rowFor('CustomObject', row.QualifiedApiName, orgContext, observedAt, 0, { label: row.Label || row.QualifiedApiName });
+}
+
+function parseDescribeFields(describe, objectApiName, orgContext, observedAt, limits) {
+  const parsed = [];
+  for (const field of describe.fields.slice(0, limits.maxFieldsPerObject)) {
+    const dependencyLevel = Number(field.dependencyLevel ?? 1);
+    const row = rowFor('CustomField', field.name, orgContext, observedAt, dependencyLevel, {
+      objectApiName,
+      label: field.label || field.name,
+      dataType: field.type || '',
+      referenceTo: Array.isArray(field.referenceTo) ? field.referenceTo[0] || '' : '',
+      relationshipName: field.relationshipName || '',
+      values: Array.isArray(field.picklistValues) ? field.picklistValues.map((item) => item.value).filter(Boolean) : []
+    });
+    parsed.push(row);
   }
-  if (String(orgContext.environment || '').toLowerCase() === 'production' || orgContext.productionApprovalRequired === true) {
-    throw codedError('PRODUCTION_ORG_BLOCKED', 'Production Salesforce orgs are not allowed in Phase 1.');
+  return parsed.filter((field) => field.referenceTo || /status/i.test(field.apiName));
+}
+
+function spendComponents(state, rows) {
+  for (const row of rows.filter((item) => isAllowedFamily(item, state.orgContext) && isRelevant(item))) {
+    const component = componentFromRow(row);
+    validateMetadataComponents([component], { maxComponents: 1, maxDepth: state.limits.maxDepth, orgContext: state.orgContext });
+    const key = `${component.type}:${component.apiName}`;
+    if (!state.components.has(key)) {
+      if (state.budgetRemaining <= 0) break;
+      state.components.set(key, { ...component, sourceOrgId: state.orgContext.expectedOrgId, retrievalStatus: 'pending', analysisStatus: 'inspected', relevanceReason: 'Verified by deterministic org inspection' });
+      state.budgetRemaining -= 1;
+    }
+    appendRow(state, row);
   }
 }
 
-function parseRecords(stdout) {
-  const parsed = JSON.parse(stdout || '{}');
-  return parsed.result?.records || parsed.records || [];
+function appendRow(state, row) {
+  if (row.type === 'CustomObject') state.objects.push(withEvidence(row, { apiName: row.apiName, label: row.label || row.apiName }));
+  if (row.type === 'CustomField') {
+    state.fields.push(withEvidence(row, { objectApiName: row.objectApiName, apiName: row.apiName, label: row.label || row.apiName, dataType: row.dataType || '' }));
+    if (row.referenceTo) state.relationships.push(withEvidence(row, { objectApiName: row.objectApiName, fieldApiName: row.apiName, referenceTo: row.referenceTo, relationshipName: row.relationshipName || '', evidenceId: `relationship:${row.objectApiName}.${row.apiName}` }));
+    if (/status/i.test(row.apiName)) state.statusCandidates.push(withEvidence(row, { objectApiName: row.objectApiName, fieldApiName: row.apiName, values: [...(row.values || [])].sort(), evidenceId: `statusCandidate:${row.objectApiName}.${row.apiName}` }));
+  }
+  if (row.type === 'Flow') state.flows.push(withEvidence(row, { apiName: row.apiName, label: row.label || row.apiName, status: row.status || '', sourceOrgId: state.orgContext.expectedOrgId }));
+  if (['ApexClass', 'ApexTrigger'].includes(row.type)) state.apexAutomation.push(withEvidence(row, { type: row.type, apiName: row.apiName, objectApiName: row.objectApiName || '' }));
+  if (row.type === 'ValidationRule') state.validationRules.push(withEvidence(row, { objectApiName: row.objectApiName, apiName: row.apiName }));
+  if (row.type === 'Layout') state.layouts.push(withEvidence(row, { objectApiName: row.objectApiName, apiName: row.apiName }));
+  if (row.type === 'PermissionSet') state.permissionSets.push(withEvidence(row, { apiName: row.apiName, label: row.label || row.apiName }));
 }
 
-function normalizeRecord(row, orgContext, observedAt) {
-  const type = row.metadataType || inferType(row);
-  const apiName = row.apiName || row.QualifiedApiName || row.DeveloperName || row.Name || row.ValidationName;
-  if (!type || !apiName) return null;
-  return { ...row, type, apiName, objectApiName: row.objectApiName || row.EntityDefinition?.QualifiedApiName || objectFromApiName(apiName) || row.TableEnumOrId || '', dependencyLevel: Number(row.dependencyLevel || 0), sourceOrgId: orgContext.expectedOrgId, observedAt };
+function finalizeInspection(state) {
+  state.objects = uniqueSorted(state.objects, 'apiName');
+  state.fields = uniqueSorted(state.fields, (item) => `${item.objectApiName}.${item.apiName}`);
+  state.relationships = uniqueSorted(state.relationships, (item) => `${item.objectApiName}.${item.fieldApiName}`);
+  state.statusCandidates = uniqueSorted(state.statusCandidates, (item) => `${item.objectApiName}.${item.fieldApiName}`);
+  state.flows = uniqueSorted(state.flows, 'apiName');
+  state.apexAutomation = uniqueSorted(state.apexAutomation, (item) => `${item.type}:${item.apiName}`);
+  state.validationRules = uniqueSorted(state.validationRules, (item) => `${item.objectApiName}.${item.apiName}`);
+  state.layouts = uniqueSorted(state.layouts, 'apiName');
+  state.permissionSets = uniqueSorted(state.permissionSets, 'apiName');
+  state.componentKeys = [...state.components.values()].sort(compareComponent);
+  state.evidence = buildEvidence(state).sort(compareEvidence);
+  if (!hasConnectedRelationship(state)) {
+    state.ambiguities.push({
+      ambiguityId: 'material:flow-object-relationship',
+      material: true,
+      question: 'Confirm which verified Donation object relationship connects to the verified Recurring Donation object before planning source changes.'
+    });
+  }
 }
 
-function inferType(row) {
-  if (row.ValidationName) return 'ValidationRule';
-  if (row.TableEnumOrId) return 'Layout';
-  if (row.Status && row.DeveloperName) return 'Flow';
-  if (row.DurableId || row.QualifiedApiName) return 'CustomObject';
-  return '';
+async function retrieveAndMark(state, sf, orgContext) {
+  const result = await sf.retrieveMetadata({ components: state.componentKeys, targetOrg: orgContext.salesforceAlias, orgContext });
+  const parsed = parseJson(result.stdout, 'ORG_INSPECTION_RETRIEVAL_FAILED');
+  const success = result.exitCode === 0 && (parsed.status === 0 || parsed.result?.success === true || parsed.result?.done === true || Array.isArray(parsed.result?.files));
+  const targetOrgMatches = !parsed.result?.targetOrgId || parsed.result.targetOrgId === orgContext.expectedOrgId;
+  const files = parsed.result?.files;
+  const retrievedKeys = Array.isArray(files) ? new Set(files.map((file) => `${file.type || file.metadataType}:${file.fullName || file.name}`)) : null;
+  const allComponentsRetrieved = retrievedKeys ? state.componentKeys.every((component) => retrievedKeys.has(`${component.type}:${component.apiName}`)) : true;
+  if (!success || !targetOrgMatches || !allComponentsRetrieved) throw retrievalError();
+  for (const component of state.components.values()) component.retrievalStatus = 'retrieved';
 }
 
-function isRequirementRelevant(row, requirement) {
-  const text = [requirement?.summary, requirement?.businessRequirement, requirement?.acceptanceCriteria].join(' ');
-  if (!/\b(donation|gift|recurring|installment|paid|completed)\b/i.test(text)) return false;
-  return /\bGift|Donation|Recurring|Installment|Status|Paid|Completed/i.test([row.type, row.apiName, row.objectApiName, row.label, row.relationshipName, row.referenceTo].join(' '));
+function toInspection(state) {
+  const primaryMetadata = [...state.components.values()].sort(compareComponent);
+  const inspection = {
+    objects: state.objects,
+    fields: state.fields,
+    relationships: state.relationships,
+    statusCandidates: state.statusCandidates,
+    flows: state.flows,
+    apexAutomation: state.apexAutomation,
+    validationRules: state.validationRules,
+    layouts: state.layouts,
+    permissionSets: state.permissionSets,
+    evidence: state.evidence,
+    ambiguities: state.ambiguities,
+    componentKeys: primaryMetadata.map(({ type, apiName, dependencyLevel }) => ({ type, apiName, dependencyLevel })),
+    primaryMetadata,
+    relatedMetadata: [],
+    dependencies: [],
+    excludedMetadata: ['Unrelated metadata', 'Restricted metadata types', 'Metadata outside the verified org', 'Metadata beyond bounded dependency depth'],
+    maximumDependencyDepth: state.limits.maxDepth,
+    maximumComponents: state.limits.maxComponents
+  };
+  return { ...inspection, hash: stableHash({ ...inspection, evidence: inspection.evidence.map((item) => ({ ...item, observedAt: '' })) }) };
 }
 
-function isAllowedFamily(component, orgContext = {}) {
-  const type = component.type;
-  return ALLOWED_METADATA_FAMILIES.has(type) &&
-    (!orgContext.allowedMetadataTypes?.length || orgContext.allowedMetadataTypes.includes(type)) &&
-    !orgContext.restrictedMetadataTypes?.includes(type);
+function buildEvidence(state) {
+  return [
+    ...state.objects.map((item) => evidenceRecord('OBJECT', item, state)),
+    ...state.fields.map((item) => evidenceRecord('FIELD', item, state)),
+    ...state.relationships.map((item) => evidenceRecord('RELATIONSHIP', item, state)),
+    ...state.statusCandidates.map((item) => evidenceRecord('STATUS_CANDIDATE', item, state)),
+    ...state.flows.map((item) => evidenceRecord('FLOW', item, state)),
+    ...state.apexAutomation.map((item) => evidenceRecord('APEX_AUTOMATION', item, state)),
+    ...state.validationRules.map((item) => evidenceRecord('VALIDATION_RULE', item, state)),
+    ...state.layouts.map((item) => evidenceRecord('LAYOUT', item, state)),
+    ...state.permissionSets.map((item) => evidenceRecord('PERMISSION_SET', item, state))
+  ];
 }
 
-function componentFromRecord(row) {
+function evidenceRecord(kind, item, state) {
+  return { evidenceId: item.evidenceId, kind, objectApiName: item.objectApiName, fieldApiName: item.fieldApiName || item.apiName, targetObjectApiName: item.referenceTo, componentType: item.type, componentApiName: item.apiName, sourceOrgId: state.orgContext.expectedOrgId, observedAt: state.observedAt };
+}
+
+function hasConnectedRelationship(state) {
+  const objects = new Set(state.objects.map((item) => item.apiName));
+  return state.relationships.some((item) => objects.has(item.objectApiName) && objects.has(item.referenceTo));
+}
+
+function isRelevant(row) {
+  if (row.type === 'CustomObject') return DONATION_OBJECT_CANDIDATES.includes(row.apiName);
+  if (row.type === 'CustomField') return DONATION_OBJECT_CANDIDATES.includes(row.objectApiName) && (!row.referenceTo || DONATION_OBJECT_CANDIDATES.includes(row.referenceTo) || /status/i.test(row.apiName));
+  if (row.objectApiName) return DONATION_OBJECT_CANDIDATES.includes(row.objectApiName);
+  return /\bGift|Donation|Recurring|Installment|Status|Paid|Completed/i.test([row.apiName, row.label].join(' '));
+}
+
+function componentFromRow(row) {
   if (row.type === 'CustomField') return { type: 'CustomField', apiName: `${row.objectApiName}.${row.apiName}`, dependencyLevel: row.dependencyLevel };
   if (row.type === 'ValidationRule') return { type: 'ValidationRule', apiName: `${row.objectApiName}.${row.apiName}`, dependencyLevel: row.dependencyLevel };
   return { type: row.type, apiName: row.apiName, dependencyLevel: row.dependencyLevel };
 }
 
-function buildInspection(rows, components, orgContext, observedAt, maxComponents, maxDepth) {
-  const componentKeys = new Set(components.map((item) => `${item.type}:${item.apiName}`));
-  const objects = rows.filter((row) => row.type === 'CustomObject' && componentKeys.has(`CustomObject:${row.apiName}`)).map((row) => withEvidence(row, { apiName: row.apiName, label: row.label || row.apiName }));
-  const fields = rows.filter((row) => row.type === 'CustomField' && componentKeys.has(`CustomField:${row.objectApiName}.${row.apiName}`)).map((row) => withEvidence(row, { objectApiName: row.objectApiName, apiName: row.apiName, label: row.label || row.apiName }));
-  const relationships = rows.filter((row) => row.type === 'CustomField' && row.referenceTo).map((row) => withEvidence(row, { objectApiName: row.objectApiName, fieldApiName: row.apiName, relationshipName: row.relationshipName || '', referenceTo: row.referenceTo, evidenceId: `relationship:${row.objectApiName}.${row.apiName}` }));
-  const statusCandidates = rows.filter((row) => row.type === 'CustomField' && /status/i.test(row.apiName)).map((row) => withEvidence(row, { objectApiName: row.objectApiName, fieldApiName: row.apiName, values: [...(row.values || [])].sort(), evidenceId: `statusCandidate:${row.objectApiName}.${row.apiName}` }));
-  const flows = rows.filter((row) => row.type === 'Flow' && componentKeys.has(`Flow:${row.apiName}`)).map((row) => withEvidence(row, { apiName: row.apiName, label: row.label || row.apiName, status: row.status || row.Status || '', sourceOrgId: orgContext.expectedOrgId }));
-  const apexAutomation = rows.filter((row) => ['ApexClass', 'ApexTrigger'].includes(row.type)).map((row) => withEvidence(row, { type: row.type, apiName: row.apiName, objectApiName: row.objectApiName || '' }));
-  const validationRules = rows.filter((row) => row.type === 'ValidationRule').map((row) => withEvidence(row, { objectApiName: row.objectApiName, apiName: row.apiName }));
-  const layouts = rows.filter((row) => row.type === 'Layout').map((row) => withEvidence(row, { objectApiName: row.objectApiName, apiName: row.apiName }));
-  const permissionSets = rows.filter((row) => row.type === 'PermissionSet').map((row) => withEvidence(row, { apiName: row.apiName }));
-  const evidence = [
-    ...objects.map((item) => evidenceRecord('OBJECT', item, orgContext, observedAt)),
-    ...fields.map((item) => evidenceRecord('FIELD', item, orgContext, observedAt)),
-    ...relationships.map((item) => evidenceRecord('RELATIONSHIP', item, orgContext, observedAt)),
-    ...statusCandidates.map((item) => evidenceRecord('STATUS_CANDIDATE', item, orgContext, observedAt)),
-    ...flows.map((item) => evidenceRecord('FLOW', item, orgContext, observedAt)),
-    ...apexAutomation.map((item) => evidenceRecord('APEX_AUTOMATION', item, orgContext, observedAt)),
-    ...validationRules.map((item) => evidenceRecord('VALIDATION_RULE', item, orgContext, observedAt)),
-    ...layouts.map((item) => evidenceRecord('LAYOUT', item, orgContext, observedAt)),
-    ...permissionSets.map((item) => evidenceRecord('PERMISSION_SET', item, orgContext, observedAt))
-  ].sort(compareEvidence);
-  const primaryMetadata = components.map((item) => ({ ...item, sourceOrgId: orgContext.expectedOrgId, retrievalStatus: 'retrieved', analysisStatus: 'inspected', relevanceReason: 'Verified by deterministic org inspection' }));
-  return {
-    objects: uniqueSorted(objects, 'apiName'),
-    fields: uniqueSorted(fields, (item) => `${item.objectApiName}.${item.apiName}`),
-    relationships: uniqueSorted(relationships, (item) => `${item.objectApiName}.${item.fieldApiName}`),
-    statusCandidates: uniqueSorted(statusCandidates, (item) => `${item.objectApiName}.${item.fieldApiName}`),
-    flows: uniqueSorted(flows, 'apiName'),
-    apexAutomation: uniqueSorted(apexAutomation, (item) => `${item.type}:${item.apiName}`),
-    validationRules: uniqueSorted(validationRules, (item) => `${item.objectApiName}.${item.apiName}`),
-    layouts: uniqueSorted(layouts, 'apiName'),
-    permissionSets: uniqueSorted(permissionSets, 'apiName'),
-    evidence,
-    ambiguities: [],
-    componentKeys: components,
-    primaryMetadata,
-    relatedMetadata: [],
-    dependencies: [],
-    excludedMetadata: ['Unrelated metadata', 'Restricted metadata types', 'Metadata outside the verified org', 'Metadata beyond bounded dependency depth'],
-    maximumDependencyDepth: maxDepth,
-    maximumComponents: maxComponents,
-    hash: stableHash({ primaryMetadata, dependencies: [], maxComponents, maxDepth })
-  };
+function rowFor(type, apiName, orgContext, observedAt, dependencyLevel, extra = {}) {
+  if (!apiName) throw codedError('ORG_INSPECTION_RESULT_SHAPE', `${type} discovery row is missing its API name.`);
+  return { type, apiName, dependencyLevel, sourceOrgId: orgContext.expectedOrgId, observedAt, ...extra };
 }
 
 function withEvidence(row, fields) {
   return { ...fields, sourceOrgId: row.sourceOrgId, evidenceId: fields.evidenceId || evidenceId(row.type, fields) };
 }
 
-function evidenceRecord(kind, item, orgContext, observedAt) {
-  return { evidenceId: item.evidenceId, kind, objectApiName: item.objectApiName, fieldApiName: item.fieldApiName || item.apiName, componentType: item.type, componentApiName: item.apiName, sourceOrgId: orgContext.expectedOrgId, observedAt };
-}
-
 function evidenceId(type, item) {
   if (type === 'CustomField') return `field:${item.objectApiName}.${item.apiName}`;
   if (type === 'ValidationRule') return `validationRule:${item.objectApiName}.${item.apiName}`;
-  if (item.fieldApiName) return `relationship:${item.objectApiName}.${item.fieldApiName}`;
   return `${type}:${item.apiName}`;
+}
+
+function assertInspectionOrgContext(orgContext, clock, maxAgeMs) {
+  assertTrustedOrgContext(orgContext);
+  if (!orgContext.verified?.organizationId || orgContext.verified.organizationId !== orgContext.expectedOrgId) throw codedError('VERIFIED_ORG_CONTEXT_REQUIRED', 'A fresh verified Salesforce org context is required for org inspection.');
+  const verifiedAt = Date.parse(orgContext.verified.verifiedAt || '');
+  const now = clock().getTime();
+  if (!Number.isFinite(verifiedAt) || verifiedAt > now + 30000 || now - verifiedAt > maxAgeMs) throw codedError('VERIFIED_ORG_CONTEXT_STALE', 'Salesforce org verification is missing, invalid, future-dated, or expired.');
+  if (String(orgContext.environment || '').toLowerCase() === 'production' || orgContext.productionApprovalRequired === true) throw codedError('PRODUCTION_ORG_BLOCKED', 'Production Salesforce orgs are not allowed in Phase 1.');
+}
+
+function validateOperationLimit(operation) {
+  if (!Number.isInteger(operation.limit) || operation.limit < 0) throw codedError('ORG_INSPECTION_LIMIT_REQUIRED', `${operation.operationId} requires a numeric LIMIT.`);
+  if (!new RegExp(`\\bLIMIT\\s+${operation.limit}\\b`, 'i').test(operation.query)) throw codedError('ORG_INSPECTION_LIMIT_REQUIRED', `${operation.operationId} query must include its declared LIMIT.`);
 }
 
 function validateComponentName(type, apiName) {
@@ -199,8 +371,21 @@ function validateComponentName(type, apiName) {
   if (!valid || /(?:;|&&|\|\||`|\$|<|>|\r|\n|--target-org|--metadata|\.\.)/i.test(apiName)) throw codedError('INVALID_METADATA_COMPONENT', 'Invalid Salesforce metadata component name.');
 }
 
-function objectFromApiName(apiName) {
-  return String(apiName || '').includes('.') ? String(apiName).split('.')[0] : '';
+function parseJson(stdout, code) {
+  try {
+    return JSON.parse(stdout || '{}');
+  } catch {
+    throw code === 'ORG_INSPECTION_RETRIEVAL_FAILED' ? retrievalError() : codedError(code, 'Salesforce CLI returned malformed JSON.');
+  }
+}
+
+function quotedObjects(state) {
+  return state.objects.map((item) => `'${item.apiName}'`).join(',');
+}
+
+function isAllowedFamily(component, orgContext = {}) {
+  const type = component.type;
+  return ALLOWED_METADATA_FAMILIES.has(type) && (!orgContext.allowedMetadataTypes?.length || orgContext.allowedMetadataTypes.includes(type)) && !orgContext.restrictedMetadataTypes?.includes(type);
 }
 
 function uniqueSorted(items, key) {
@@ -216,8 +401,12 @@ function compareEvidence(left, right) {
   return left.evidenceId.localeCompare(right.evidenceId) || left.kind.localeCompare(right.kind);
 }
 
-function controlledInspectionError() {
-  return codedError('ORG_INSPECTION_FAILED', 'Salesforce org inspection failed. Check the verified org connection and retry.');
+function controlledInspectionError(message) {
+  return codedError('ORG_INSPECTION_FAILED', message);
+}
+
+function retrievalError() {
+  return codedError('ORG_INSPECTION_RETRIEVAL_FAILED', 'Salesforce metadata retrieval failed for the verified component scope. Review the bounded inspection evidence and retry.');
 }
 
 function codedError(code, message) {

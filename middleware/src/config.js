@@ -22,6 +22,7 @@ export const config = {
   workspaceRoot: process.env.WORKSPACE_ROOT || resolve(process.cwd(), '..'),
   maxDependencyDepth: Number(process.env.MAX_DEPENDENCY_DEPTH || 2),
   maxRetrievedComponents: Number(process.env.MAX_METADATA_COMPONENTS || process.env.MAX_RETRIEVED_COMPONENTS || 25),
+  maxOrgVerificationAgeMs: Number(process.env.MAX_ORG_VERIFICATION_AGE_MS || 600000),
   maxMetadataSizeBytes: Number(process.env.MAX_METADATA_SIZE_BYTES || 5000000),
   maxRetrievalOperations: Number(process.env.MAX_RETRIEVAL_OPERATIONS || 5),
   validationExpiryMinutes: Number(process.env.VALIDATION_EXPIRY_MINUTES || 60),
