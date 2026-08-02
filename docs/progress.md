@@ -22,7 +22,7 @@
   - Security correction commit: f5a00d28829b6e888b3af6aff8453bc14c693d0a
   - Final authorization correction commit: 3434f8c5776c378e54eca06bf3a53f87ab311e8a
   - Final cross-org correction commit: c1c559679e11326e48646a5f5a7f9a86371b25fe
-  - Final approval-ordering correction commit: pending
+  - Final approval-ordering correction commit: 10368e78bf5392ef674a56e5856069e8aafe1282
   - Verification date: 2026-08-01
   - Verification:
     - `cd middleware && node --import ./test/setup.js --test test/sameOrgService.test.js test/apiAuth.test.js test/security.test.js` - RED first, failed for expected missing same-org service, missing production executor preflight, and permission-claim enforcement gaps.
