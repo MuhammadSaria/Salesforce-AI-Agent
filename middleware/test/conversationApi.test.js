@@ -279,6 +279,74 @@ test('Salesforce chat generic action routes fail closed instead of using Jira-di
   assert.notEqual(response.body.error.code, 'JIRA_DISABLED');
 });
 
+test('deployment endpoint with missing approval org ID does not transition or queue', async (t) => {
+  const queueCalls = [];
+  const { base, close } = await testServer(t, { resolveSameOrg: async ({ authenticatedOrgId }) => trustedContext(authenticatedOrgId), enqueue: async (job, options) => queueCalls.push({ job, options }) });
+  t.after(close);
+  const jobId = `deploy-missing-org-${Date.now()}`;
+  await createJobRecord({
+    jobId,
+    userId: '005-owner',
+    orgId: '00Dg500000E07e9EAB',
+    source: 'salesforce-chat',
+    prompt: 'Create a Flow'
+  });
+  await updateJob(jobId, deploymentReadyPatch({ approvals: [deploymentApproval({ salesforceOrganizationId: '' })] }));
+  const before = sideEffectSnapshot(await getJobRecord(jobId), queueCalls);
+
+  const response = await postJson(`${base}/api/jobs/${jobId}/deploy`, {}, deployerHeaders('005g5000009ImIlAAK'));
+  await waitForQueueTick();
+
+  assert.equal(response.status, 409);
+  assert.equal(JSON.stringify(response.body).includes('00Dg500000E07e9EAB'), false);
+  assert.deepEqual(sideEffectSnapshot(await getJobRecord(jobId), queueCalls), before);
+});
+
+test('deployment endpoint with mismatched approval org ID does not transition or queue', async (t) => {
+  const queueCalls = [];
+  const { base, close } = await testServer(t, { resolveSameOrg: async ({ authenticatedOrgId }) => trustedContext(authenticatedOrgId), enqueue: async (job, options) => queueCalls.push({ job, options }) });
+  t.after(close);
+  const jobId = `deploy-mismatch-org-${Date.now()}`;
+  await createJobRecord({
+    jobId,
+    userId: '005g5000009ImIkAAK',
+    orgId: '00Dg500000E07e9EAB',
+    source: 'salesforce-chat',
+    prompt: 'Create a Flow'
+  });
+  await updateJob(jobId, deploymentReadyPatch({ approvals: [deploymentApproval({ salesforceOrganizationId: '00Dg500000E07fAEAR' })] }));
+  const before = sideEffectSnapshot(await getJobRecord(jobId), queueCalls);
+
+  const response = await postJson(`${base}/api/jobs/${jobId}/deploy`, {}, deployerHeaders('005g5000009ImIlAAK'));
+  await waitForQueueTick();
+
+  assert.equal(response.status, 409);
+  assert.equal(JSON.stringify(response.body).includes('00Dg500000E07fAEAR'), false);
+  assert.deepEqual(sideEffectSnapshot(await getJobRecord(jobId), queueCalls), before);
+});
+
+test('deployment endpoint queues correctly org-bound same-org approval', async (t) => {
+  const queueCalls = [];
+  const { base, close } = await testServer(t, { resolveSameOrg: async ({ authenticatedOrgId }) => trustedContext(authenticatedOrgId), enqueue: async (job, options) => queueCalls.push({ job, options }) });
+  t.after(close);
+  const jobId = `deploy-valid-org-${Date.now()}`;
+  await createJobRecord({
+    jobId,
+    userId: '005g5000009ImIkAAK',
+    orgId: '00Dg500000E07e9EAB',
+    source: 'salesforce-chat',
+    prompt: 'Create a Flow'
+  });
+  await updateJob(jobId, deploymentReadyPatch());
+
+  const response = await postJson(`${base}/api/jobs/${jobId}/deploy`, {}, deployerHeaders('005g5000009ImIlAAK'));
+
+  assert.equal(response.status, 202);
+  assert.equal((await getJobRecord(jobId)).status, 'DEPLOYING');
+  assert.equal(queueCalls.length, 1);
+  assert.deepEqual(queueCalls[0].job, { jobId, action: 'deploy', actor: '005g5000009ImIlAAK' });
+});
+
 test('Jira-specific routes remain available when Jira is enabled', async (t) => {
   config.jiraEnabled = true;
   const { base, close } = await testServer(t);
@@ -301,15 +369,19 @@ test('Jira-specific routes remain available when Jira is enabled', async (t) => 
   assert.notEqual(response.body.error.code, 'JIRA_DISABLED');
 });
 
-async function testServer() {
-  config.apiAuthToken = '';
+async function testServer(t, options = {}) {
+  const previousApiAuthToken = config.apiAuthToken;
+  config.apiAuthToken = options.apiAuthToken || '';
   config.jiraEnabled = config.jiraEnabled === true;
   config.workspaceRoot = await mkdtemp(join(tmpdir(), 'providus-conversation-api-'));
-  const server = createApp().listen(0);
+  const server = createApp(options).listen(0);
   await new Promise((resolve) => server.once('listening', resolve));
   return {
     base: `http://127.0.0.1:${server.address().port}`,
-    close: () => server.close()
+    close: () => {
+      config.apiAuthToken = previousApiAuthToken;
+      server.close();
+    }
   };
 }
 
@@ -317,6 +389,18 @@ function viewerHeaders(userId, role = 'viewer') {
   return {
     'X-Agent-User-Id': userId,
     'X-Agent-Role': role,
+    'Content-Type': 'application/json'
+  };
+}
+
+function deployerHeaders(userId) {
+  return {
+    'X-Agent-User-Id': userId,
+    'X-Agent-Source': 'Salesforce-Apex',
+    'X-Agent-Role': 'deployer',
+    'X-Agent-Org-Id': '00Dg500000E07e9EAB',
+    'X-Agent-Can-Deploy': 'true',
+    'X-Agent-Can-Implement': 'false',
     'Content-Type': 'application/json'
   };
 }
@@ -337,4 +421,73 @@ async function getJson(url, headers) {
 
 function waitForQueueTick() {
   return new Promise((resolve) => setTimeout(resolve, 25));
+}
+
+function deploymentReadyPatch(overrides = {}) {
+  return {
+    status: 'AWAITING_DEPLOYMENT_APPROVAL',
+    plan: { planVersion: 1, planHash: 'plan-hash', materialChangeHash: 'material-hash', fileOperations: [{ path: 'force-app/main/default/flows/Test.flow-meta.xml', operation: 'modify' }], dataOperations: [] },
+    metadataScope: { hash: 'scope-hash' },
+    orgContext: {
+      orgRegistryId: 'providus_orgfarm_dev',
+      expectedOrgId: '00Dg500000E07e9EAB',
+      environment: 'developer',
+      deploymentPermission: 'allowed',
+      allowedOperations: ['read', 'retrieve', 'validate', 'deploy']
+    },
+    implementation: { approvalId: 'approval-1', sourceHash: 'source-hash', commitHash: 'commit-hash', changedFiles: ['force-app/main/default/flows/Test.flow-meta.xml'], workspacePath: 'implementation/project' },
+    validation: {
+      validationId: 'validation-1',
+      targetOrgId: '00Dg500000E07e9EAB',
+      status: 'PASSED',
+      sourceHash: 'source-hash',
+      commitHash: 'commit-hash',
+      planHash: 'plan-hash',
+      metadataScopeHash: 'scope-hash',
+      packageHash: 'package-hash',
+      expiryTimestamp: new Date(Date.now() + 60000).toISOString()
+    },
+    approvals: [deploymentApproval()],
+    ...overrides
+  };
+}
+
+function deploymentApproval(overrides = {}) {
+  return {
+    approvalId: 'approval-deploy-1',
+    approvalType: 'DEPLOYMENT',
+    decision: 'APPROVED',
+    planHash: 'plan-hash',
+    metadataScopeHash: 'scope-hash',
+    validationId: 'validation-1',
+    validatedSourceHash: 'source-hash',
+    deploymentPackageHash: 'package-hash',
+    salesforceOrganizationId: '00Dg500000E07e9EAB',
+    ...overrides
+  };
+}
+
+function sideEffectSnapshot(job, queueCalls) {
+  return {
+    status: job.status,
+    orgContext: job.orgContext,
+    stateHistory: job.stateHistory,
+    messages: job.specialistMessages,
+    approvals: job.approvals,
+    auditEvents: job.audit,
+    logs: job.logs,
+    workItems: job.workItems,
+    commands: job.commands,
+    queueCalls: [...queueCalls]
+  };
+}
+
+function trustedContext(expectedOrgId) {
+  return {
+    orgRegistryId: 'providus_orgfarm_dev',
+    expectedOrgId,
+    environment: 'developer',
+    deploymentPermission: 'allowed',
+    allowedOperations: ['read', 'retrieve', 'validate', 'deploy']
+  };
 }

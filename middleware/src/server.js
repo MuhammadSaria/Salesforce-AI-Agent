@@ -13,7 +13,7 @@ import { getRegisteredOrg, listPublicOrgs } from './services/orgRegistry.js';
 import { claimWebhookEvent, parseJiraWebhook, verifyJiraWebhook } from './services/jira.js';
 import { JOB_STATES } from './domain/jobState.js';
 import { startJiraPoller } from './services/jiraPoller.js';
-import { latestApprovedApproval } from './domain/approval.js';
+import { orgBoundApproval } from './domain/approval.js';
 import { approveSpecialistWorkItems, overallSpecialistStatus } from './services/orchestrator.js';
 import { WORK_ITEM_STATUSES } from './domain/specialistAgents.js';
 import { publicJob } from './services/jobPresentation.js';
@@ -29,9 +29,10 @@ export function createApp(options = {}) {
   app.use(cors({ origin: config.allowedOrigins.length ? config.allowedOrigins : false }));
   app.use(express.json({ limit: '64kb', verify: (req, res, buffer) => { req.rawBody = buffer; } }));
   app.use(pinoHttp({ logger }));
+  const enqueue = options.enqueue || enqueueAgentJob;
   const conversations = conversationService({
     repository: jobStoreRepository(),
-    enqueue: enqueueAgentJob
+    enqueue
   });
 
   app.get('/health', (req, res) => res.json({ ok: true }));
@@ -85,7 +86,7 @@ export function createApp(options = {}) {
     const org = await getRegisteredOrg(String(req.body?.orgRegistryId || ''));
     if (!org) return res.status(422).json({ error: { message: 'Select an active org from the registry.' } });
     const updated = await invalidateForOrgChange(job.jobId, org.id, req.actor.id);
-    await enqueueAgentJob({ jobId: job.jobId, action: 'analyze', actor: req.actor.id }, { jobId: `${job.jobId}:analyze:${Date.now()}` });
+    await enqueue({ jobId: job.jobId, action: 'analyze', actor: req.actor.id }, { jobId: `${job.jobId}:analyze:${Date.now()}` });
     res.json({ jobId: updated.jobId, status: updated.status, message: 'Org selected. Prior artifacts and approvals were invalidated.' });
   }));
 
@@ -94,7 +95,7 @@ export function createApp(options = {}) {
       if (job.source === 'salesforce-chat') return conflict(res, 'Direct Salesforce chat jobs continue through conversation messages.');
       if (![JOB_STATES.RECEIVED, JOB_STATES.PLAN_REJECTED, JOB_STATES.ORG_VERIFICATION_FAILED].includes(job.status)) return conflict(res, 'Job is not ready for analysis.');
       if (job.status === JOB_STATES.PLAN_REJECTED) await invalidateForPlanChange(job.jobId, req.actor.id);
-      await enqueueAgentJob({ jobId: job.jobId, action: 'analyze', actor: req.actor.id }, { jobId: `${job.jobId}:analyze:${Date.now()}` });
+      await enqueue({ jobId: job.jobId, action: 'analyze', actor: req.actor.id }, { jobId: `${job.jobId}:analyze:${Date.now()}` });
       res.status(202).json({ jobId: job.jobId, message: 'Analysis queued.' });
     }));
 
@@ -117,7 +118,7 @@ export function createApp(options = {}) {
       if (![JOB_STATES.RECEIVED, JOB_STATES.AWAITING_ORG_SELECTION].includes(job.status)) revised = await invalidateForPlanChange(job.jobId, req.actor.id, { instruction: text });
       await appendAudit(job.jobId, { actor: req.actor.id, action: 'USER_INSTRUCTION_ADDED', result: 'accepted', safeMetadata: { instructionLength: text.length, nextPlanVersion: revised.nextPlanVersion } });
       if (revised.status === JOB_STATES.RECEIVED) {
-        await enqueueAgentJob({ jobId: job.jobId, action: 'analyze', actor: req.actor.id }, { jobId: `${job.jobId}:analyze:instruction:${Date.now()}` });
+        await enqueue({ jobId: job.jobId, action: 'analyze', actor: req.actor.id }, { jobId: `${job.jobId}:analyze:instruction:${Date.now()}` });
         return res.status(202).json({ instructions, status: revised.status, nextPlanVersion: revised.nextPlanVersion, message: 'Instruction accepted. Revised analysis queued.' });
       }
       res.status(201).json({ instructions, status: revised.status, nextPlanVersion: revised.nextPlanVersion, message: 'Instruction accepted. Select the target org to continue.' });
@@ -131,7 +132,7 @@ export function createApp(options = {}) {
     const approval = approvalRecord(job, req, 'IMPLEMENTATION', { decision: 'APPROVED' });
     await updateJob(job.jobId, { approvals: [...job.approvals, approval], workItems: approveSpecialistWorkItems(job.workItems || [], approval.approvalId) });
     await transitionJob(job.jobId, JOB_STATES.IMPLEMENTING, { actor: req.actor.id, reason: 'Explicit implementation approval recorded.', approvalId: approval.approvalId });
-    await enqueueAgentJob({ jobId: job.jobId, action: 'implement', actor: req.actor.id }, { jobId: `${job.jobId}:implement:${Date.now()}` });
+    await enqueue({ jobId: job.jobId, action: 'implement', actor: req.actor.id }, { jobId: `${job.jobId}:implement:${Date.now()}` });
     res.status(201).json({ approval });
   }));
   app.post('/api/jobs/:jobId/reject-plan', mutableJobRoute(async (req, res, job) => {
@@ -145,8 +146,8 @@ export function createApp(options = {}) {
     await transitionJob(job.jobId, JOB_STATES.PLAN_REJECTED, { actor: req.actor.id, reason: 'Plan rejected.', approvalId: approval.approvalId });
     res.status(201).json({ approval });
   }));
-  app.post('/api/jobs/:jobId/implement', queueAction('implement', [JOB_STATES.IMPLEMENTING, JOB_STATES.VALIDATION_FAILED], requireImplementationPermission));
-  app.post('/api/jobs/:jobId/validate', queueAction('validate', [JOB_STATES.IMPLEMENTING, JOB_STATES.VALIDATION_FAILED], requireImplementationPermission));
+  app.post('/api/jobs/:jobId/implement', queueAction('implement', [JOB_STATES.IMPLEMENTING, JOB_STATES.VALIDATION_FAILED], requireImplementationPermission, 'IMPLEMENTATION', { enqueue, sameOrgResolver }));
+  app.post('/api/jobs/:jobId/validate', queueAction('validate', [JOB_STATES.IMPLEMENTING, JOB_STATES.VALIDATION_FAILED], requireImplementationPermission, 'IMPLEMENTATION', { enqueue, sameOrgResolver }));
 
   app.post('/api/jobs/:jobId/approve-deployment', mutableJobRoute(async (req, res, job) => {
     if (!requireDeploymentPermission(req, res, job)) return;
@@ -166,10 +167,12 @@ export function createApp(options = {}) {
   app.post('/api/jobs/:jobId/deploy', mutableJobRoute(async (req, res, job) => {
     if (!requireDeploymentPermission(req, res, job)) return;
     if (job.status !== JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL) return conflict(res, 'Job is not ready to deploy.');
-    const approval = latestApprovedApproval(job, 'DEPLOYMENT', job.validation?.validationId);
-    if (!approval) return conflict(res, 'Explicit deployment approval is required.');
+    const orgContext = await trustedOrgContextForJob(job, req.actor, sameOrgResolver);
+    const approval = orgBoundApproval(job, 'DEPLOYMENT', { orgContext });
+    assertDeploymentApprovalReady(job, approval, orgContext);
+    if (job.source === 'salesforce-chat') await updateJob(job.jobId, { orgContext });
     await transitionJob(job.jobId, JOB_STATES.DEPLOYING, { actor: req.actor.id, reason: 'Deployment requested after explicit approval.', approvalId: approval.approvalId });
-    await enqueueAgentJob({ jobId: job.jobId, action: 'deploy', actor: req.actor.id }, { jobId: `${job.jobId}:deploy:${Date.now()}` });
+    await enqueue({ jobId: job.jobId, action: 'deploy', actor: req.actor.id }, { jobId: `${job.jobId}:deploy:${Date.now()}` });
     res.status(202).json({ jobId: job.jobId, message: 'Approved deployment queued.' });
   }));
   app.post('/api/jobs/:jobId/cancel', mutableJobRoute(async (req, res, job) => {
@@ -198,7 +201,38 @@ async function jiraWebhook(req, res, next) {
   } catch (error) { next(error); }
 }
 
-function queueAction(action, states, permission) { return mutableJobRoute(async (req, res, job) => { if (permission && !permission(req, res, job)) return; if (!states.includes(job.status)) return conflict(res, `Job is not ready to ${action}.`); await enqueueAgentJob({ jobId: job.jobId, action, actor: req.actor.id }, { jobId: `${job.jobId}:${action}:${Date.now()}` }); res.status(202).json({ jobId: job.jobId, message: `${action} queued.` }); }); }
+async function trustedOrgContextForJob(job, actor, sameOrgResolver) {
+  if (!isSalesforceChat(job)) return job.orgContext;
+  const orgContext = await sameOrgResolver({ authenticatedOrgId: job.orgId, actorId: actor.id });
+  if (!sameSalesforceId(orgContext?.expectedOrgId, job.orgId)) throw Object.assign(new Error('Resolved Salesforce org context does not match this job.'), { statusCode: 409 });
+  return orgContext;
+}
+
+function queueAction(action, states, permission, approvalType = '', dependencies = {}) {
+  return mutableJobRoute(async (req, res, job) => {
+    if (permission && !permission(req, res, job)) return;
+    if (!states.includes(job.status)) return conflict(res, `Job is not ready to ${action}.`);
+    if (approvalType) {
+      const orgContext = await trustedOrgContextForJob(job, req.actor, dependencies.sameOrgResolver || resolveSameOrg);
+      orgBoundApproval(job, approvalType, { orgContext });
+      if (job.source === 'salesforce-chat') await updateJob(job.jobId, { orgContext });
+    }
+    await (dependencies.enqueue || enqueueAgentJob)({ jobId: job.jobId, action, actor: req.actor.id }, { jobId: `${job.jobId}:${action}:${Date.now()}` });
+    res.status(202).json({ jobId: job.jobId, message: `${action} queued.` });
+  });
+}
+function assertDeploymentApprovalReady(job, approval, orgContext) {
+  const validation = job.validation;
+  if (!validation || validation.status !== 'PASSED' || new Date(validation.expiryTimestamp) <= new Date()) {
+    throw Object.assign(new Error('A current deployment approval for this exact plan, scope, and org is required.'), { statusCode: 409, code: 'APPROVAL_REQUIRED' });
+  }
+  if (approval.validatedSourceHash !== validation.sourceHash || approval.deploymentPackageHash !== validation.packageHash) {
+    throw Object.assign(new Error('A current deployment approval for this exact plan, scope, and org is required.'), { statusCode: 409, code: 'APPROVAL_REQUIRED' });
+  }
+  if (!sameSalesforceId(validation.targetOrgId, orgContext?.expectedOrgId)) {
+    throw Object.assign(new Error('A current deployment approval for this exact plan, scope, and org is required.'), { statusCode: 409, code: 'APPROVAL_REQUIRED' });
+  }
+}
 function requireDirectSalesforceClaims(req, res, next) { return req.actor?.authMode === 'test-bypass' && !req.get('x-agent-source') ? next() : requireSalesforceClaims(req, res, next); }
 function requireImplementationPermission(req, res, job) { if (requiresSalesforceClaims(req, res, job)) return false; if (hasImplementationPermission(req.actor, job)) return true; res.status(403).json({ error: { code: 'FORBIDDEN', message: 'This action is not permitted.' } }); return false; }
 function requireDeploymentPermission(req, res, job) { if (requiresSalesforceClaims(req, res, job)) return false; if (hasDeploymentPermission(req.actor, job)) return true; res.status(403).json({ error: { code: 'FORBIDDEN', message: 'This action is not permitted.' } }); return false; }

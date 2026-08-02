@@ -162,6 +162,219 @@ test('worker rejects salesforce-chat approval without org binding', async (t) =>
   assert.equal(updated.implementation, undefined);
 });
 
+test('worker implementation with missing approval org ID rejects with no persistent side effects', async (t) => {
+  config.workspaceRoot = await mkdtemp(join(tmpdir(), 'providus-agent-same-org-'));
+  setSameOrgResolverForTest(async ({ authenticatedOrgId }) => trustedContext(authenticatedOrgId));
+  t.after(() => setSameOrgResolverForTest(null));
+
+  const jobId = `same-org-worker-zero-missing-${Date.now()}`;
+  await createJobRecord({
+    jobId,
+    userId: '005g5000009ImIkAAK',
+    orgId: '00Dg500000E07e9EAB',
+    source: 'salesforce-chat',
+    prompt: 'Create a Flow'
+  });
+  await updateJob(jobId, implementationReadyPatch({
+    approvals: [implementationApproval({ salesforceOrganizationId: '' })],
+    orgContext: { orgRegistryId: 'forged', expectedOrgId: '00D000000000BAD', environment: 'sandbox', verified: true }
+  }));
+  const before = sideEffectSnapshot(await getJobRecord(jobId));
+
+  await assert.rejects(
+    processAgentJob({ jobId, action: 'implement', actor: '005g5000009ImIkAAK' }),
+    /current implementation approval/
+  );
+
+  assert.deepEqual(sideEffectSnapshot(await getJobRecord(jobId)), before);
+});
+
+test('worker implementation with mismatched approval org ID rejects with no persistent side effects', async (t) => {
+  config.workspaceRoot = await mkdtemp(join(tmpdir(), 'providus-agent-same-org-'));
+  setSameOrgResolverForTest(async ({ authenticatedOrgId }) => trustedContext(authenticatedOrgId));
+  t.after(() => setSameOrgResolverForTest(null));
+
+  const jobId = `same-org-worker-zero-mismatch-${Date.now()}`;
+  await createJobRecord({
+    jobId,
+    userId: '005g5000009ImIkAAK',
+    orgId: '00Dg500000E07e9EAB',
+    source: 'salesforce-chat',
+    prompt: 'Create a Flow'
+  });
+  await updateJob(jobId, implementationReadyPatch({
+    approvals: [implementationApproval({ salesforceOrganizationId: '00Dg500000E07fAEAR' })],
+    orgContext: { orgRegistryId: 'forged', expectedOrgId: '00D000000000BAD', environment: 'sandbox', verified: true }
+  }));
+  const before = sideEffectSnapshot(await getJobRecord(jobId));
+
+  await assert.rejects(
+    processAgentJob({ jobId, action: 'implement', actor: '005g5000009ImIkAAK' }),
+    /current implementation approval/
+  );
+
+  assert.deepEqual(sideEffectSnapshot(await getJobRecord(jobId)), before);
+});
+
+test('worker validation with invalid approval binding rejects with no persistent side effects', async (t) => {
+  config.workspaceRoot = await mkdtemp(join(tmpdir(), 'providus-agent-same-org-'));
+  setSameOrgResolverForTest(async ({ authenticatedOrgId }) => trustedContext(authenticatedOrgId));
+  t.after(() => setSameOrgResolverForTest(null));
+
+  const jobId = `same-org-worker-validation-zero-${Date.now()}`;
+  await createJobRecord({
+    jobId,
+    userId: '005g5000009ImIkAAK',
+    orgId: '00Dg500000E07e9EAB',
+    source: 'salesforce-chat',
+    prompt: 'Create a Flow'
+  });
+  await updateJob(jobId, implementationReadyPatch({
+    approvals: [implementationApproval({ salesforceOrganizationId: '00Dg500000E07fAEAR' })],
+    orgContext: { orgRegistryId: 'forged', expectedOrgId: '00D000000000BAD', environment: 'sandbox', verified: true },
+    implementation: { sourceHash: 'source-hash', changedFiles: [], workspaceClean: true }
+  }));
+  const before = sideEffectSnapshot(await getJobRecord(jobId));
+
+  await assert.rejects(
+    processAgentJob({ jobId, action: 'validate', actor: '005g5000009ImIkAAK' }),
+    /current implementation approval/
+  );
+
+  assert.deepEqual(sideEffectSnapshot(await getJobRecord(jobId)), before);
+});
+
+test('deployment worker with invalid approval does not persist orgContext', async (t) => {
+  config.workspaceRoot = await mkdtemp(join(tmpdir(), 'providus-agent-same-org-'));
+  setSameOrgResolverForTest(async ({ authenticatedOrgId }) => trustedContext(authenticatedOrgId));
+  t.after(() => setSameOrgResolverForTest(null));
+
+  const jobId = `same-org-worker-deploy-zero-${Date.now()}`;
+  await createJobRecord({
+    jobId,
+    userId: '005g5000009ImIkAAK',
+    orgId: '00Dg500000E07e9EAB',
+    source: 'salesforce-chat',
+    prompt: 'Create a Flow'
+  });
+  await updateJob(jobId, deploymentReadyPatch({
+    status: 'DEPLOYING',
+    approvals: [deploymentApproval({ salesforceOrganizationId: '' })],
+    orgContext: { orgRegistryId: 'forged', expectedOrgId: '00D000000000BAD', environment: 'sandbox', verified: true }
+  }));
+  const before = sideEffectSnapshot(await getJobRecord(jobId));
+
+  await assert.rejects(
+    processAgentJob({ jobId, action: 'deploy', actor: '005g5000009ImIkAAK' }),
+    /current deployment approval/
+  );
+
+  assert.deepEqual(sideEffectSnapshot(await getJobRecord(jobId)), before);
+});
+
+test('worker same-org approval path persists trusted org context after approval guards pass', async (t) => {
+  config.workspaceRoot = await mkdtemp(join(tmpdir(), 'providus-agent-same-org-'));
+  setSameOrgResolverForTest(async ({ authenticatedOrgId }) => trustedContext(authenticatedOrgId));
+  t.after(() => setSameOrgResolverForTest(null));
+
+  const jobId = `same-org-worker-valid-${Date.now()}`;
+  await createJobRecord({
+    jobId,
+    userId: '005g5000009ImIkAAK',
+    orgId: '00Dg500000E07e9EAB',
+    source: 'salesforce-chat',
+    prompt: 'Create a Flow'
+  });
+  await updateJob(jobId, implementationReadyPatch({
+    approvals: [implementationApproval({ salesforceOrganizationId: '00Dg500000E07e9EAB' })],
+    orgContext: { orgRegistryId: 'forged', expectedOrgId: '00D000000000BAD', environment: 'sandbox', verified: true },
+    implementation: { sourceHash: 'source-hash', changedFiles: [], workspaceClean: true }
+  }));
+
+  await assert.rejects(
+    processAgentJob({ jobId, action: 'validate', actor: '005g5000009ImIkAAK' }),
+    /clean|implementation|validation/i
+  );
+
+  const updated = await getJobRecord(jobId);
+  assert.equal(updated.orgContext.orgRegistryId, 'providus_orgfarm_dev');
+  assert.equal(updated.orgContext.expectedOrgId, '00Dg500000E07e9EAB');
+});
+
+function implementationReadyPatch(overrides = {}) {
+  return {
+    status: 'IMPLEMENTING',
+    plan: { planVersion: 1, planHash: 'plan-hash', materialChangeHash: 'material-hash', fileOperations: [], dataOperations: [] },
+    metadataScope: { hash: 'scope-hash' },
+    approvals: [implementationApproval()],
+    orgContext: trustedContext('00Dg500000E07e9EAB'),
+    ...overrides
+  };
+}
+
+function deploymentReadyPatch(overrides = {}) {
+  return {
+    ...implementationReadyPatch(),
+    status: 'AWAITING_DEPLOYMENT_APPROVAL',
+    implementation: { approvalId: 'approval-1', sourceHash: 'source-hash', commitHash: 'commit-hash', changedFiles: [], workspacePath: 'implementation/project' },
+    validation: {
+      validationId: 'validation-1',
+      targetOrgId: '00Dg500000E07e9EAB',
+      status: 'PASSED',
+      sourceHash: 'source-hash',
+      commitHash: 'commit-hash',
+      planHash: 'plan-hash',
+      metadataScopeHash: 'scope-hash',
+      packageHash: 'package-hash',
+      expiryTimestamp: new Date(Date.now() + 60000).toISOString()
+    },
+    approvals: [implementationApproval(), deploymentApproval()],
+    ...overrides
+  };
+}
+
+function implementationApproval(overrides = {}) {
+  return {
+    approvalId: 'approval-1',
+    approvalType: 'IMPLEMENTATION',
+    decision: 'APPROVED',
+    planHash: 'plan-hash',
+    metadataScopeHash: 'scope-hash',
+    salesforceOrganizationId: '00Dg500000E07e9EAB',
+    ...overrides
+  };
+}
+
+function deploymentApproval(overrides = {}) {
+  return {
+    approvalId: 'approval-deploy-1',
+    approvalType: 'DEPLOYMENT',
+    decision: 'APPROVED',
+    planHash: 'plan-hash',
+    metadataScopeHash: 'scope-hash',
+    validationId: 'validation-1',
+    validatedSourceHash: 'source-hash',
+    deploymentPackageHash: 'package-hash',
+    salesforceOrganizationId: '00Dg500000E07e9EAB',
+    ...overrides
+  };
+}
+
+function sideEffectSnapshot(job) {
+  return {
+    status: job.status,
+    orgContext: job.orgContext,
+    stateHistory: job.stateHistory,
+    messages: job.specialistMessages,
+    approvals: job.approvals,
+    auditEvents: job.audit,
+    logs: job.logs,
+    workItems: job.workItems,
+    commands: job.commands,
+    queueCalls: []
+  };
+}
+
 function trustedContext(expectedOrgId) {
   return {
     orgRegistryId: 'providus_orgfarm_dev',

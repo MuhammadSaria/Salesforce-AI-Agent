@@ -4,6 +4,15 @@ import { requireSalesforceOrgId, requireSalesforceUserId } from '../utils/salesf
 
 export async function requireApiAuth(req, res, next) {
   if (config.nodeEnv === 'test' && !config.apiAuthToken) {
+    if (req.get('x-agent-source')) {
+      try {
+        applySalesforceClaims(req);
+        next();
+        return;
+      } catch {
+        // Fall back to the explicit test bypass actor below.
+      }
+    }
     req.actor = freezeActor({ id: String(req.get('x-agent-user-id') || 'salesforce-user').slice(0, 80), orgId: '', canImplement: false, canDeploy: false, role: String(req.get('x-agent-role') || 'developer').toLowerCase(), authMode: 'test-bypass' });
     next();
     return;

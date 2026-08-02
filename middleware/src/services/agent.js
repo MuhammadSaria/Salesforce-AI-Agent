@@ -14,7 +14,7 @@ import { runSfCommand, verifySelectedOrg } from './sfExecutor.js';
 import { resolveSameOrg } from './sameOrgService.js';
 import { runGit } from './gitExecutor.js';
 import { enrichPlanWithCodex } from './codexExecutor.js';
-import { latestApprovedApproval } from '../domain/approval.js';
+import { orgBoundApproval } from '../domain/approval.js';
 import { humanizeValidationFailure } from '../utils/validationFailure.js';
 import { activatePendingJiraRevision, syncJiraComments } from './jiraSync.js';
 import { approveSpecialistWorkItems, buildSpecialistOrchestration, specialistAuditEvent, structuredSpecialistMessage, workItemForFile } from './orchestrator.js';
@@ -149,9 +149,11 @@ async function analyze(job, actor) {
 }
 
 async function implement(job, actor) {
-  job = await reResolveDirectOrgContext(job, actor);
+  const trustedOrgContext = await resolveDirectOrgContext(job, actor);
+  job = { ...job, orgContext: trustedOrgContext };
   assertState(job, JOB_STATES.IMPLEMENTING, JOB_STATES.VALIDATION_FAILED);
-  const approval = validApproval(job, 'IMPLEMENTATION');
+  const approval = validApproval(job, 'IMPLEMENTATION', { orgContext: trustedOrgContext });
+  await persistSafeDirectOrgContext(job, trustedOrgContext);
   if (job.status === JOB_STATES.VALIDATION_FAILED) {
     if (job.implementation) return validate(job, actor);
     await transitionJob(job.jobId, JOB_STATES.IMPLEMENTING, { actor, reason: 'Retrying missing local implementation before validation.' });
@@ -231,9 +233,11 @@ async function implement(job, actor) {
 }
 
 async function validate(job, actor) {
-  job = await reResolveDirectOrgContext(job, actor);
+  const trustedOrgContext = await resolveDirectOrgContext(job, actor);
+  job = { ...job, orgContext: trustedOrgContext };
   assertState(job, JOB_STATES.IMPLEMENTING, JOB_STATES.VALIDATION_FAILED);
-  validApproval(job, 'IMPLEMENTATION');
+  validApproval(job, 'IMPLEMENTATION', { orgContext: trustedOrgContext });
+  await persistSafeDirectOrgContext(job, trustedOrgContext);
   await transitionJob(job.jobId, JOB_STATES.VALIDATING, { actor, reason: 'Validation requested.' });
   await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.TESTING, WORK_ITEM_STATUSES.VALIDATING, 'Independent combined-solution testing started.');
   await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT, WORK_ITEM_STATUSES.VALIDATING, 'Target-org validation and package verification started.');
@@ -304,10 +308,12 @@ async function validate(job, actor) {
 }
 
 async function deploy(job, actor) {
-  job = await reResolveDirectOrgContext(job, actor);
+  const trustedOrgContext = await resolveDirectOrgContext(job, actor);
+  job = { ...job, orgContext: trustedOrgContext };
   assertState(job, JOB_STATES.DEPLOYING);
-  const approval = validApproval(job, 'DEPLOYMENT');
+  const approval = validApproval(job, 'DEPLOYMENT', { orgContext: trustedOrgContext });
   assertDeploymentGuard(job, approval);
+  await persistSafeDirectOrgContext(job, trustedOrgContext);
   const paths = await ensureJobWorkspace(job.jobId, job.orgContext.orgRegistryId);
   const implementationProject = resolveImplementationProject(paths, job.implementation);
   await verifySelectedOrg(job.orgContext, auditOptions(job, actor));
@@ -349,14 +355,8 @@ async function deploy(job, actor) {
   if (await activatePendingJiraRevisionWhenEnabled(job.jobId, actor)) return analyze(await requiredJob(job.jobId), actor);
 }
 
-function validApproval(job, type) {
-  const approval = latestApprovedApproval(job, type, type === 'DEPLOYMENT' ? job.validation?.validationId : '');
-  const planMatches = approval?.planHash === job.plan?.planHash
-    || (type === 'IMPLEMENTATION' && approval?.materialChangeHash && approval.materialChangeHash === job.plan?.materialChangeHash);
-  const approvalOrgMatchesContext = sameSalesforceId(approval?.salesforceOrganizationId, job.orgContext?.expectedOrgId);
-  const approvalOrgMatchesJob = job.source !== 'salesforce-chat' || sameSalesforceId(approval?.salesforceOrganizationId, job.orgId);
-  if (!approval || !planMatches || approval.metadataScopeHash !== job.metadataScope?.hash || !approvalOrgMatchesContext || !approvalOrgMatchesJob) throw Object.assign(new Error(`A current ${type.toLowerCase()} approval for this exact plan, scope, and org is required.`), { statusCode: 409 });
-  return approval;
+function validApproval(job, type, options = {}) {
+  return orgBoundApproval(job, type, options);
 }
 
 function assertDeploymentGuard(job, approval) {
@@ -373,12 +373,14 @@ function assertDeploymentGuard(job, approval) {
 }
 
 function assertState(job, ...states) { if (!states.includes(job.status)) throw Object.assign(new Error(`Job must be in ${states.join(' or ')}.`), { statusCode: 409 }); }
-async function reResolveDirectOrgContext(job, actor) {
-  if (job.source !== 'salesforce-chat') return job;
+async function resolveDirectOrgContext(job, actor) {
+  if (job.source !== 'salesforce-chat') return job.orgContext;
   const orgContext = await sameOrgResolver({ authenticatedOrgId: job.orgId, actorId: actor });
   if (!sameSalesforceId(orgContext?.expectedOrgId, job.orgId)) throw Object.assign(new Error('Resolved Salesforce org context does not match the job org.'), { statusCode: 409 });
-  await updateJob(job.jobId, { orgContext });
-  return { ...job, orgContext };
+  return orgContext;
+}
+async function persistSafeDirectOrgContext(job, orgContext) {
+  if (job.source === 'salesforce-chat') await updateJob(job.jobId, { orgContext });
 }
 function assertJiraEnabled() { if (!config.jiraEnabled) throw jiraDisabledError(); }
 function assertJiraActionAllowed(job) { if (!config.jiraEnabled && isJiraSource(job)) throw jiraDisabledError(); }
