@@ -27,6 +27,15 @@ test('realistic discovery sequence identifies GiftTransaction to GiftCommitment 
   assert.ok(inspection.evidence.some((item) => item.kind === 'RELATIONSHIP' && item.objectApiName === 'GiftTransaction' && item.fieldApiName === 'GiftCommitmentId' && item.targetObjectApiName === 'GiftCommitment'));
   assert.equal(new Set(inspection.evidence.map((item) => item.evidenceId)).size, inspection.evidence.length);
   assert.ok(calls.filter((call) => call.command === 'query').every((call) => /\bLIMIT\s+\d+\b/i.test(call.query)));
+  assert.ok(calls.filter((call) => [
+    'flow-discovery',
+    'apex-class-discovery',
+    'apex-trigger-discovery',
+    'validation-rule-discovery',
+    'layout-discovery',
+    'permission-set-discovery'
+  ].includes(call.operationId)).every((call) => call.useToolingApi === true));
+  assert.ok(calls.find((call) => call.operationId === 'flow-discovery').query.includes('ApiName'));
   assert.deepEqual(calls.at(-1), {
     command: 'retrieveMetadata',
     targetOrg: 'verified-alias',
@@ -44,6 +53,19 @@ test('realistic discovery sequence identifies GiftTransaction to GiftCommitment 
     ]
   });
   assert.ok(inspection.primaryMetadata.every((item) => item.retrievalStatus === 'retrieved'));
+});
+
+test('large object describe responses do not exceed budget before relevant field filtering', async () => {
+  const calls = [];
+  const inspection = await inspectFlowRequirement({
+    requirement: requirement('When a Donation related to a Recurring Donation becomes Paid/Completed, assign its permanent sequential installment number.'),
+    orgContext: trustedContext()
+  }, { sf: realisticSf(calls, { largeDescribe: true }), clock: fixedClock, maxComponents: 7, maxObjects: 2, maxFieldsPerObject: 3 });
+
+  assert.deepEqual(inspection.relationships.map((item) => `${item.objectApiName}.${item.fieldApiName}->${item.referenceTo}`), ['GiftTransaction.GiftCommitmentId->GiftCommitment']);
+  assert.ok(inspection.statusCandidates.some((item) => item.fieldApiName === 'Status' && item.values.includes('Paid')));
+  assert.equal(inspection.primaryMetadata.length <= 7, true);
+  assert.ok(calls.some((call) => call.operationId?.startsWith('field-definition-discovery:') && call.useToolingApi === true));
 });
 
 test('EntityDefinition fake CustomField rows fail instead of fabricating fields', async () => {
@@ -87,7 +109,7 @@ test('query limits never exceed the remaining component budget', async () => {
   for (const call of calls.filter((item) => item.command === 'query' || item.command === 'describe')) {
     assert.ok(call.limit <= remaining);
     if (call.command === 'query' && call.operationId === 'object-candidates') remaining -= 2;
-    if (call.command === 'describe' && call.objectApiName === 'GiftTransaction') remaining -= 2;
+    if (call.command === 'query' && call.operationId === 'field-definition-discovery:GiftTransaction') remaining -= 2;
   }
 });
 
@@ -132,6 +154,9 @@ test('retrieval failures are controlled and do not mark components retrieved', a
     { exitCode: 1, stdout: '{}', stderr: 'Authorization: Bearer secret-token' },
     { exitCode: 0, stdout: '{not-json', stderr: '' },
     { exitCode: 0, stdout: JSON.stringify({ status: 1, message: 'failed' }), stderr: '' },
+    { exitCode: 0, stdout: JSON.stringify({ status: 0, result: {} }), stderr: '' },
+    { exitCode: 0, stdout: JSON.stringify({ status: 0, result: { files: [] } }), stderr: '' },
+    { exitCode: 0, stdout: JSON.stringify({ status: 0, result: { targetOrgId: ORG_ID } }), stderr: '' },
     { exitCode: 0, stdout: JSON.stringify({ status: 0, result: { targetOrgId: '00Dg500000E07fAEAR', files: [] } }), stderr: '' },
     { exitCode: 0, stdout: JSON.stringify({ status: 0, result: { targetOrgId: ORG_ID, files: [] } }), stderr: '' },
     { exitCode: 0, stdout: JSON.stringify({ status: 0, result: { targetOrgId: ORG_ID, files: [{ fullName: 'GiftTransaction', type: 'CustomObject' }] } }), stderr: '' }
@@ -229,11 +254,14 @@ function recordsForOperation(request, options) {
     ];
     return options.oversizedObjects ? rows : rows.slice(0, request.limit);
   }
+  if (request.operationId?.startsWith('field-definition-discovery:')) {
+    return fieldDefinitionRows(request.operationId.split(':')[1], options).slice(0, request.limit);
+  }
   const rows = {
     'flow-discovery': [
-      { DeveloperName: 'GiftTransaction_Numbering', Label: 'Gift Transaction Numbering', Status: 'Draft', TableEnumOrId: 'GiftTransaction' },
-      ...(options.unrelatedRows ? [{ DeveloperName: 'Unrelated_Flow', Label: 'Unrelated', Status: 'Draft', TableEnumOrId: 'Account' }] : []),
-      ...(options.malformedFlow ? [{ DeveloperName: 'Bad;rm', Label: 'Bad', Status: 'Draft', TableEnumOrId: 'GiftTransaction' }] : [])
+      { ApiName: 'GiftTransaction_Numbering', Label: 'Gift Transaction Numbering', IsActive: true, ActiveVersion: { VersionNumber: 3 }, TriggerObjectOrEventLabel: 'Gift Transaction' },
+      ...(options.unrelatedRows ? [{ ApiName: 'Unrelated_Flow', Label: 'Unrelated', IsActive: false, TriggerObjectOrEventLabel: 'Account' }] : []),
+      ...(options.malformedFlow ? [{ ApiName: 'Bad;rm', Label: 'Bad', IsActive: false, TriggerObjectOrEventLabel: 'Gift Transaction' }] : [])
     ],
     'apex-class-discovery': [{ Name: 'GiftAutomation' }],
     'apex-trigger-discovery': [{ Name: 'GiftTransactionTrigger', TableEnumOrId: 'GiftTransaction' }],
@@ -242,6 +270,34 @@ function recordsForOperation(request, options) {
     'permission-set-discovery': [{ Name: 'Gift_Operations', Label: 'Gift Operations' }]
   }[request.operationId] || [];
   return rows.slice(0, request.limit);
+}
+
+function fieldDefinitionRows(objectApiName, options) {
+  if (objectApiName !== 'GiftTransaction') return [];
+  return [
+    {
+      EntityDefinition: { QualifiedApiName: 'GiftTransaction' },
+      QualifiedApiName: 'GiftCommitmentId',
+      Label: 'Gift Commitment',
+      DataType: 'Lookup',
+      ReferenceTo: options.noRelationship ? '' : options.unrelatedRelationship ? 'Account' : 'GiftCommitment',
+      RelationshipName: options.noRelationship ? null : options.unrelatedRelationship ? 'Account' : 'GiftCommitment',
+      dependencyLevel: options.tooDeepField ? 1 : 0
+    },
+    {
+      EntityDefinition: { QualifiedApiName: 'GiftTransaction' },
+      QualifiedApiName: 'Status',
+      Label: 'Status',
+      DataType: 'Picklist',
+      ValueSet: { ValueSetValues: [{ ValueName: 'Pending' }, { ValueName: 'Paid' }, { ValueName: 'Completed' }, { ValueName: 'Reversed' }] }
+    },
+    ...(options.unrelatedRows ? [{
+      EntityDefinition: { QualifiedApiName: 'Account' },
+      QualifiedApiName: 'Unrelated__c',
+      Label: 'Unrelated',
+      DataType: 'Text'
+    }] : [])
+  ];
 }
 
 function describeForObject(objectApiName, options) {
@@ -256,6 +312,10 @@ function describeForObject(objectApiName, options) {
       },
       { name: 'Status', label: 'Status', type: 'picklist', picklistValues: [{ value: 'Pending' }, { value: 'Paid' }, { value: 'Completed' }, { value: 'Reversed' }] }
     ];
+    if (options.largeDescribe) {
+      const unrelatedFields = Array.from({ length: 40 }, (_, index) => ({ name: `Unrelated_${index}__c`, label: `Unrelated ${index}`, type: 'string' }));
+      return { result: { name: objectApiName, fields: [...unrelatedFields, ...fields] } };
+    }
     return { result: { name: objectApiName, fields: options.tooDeepField ? fields.map((field) => ({ ...field, dependencyLevel: 1 })) : fields } };
   }
   return { result: { name: objectApiName, fields: [] } };

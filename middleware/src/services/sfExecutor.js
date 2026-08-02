@@ -37,6 +37,11 @@ const COMMANDS = {
       }
     }
   },
+  toolingQuery: {
+    operation: 'read',
+    args: ({ query, targetOrg }) => ['data', 'query', '--query', query, '--target-org', targetOrg, '--use-tooling-api', '--json'],
+    validate: ({ query }) => validateReadOnlyQuery(query)
+  },
   sobjectDescribe: {
     operation: 'read',
     args: ({ objectApiName, targetOrg }) => ['sobject', 'describe', '--sobject', objectApiName, '--target-org', targetOrg, '--json'],
@@ -218,6 +223,17 @@ export async function runSfCommand(command, params = {}, options = {}) {
   return result;
 }
 
+export function buildSfCommandArgs(command, params = {}) {
+  const definition = COMMANDS[command];
+  if (!definition || !definition.args) throw new Error(`Blocked sf command: ${command}`);
+  const resolvedParams = {
+    ...params,
+    targetOrg: params.targetOrg
+  };
+  definition.validate?.(resolvedParams);
+  return definition.args(resolvedParams);
+}
+
 export async function retrieveMetadata({ components, orgContext, executor, verifier, timeoutMs, cwd } = {}) {
   assertTrustedOrgContext(orgContext);
   assertNonProductionOrgContext(orgContext);
@@ -252,6 +268,15 @@ function validateJobOutputPath(path) {
 
 function validateApiName(value, label) {
   if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(String(value || ''))) throw new Error(`Invalid Salesforce ${label} API name.`);
+}
+
+function validateReadOnlyQuery(query) {
+  if (!/^\s*select\b/i.test(query || '')) {
+    throw new Error('Only SELECT SOQL queries are allowed.');
+  }
+  if (/\b(insert|update|upsert|delete|undelete|merge)\b/i.test(query)) {
+    throw new Error('Mutation keywords are not allowed in read-only SOQL.');
+  }
 }
 
 function validateRetrieveComponents(components) {

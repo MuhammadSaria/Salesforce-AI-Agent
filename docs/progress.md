@@ -20,6 +20,7 @@
 - Phase 1 Task 5: Build deterministic org inspection for Flow work
   - Implementation commit: 70bea0deb1605fd32d4ef784f5711e77e486d88b
   - Correction commit: d1ad742
+  - Tooling/large-object/retrieval-evidence correction commit: pending push
   - Verification date: 2026-08-02
   - Verification:
     - `cd middleware && node --import ./test/setup.js --test test/orgInspectionService.test.js` - RED first, failed for expected missing `orgInspectionService.js`.
@@ -34,6 +35,12 @@
     - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --input-type=module -e "import pg from 'pg'; const c = new pg.Client({ connectionString: process.env.TEST_DATABASE_URL }); await c.connect(); const r = await c.query('select current_database() as db, inet_server_addr() as addr, inet_server_port() as port'); console.log(JSON.stringify(r.rows[0])); await c.end();"` - PASS, connected to `providus_nexus_test` on PostgreSQL port 5432.
     - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/orgInspectionService.test.js test/metadataScope.test.js test/metadataCapabilities.test.js test/apiAuth.test.js test/sameOrgService.test.js test/security.test.js test/agentSameOrg.test.js test/conversationApi.test.js test/developmentJob.test.js test/jobState.test.js test/jobStore.test.js test/orchestrator.test.js test/sfFailureMessage.test.js` - PASS, 114 tests, 0 skipped.
     - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 164 tests and 0 skipped.
+  - Tooling/large-object/retrieval-evidence correction verification:
+    - `cd middleware && node --import ./test/setup.js --test test/orgInspectionService.test.js test/metadataCapabilities.test.js` - RED first, failed for expected missing Tooling API command builder, FlowDefinitionView `ApiName` parsing, large-object field handling, and strict retrieval evidence gaps.
+    - `cd middleware && node --import ./test/setup.js --test test/orgInspectionService.test.js test/metadataCapabilities.test.js` - PASS, 16 tests, 0 skipped.
+    - `cd middleware && node --import ./test/setup.js --test test/orgInspectionService.test.js test/metadataScope.test.js test/metadataCapabilities.test.js` - PASS, 19 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/orgInspectionService.test.js test/metadataScope.test.js test/metadataCapabilities.test.js test/apiAuth.test.js test/sameOrgService.test.js test/security.test.js test/agentSameOrg.test.js test/conversationApi.test.js test/developmentJob.test.js test/jobState.test.js test/jobStore.test.js test/orchestrator.test.js test/sfFailureMessage.test.js` - PASS, 116 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 166 tests and 0 skipped.
   - Review:
     - `inspectFlowRequirement({ requirement, orgContext })` returns deterministic Flow inspection sections for objects, fields, relationships, status candidates, flows, Apex automation, validation rules, layouts, permission sets, evidence, and ambiguities.
     - Org inspection requires a WeakSet-trusted same-org context with fresh verified org evidence, rejects production contexts, and ignores prompt/body org or target-org values.
@@ -42,12 +49,17 @@
     - Evidence records include stable unique evidence IDs, kind, applicable component/object/field identity, source org ID matching the verified org, and observed timestamp; Flow entries carry the same verified source org ID.
     - Empty verified object or relationship scope returns a material ambiguity, and planning rejects material ambiguities before source generation.
   - Correction review:
-    - Discovery is operation-descriptor driven, parses realistic Salesforce query and describe JSON shapes, and maps every row by the descriptor metadata family instead of ambiguous row-shape inference.
-    - Field and relationship evidence comes from bounded describe results for verified Salesforce-discovered objects, including `GiftTransaction.GiftCommitmentId` to `GiftCommitment`, picklist status candidates, and verified source org IDs.
+    - Discovery is operation-descriptor driven, parses realistic Salesforce query and Tooling field JSON shapes, and maps every row by the descriptor metadata family instead of ambiguous row-shape inference.
+    - Field and relationship evidence comes from bounded Tooling API `FieldDefinition` results for verified Salesforce-discovered objects, including `GiftTransaction.GiftCommitmentId` to `GiftCommitment`, picklist status candidates, and verified source org IDs.
     - Every generated query includes an explicit numeric `LIMIT` no larger than the remaining component budget, oversized responses are rejected, discovery stops at budget exhaustion, and unrelated org-wide rows are excluded.
     - Retrieval success is validated from process exit, CLI status/success JSON, target-org evidence, and retrieved files before components are marked retrieved; failures return controlled non-secret inspection errors and block planning.
     - Planning requires a verified relationship connecting relevant verified candidate objects; unrelated or missing relationships produce material ambiguities.
     - Trusted org context now requires a valid fresh verification timestamp, rejects stale, future-skewed, missing, invalid, production, default-org, and prompt-controlled target contexts, and preserves Task 4 provenance checks.
+  - Tooling/large-object/retrieval-evidence correction review:
+    - Tooling metadata discovery uses explicit `toolingQuery` execution, which renders `sf data query --use-tooling-api --target-org VERIFIED_ALIAS --json`.
+    - FlowDefinitionView parsing uses realistic `ApiName` and active-state fields instead of unsupported row assumptions, and Tooling entity discovery requests carry explicit Tooling API intent.
+    - Field, relationship, and status discovery now uses bounded Tooling API `FieldDefinition` queries for verified Salesforce-discovered objects; complete describe responses are no longer treated as server-limited or rejected for having many unrelated fields.
+    - Retrieval fails unless exit code, `status: 0`, verified target Org ID evidence, retrieved-file evidence, and every requested component match the verified scope.
 
 - Phase 1 Task 4: Enforce same-sandbox identity and permission claims
   - Implementation commit: 17f1a71dc4d746bc6093ba708a8dc934e1d506ed

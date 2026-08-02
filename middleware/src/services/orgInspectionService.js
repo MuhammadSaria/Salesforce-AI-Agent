@@ -27,14 +27,7 @@ export async function inspectFlowRequirement({ requirement: _requirement, orgCon
     const objectCandidates = objectRows.map((row) => parseObjectCandidate(row, orgContext, observedAt));
     spendComponents(state, objectCandidates);
 
-    if (state.budgetRemaining > 0) {
-      for (const object of state.objects.slice(0, limits.maxObjects)) {
-        if (state.budgetRemaining <= 0) break;
-        const describe = await runDescribeOperation(sf, object.apiName, orgContext, Math.min(limits.maxFieldsPerObject, state.budgetRemaining));
-        const fields = parseDescribeFields(describe, object.apiName, orgContext, observedAt, limits);
-        spendComponents(state, fields);
-      }
-    }
+    await discoverFields(state, sf, orgContext, observedAt);
 
     for (const operationFactory of [flowOperation, apexClassOperation, apexTriggerOperation, validationRuleOperation, layoutOperation, permissionSetOperation]) {
       if (state.budgetRemaining <= 0) break;
@@ -76,8 +69,7 @@ export function validateMetadataComponents(components, options = {}) {
 
 function defaultSf(orgContext) {
   return {
-    query: ({ query }) => runSfCommand('dataQuery', { query }, { orgContext }),
-    describeSObject: ({ objectApiName }) => runSfCommand('sobjectDescribe', { objectApiName }, { orgContext }),
+    query: ({ query, useToolingApi }) => runSfCommand(useToolingApi ? 'toolingQuery' : 'dataQuery', { query }, { orgContext }),
     retrieveMetadata: ({ components }) => retrieveSfMetadata({ components, orgContext })
   };
 }
@@ -104,81 +96,87 @@ function inspectionState(orgContext, observedAt, limits) {
 }
 
 function objectCandidateOperation(limit) {
-  return {
-    operationId: 'object-candidates',
-    kind: 'query',
-    resultKind: 'EntityDefinition.records',
-    metadataType: 'CustomObject',
-    limit,
-    query: `SELECT DurableId, QualifiedApiName, Label FROM EntityDefinition WHERE QualifiedApiName IN ('${DONATION_OBJECT_CANDIDATES.join("','")}') LIMIT ${limit}`,
-    parser: parseObjectCandidate
-  };
+  return queryDescriptor('object-candidates', 'EntityDefinition.records', 'CustomObject', limit,
+    `SELECT DurableId, QualifiedApiName, Label FROM EntityDefinition WHERE QualifiedApiName IN ('${DONATION_OBJECT_CANDIDATES.join("','")}') LIMIT ${limit}`,
+    parseObjectCandidate,
+    true);
 }
 
 function flowOperation(state) {
   const limit = Math.max(0, state.budgetRemaining);
   return queryDescriptor('flow-discovery', 'FlowDefinitionView.records', 'Flow', limit,
-    `SELECT DeveloperName, Label, Status, TableEnumOrId FROM FlowDefinitionView WHERE TableEnumOrId IN (${quotedObjects(state)}) AND DeveloperName LIKE '%Gift%' LIMIT ${limit}`,
-    (row, orgContext, observedAt) => rowFor('Flow', row.DeveloperName, orgContext, observedAt, 1, { label: row.Label || row.DeveloperName, status: row.Status || '', objectApiName: row.TableEnumOrId || '' }));
+    `SELECT ApiName, Label, IsActive, ActiveVersion.VersionNumber, TriggerObjectOrEventLabel FROM FlowDefinitionView WHERE ApiName LIKE '%Gift%' LIMIT ${limit}`,
+    (row, orgContext, observedAt) => rowFor('Flow', row.ApiName, orgContext, observedAt, 1, { label: row.Label || row.ApiName, status: row.IsActive ? 'Active' : 'Inactive', active: row.IsActive === true, activeVersionNumber: row.ActiveVersion?.VersionNumber || null, objectApiName: objectApiNameFromLabel(row.TriggerObjectOrEventLabel) }),
+    true);
 }
 
 function apexClassOperation(state) {
   const limit = Math.max(0, state.budgetRemaining);
   return queryDescriptor('apex-class-discovery', 'ApexClass.records', 'ApexClass', limit,
     `SELECT Name FROM ApexClass WHERE Name LIKE '%Gift%' LIMIT ${limit}`,
-    (row, orgContext, observedAt) => rowFor('ApexClass', row.Name, orgContext, observedAt, 1));
+    (row, orgContext, observedAt) => rowFor('ApexClass', row.Name, orgContext, observedAt, 1),
+    true);
 }
 
 function apexTriggerOperation(state) {
   const limit = Math.max(0, state.budgetRemaining);
   return queryDescriptor('apex-trigger-discovery', 'ApexTrigger.records', 'ApexTrigger', limit,
     `SELECT Name, TableEnumOrId FROM ApexTrigger WHERE TableEnumOrId IN (${quotedObjects(state)}) LIMIT ${limit}`,
-    (row, orgContext, observedAt) => rowFor('ApexTrigger', row.Name, orgContext, observedAt, 1, { objectApiName: row.TableEnumOrId || '' }));
+    (row, orgContext, observedAt) => rowFor('ApexTrigger', row.Name, orgContext, observedAt, 1, { objectApiName: row.TableEnumOrId || '' }),
+    true);
 }
 
 function validationRuleOperation(state) {
   const limit = Math.max(0, state.budgetRemaining);
   return queryDescriptor('validation-rule-discovery', 'ValidationRule.records', 'ValidationRule', limit,
     `SELECT ValidationName, EntityDefinition.QualifiedApiName FROM ValidationRule WHERE EntityDefinition.QualifiedApiName IN (${quotedObjects(state)}) LIMIT ${limit}`,
-    (row, orgContext, observedAt) => rowFor('ValidationRule', row.ValidationName, orgContext, observedAt, 1, { objectApiName: row.EntityDefinition?.QualifiedApiName || '' }));
+    (row, orgContext, observedAt) => rowFor('ValidationRule', row.ValidationName, orgContext, observedAt, 1, { objectApiName: row.EntityDefinition?.QualifiedApiName || '' }),
+    true);
 }
 
 function layoutOperation(state) {
   const limit = Math.max(0, state.budgetRemaining);
   return queryDescriptor('layout-discovery', 'Layout.records', 'Layout', limit,
     `SELECT Name, TableEnumOrId FROM Layout WHERE TableEnumOrId IN (${quotedObjects(state)}) LIMIT ${limit}`,
-    (row, orgContext, observedAt) => rowFor('Layout', row.Name, orgContext, observedAt, 1, { objectApiName: row.TableEnumOrId || '' }));
+    (row, orgContext, observedAt) => rowFor('Layout', row.Name, orgContext, observedAt, 1, { objectApiName: row.TableEnumOrId || '' }),
+    true);
 }
 
 function permissionSetOperation(state) {
   const limit = Math.max(0, state.budgetRemaining);
   return queryDescriptor('permission-set-discovery', 'PermissionSet.records', 'PermissionSet', limit,
     `SELECT Name, Label FROM PermissionSet WHERE IsOwnedByProfile = false AND Name LIKE '%Gift%' LIMIT ${limit}`,
-    (row, orgContext, observedAt) => rowFor('PermissionSet', row.Name, orgContext, observedAt, 1, { label: row.Label || row.Name }));
+    (row, orgContext, observedAt) => rowFor('PermissionSet', row.Name, orgContext, observedAt, 1, { label: row.Label || row.Name }),
+    true);
 }
 
-function queryDescriptor(operationId, resultKind, metadataType, limit, query, parser) {
-  return { operationId, kind: 'query', resultKind, metadataType, limit, query, parser };
+function fieldDefinitionOperation(objectApiName, limit) {
+  return queryDescriptor(`field-definition-discovery:${objectApiName}`, 'FieldDefinition.records', 'CustomField', limit,
+    `SELECT EntityDefinition.QualifiedApiName, QualifiedApiName, Label, DataType, RelationshipName, ReferenceTo, ValueSet.Name FROM FieldDefinition WHERE EntityDefinition.QualifiedApiName = '${objectApiName}' AND (QualifiedApiName IN ('GiftCommitmentId','Status') OR DataType IN ('Lookup','MasterDetail','Picklist')) LIMIT ${limit}`,
+    (row, orgContext, observedAt) => parseFieldDefinition(row, objectApiName, orgContext, observedAt),
+    true);
+}
+
+function queryDescriptor(operationId, resultKind, metadataType, limit, query, parser, useToolingApi = false) {
+  return { operationId, kind: 'query', resultKind, metadataType, limit, query, parser, useToolingApi };
 }
 
 async function runQueryOperation(sf, operation, orgContext) {
   validateOperationLimit(operation);
-  const result = await sf.query({ operationId: operation.operationId, resultKind: operation.resultKind, metadataType: operation.metadataType, query: operation.query, limit: operation.limit, targetOrg: orgContext.salesforceAlias });
+  const result = await sf.query({ operationId: operation.operationId, resultKind: operation.resultKind, metadataType: operation.metadataType, query: operation.query, limit: operation.limit, useToolingApi: operation.useToolingApi, targetOrg: orgContext.salesforceAlias });
   if (result.exitCode !== 0) throw controlledInspectionError('Salesforce org inspection failed. Check the verified org connection and retry.');
   const records = parseQueryRecords(result.stdout, operation);
   if (records.length > operation.limit) throw codedError('ORG_INSPECTION_LIMIT_EXCEEDED', `Salesforce returned more ${operation.operationId} rows than the declared limit.`);
   return records;
 }
 
-async function runDescribeOperation(sf, objectApiName, orgContext, limit) {
-  validateOperationLimit({ operationId: `describe-${objectApiName}`, query: `LIMIT ${limit}`, limit });
-  const result = await sf.describeSObject({ operationId: `describe-${objectApiName}`, objectApiName, limit, targetOrg: orgContext.salesforceAlias });
-  if (result.exitCode !== 0) throw controlledInspectionError('Salesforce org inspection failed. Check the verified org connection and retry.');
-  const parsed = parseJson(result.stdout, 'ORG_INSPECTION_RESULT_SHAPE');
-  const describe = parsed.result || parsed;
-  if (!Array.isArray(describe.fields)) throw codedError('ORG_INSPECTION_RESULT_SHAPE', `Describe for ${objectApiName} did not return fields.`);
-  if (describe.fields.length > limit) throw codedError('ORG_INSPECTION_LIMIT_EXCEEDED', `Salesforce returned more ${objectApiName} fields than the declared limit.`);
-  return describe;
+async function discoverFields(state, sf, orgContext, observedAt) {
+  for (const object of state.objects.slice(0, state.limits.maxObjects)) {
+    if (state.budgetRemaining <= 0) break;
+    const operation = fieldDefinitionOperation(object.apiName, Math.min(state.limits.maxFieldsPerObject, state.budgetRemaining));
+    const rows = await runQueryOperation(sf, operation, orgContext);
+    spendComponents(state, rows.map((row) => operation.parser(row, orgContext, observedAt)));
+  }
 }
 
 function parseQueryRecords(stdout, operation) {
@@ -194,21 +192,16 @@ function parseObjectCandidate(row, orgContext, observedAt) {
   return rowFor('CustomObject', row.QualifiedApiName, orgContext, observedAt, 0, { label: row.Label || row.QualifiedApiName });
 }
 
-function parseDescribeFields(describe, objectApiName, orgContext, observedAt, limits) {
-  const parsed = [];
-  for (const field of describe.fields.slice(0, limits.maxFieldsPerObject)) {
-    const dependencyLevel = Number(field.dependencyLevel ?? 1);
-    const row = rowFor('CustomField', field.name, orgContext, observedAt, dependencyLevel, {
-      objectApiName,
-      label: field.label || field.name,
-      dataType: field.type || '',
-      referenceTo: Array.isArray(field.referenceTo) ? field.referenceTo[0] || '' : '',
-      relationshipName: field.relationshipName || '',
-      values: Array.isArray(field.picklistValues) ? field.picklistValues.map((item) => item.value).filter(Boolean) : []
-    });
-    parsed.push(row);
-  }
-  return parsed.filter((field) => field.referenceTo || /status/i.test(field.apiName));
+function parseFieldDefinition(row, objectApiName, orgContext, observedAt) {
+  const sourceObject = row.EntityDefinition?.QualifiedApiName || objectApiName;
+  return rowFor('CustomField', row.QualifiedApiName, orgContext, observedAt, Number(row.dependencyLevel ?? 1), {
+    objectApiName: sourceObject,
+    label: row.Label || row.QualifiedApiName,
+    dataType: row.DataType || '',
+    referenceTo: referenceTarget(row.ReferenceTo),
+    relationshipName: row.RelationshipName || '',
+    values: parseFieldValues(row)
+  });
 }
 
 function spendComponents(state, rows) {
@@ -263,11 +256,11 @@ function finalizeInspection(state) {
 async function retrieveAndMark(state, sf, orgContext) {
   const result = await sf.retrieveMetadata({ components: state.componentKeys, targetOrg: orgContext.salesforceAlias, orgContext });
   const parsed = parseJson(result.stdout, 'ORG_INSPECTION_RETRIEVAL_FAILED');
-  const success = result.exitCode === 0 && (parsed.status === 0 || parsed.result?.success === true || parsed.result?.done === true || Array.isArray(parsed.result?.files));
-  const targetOrgMatches = !parsed.result?.targetOrgId || parsed.result.targetOrgId === orgContext.expectedOrgId;
+  const success = result.exitCode === 0 && parsed.status === 0 && (parsed.result?.success === true || parsed.result?.done === true || Array.isArray(parsed.result?.files));
+  const targetOrgMatches = parsed.result?.targetOrgId === orgContext.expectedOrgId;
   const files = parsed.result?.files;
-  const retrievedKeys = Array.isArray(files) ? new Set(files.map((file) => `${file.type || file.metadataType}:${file.fullName || file.name}`)) : null;
-  const allComponentsRetrieved = retrievedKeys ? state.componentKeys.every((component) => retrievedKeys.has(`${component.type}:${component.apiName}`)) : true;
+  const retrievedKeys = Array.isArray(files) && files.length ? new Set(files.map((file) => `${file.type || file.metadataType}:${file.fullName || file.name}`)) : null;
+  const allComponentsRetrieved = retrievedKeys ? state.componentKeys.every((component) => retrievedKeys.has(`${component.type}:${component.apiName}`)) : false;
   if (!success || !targetOrgMatches || !allComponentsRetrieved) throw retrievalError();
   for (const component of state.components.values()) component.retrievalStatus = 'retrieved';
 }
@@ -381,6 +374,25 @@ function parseJson(stdout, code) {
 
 function quotedObjects(state) {
   return state.objects.map((item) => `'${item.apiName}'`).join(',');
+}
+
+function referenceTarget(value) {
+  if (Array.isArray(value)) return value[0] || '';
+  const text = String(value || '');
+  if (!text) return '';
+  return text.split(',').map((item) => item.trim()).find(Boolean) || '';
+}
+
+function parseFieldValues(row) {
+  const directValues = row.PicklistValues || row.picklistValues;
+  if (Array.isArray(directValues)) return directValues.map((item) => item.value || item.Value || item.fullName || item).filter(Boolean);
+  const valueSet = row.ValueSet?.ValueSetValues || row.ValueSet?.values;
+  if (Array.isArray(valueSet)) return valueSet.map((item) => item.ValueName || item.value || item.FullName).filter(Boolean);
+  return [];
+}
+
+function objectApiNameFromLabel(label) {
+  return DONATION_OBJECT_CANDIDATES.find((candidate) => label === candidate || label === candidate.replace(/([a-z])([A-Z])/g, '$1 $2')) || '';
 }
 
 function isAllowedFamily(component, orgContext = {}) {

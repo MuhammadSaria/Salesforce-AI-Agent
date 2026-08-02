@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { retrieveMetadata } from '../src/services/sfExecutor.js';
+import { retrieveMetadata, buildSfCommandArgs } from '../src/services/sfExecutor.js';
 import { trustOrgContext } from '../src/services/orgContextTrust.js';
 
 test('retrieveMetadata renders one explicit metadata argument per verified component and target org', async () => {
@@ -43,6 +43,21 @@ test('retrieveMetadata respects org operation policy before CLI execution', asyn
     /Operation retrieve is not allowed/
   );
   assert.equal(invoked, false);
+});
+
+test('Tooling API query renders explicit Salesforce CLI tooling flag and target org', () => {
+  const args = buildSfCommandArgs('toolingQuery', {
+    query: 'SELECT ApiName FROM FlowDefinitionView LIMIT 1',
+    targetOrg: 'verified-alias'
+  });
+
+  assert.deepEqual(args, [
+    'data', 'query',
+    '--query', 'SELECT ApiName FROM FlowDefinitionView LIMIT 1',
+    '--target-org', 'verified-alias',
+    '--use-tooling-api',
+    '--json'
+  ]);
 });
 
 const ORG_ID = '00Dg500000E07e9EAB';
