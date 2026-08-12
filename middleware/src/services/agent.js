@@ -397,7 +397,7 @@ async function analyzeDirectSalesforceChat(job, actor) {
       requirement,
       inspection,
       orgContext,
-      answers: (job.conversation || []).filter((entry) => entry.role === 'user').map((entry) => entry.text)
+      answers: clarificationAnswers(job, inspection)
     }, directAnalysisDependencies.architecturePlannerDependencies);
     const planVersion = Number(job.nextPlanVersion || job.iteration || 1);
     architecturePlan = {
@@ -421,6 +421,16 @@ async function analyzeDirectSalesforceChat(job, actor) {
   } catch (error) {
     if (error.code === 'MATERIAL_CLARIFICATION_REQUIRED') {
       const message = sanitizedPlanningError(error, 'Clarification is required before planning can continue.');
+      await updateJob(job.jobId, {
+        clarifications: upsertClarification(job.clarifications || [], {
+          ambiguityId: error.ambiguityId || 'material:status-values',
+          question: message,
+          inspectionHash: inspection.hash,
+          planVersion: Number(job.nextPlanVersion || job.iteration || 1),
+          status: 'OPEN',
+          createdAt: new Date().toISOString()
+        })
+      });
       await transitionJob(job.jobId, JOB_STATES.AWAITING_CLARIFICATION, { actor, reason: message, error: message });
       return { jobId: job.jobId, status: JOB_STATES.AWAITING_CLARIFICATION, clarificationRequired: true };
     }
@@ -431,6 +441,30 @@ async function analyzeDirectSalesforceChat(job, actor) {
     }
     throw error;
   }
+}
+
+function clarificationAnswers(job, inspection) {
+  const open = new Map((job.clarifications || [])
+    .filter((item) => item.status !== 'RESOLVED' && item.inspectionHash === inspection.hash)
+    .map((item) => [item.ambiguityId, item]));
+  return (job.conversation || [])
+    .filter((entry) => entry.role === 'user' && entry.kind === 'clarification-response')
+    .filter((entry) => open.has(entry.ambiguityId))
+    .filter((entry) => entry.responseToInspectionHash === inspection.hash)
+    .filter((entry) => Number(entry.responseToPlanVersion) === Number(open.get(entry.ambiguityId)?.planVersion))
+    .map((entry) => ({
+      ambiguityId: entry.ambiguityId,
+      text: entry.text,
+      inspectionHash: entry.responseToInspectionHash,
+      planVersion: Number(entry.responseToPlanVersion)
+    }));
+}
+
+function upsertClarification(clarifications, clarification) {
+  const filtered = clarifications.filter((item) =>
+    !(item.ambiguityId === clarification.ambiguityId && item.inspectionHash === clarification.inspectionHash && Number(item.planVersion) === Number(clarification.planVersion))
+  );
+  return [...filtered, clarification];
 }
 
 function isControlledPlanningFailure(error) {

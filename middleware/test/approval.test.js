@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { latestApprovedApproval, orgBoundApproval } from '../src/domain/approval.js';
 import { architecturePlanHashes } from '../src/domain/architecturePlan.js';
+import { canonicalInspectionHash } from '../src/domain/inspection.js';
 import { config } from '../src/config.js';
-import { createApp } from '../src/server.js';
+import { createApp, deliverPendingDispatches } from '../src/server.js';
 import { createJobRecord, getJobRecord, updateJob } from '../src/services/jobStore.js';
 
 test('a later deployment rejection invalidates an earlier approval', () => {
@@ -108,6 +109,74 @@ test('valid same-org implementation approval succeeds with exact plan and scope 
   assert.deepEqual(queued.map((item) => item.action), ['implement']);
 });
 
+test('implementation approval records durable dispatch before enqueue and retries idempotently', async (t) => {
+  config.apiAuthToken = 'unit-test-token';
+  let fail = true;
+  const queued = [];
+  const server = createApp({
+    resolveSameOrg: async (input) => trustedContext(input.authenticatedOrgId),
+    enqueue: async (message, options) => {
+      if (fail) throw new Error('queue unavailable');
+      queued.push({ message, options });
+    }
+  }).listen(0);
+  await new Promise((resolve) => server.once('listening', resolve));
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const jobId = `approval-outbox-${Date.now()}`;
+  await createApprovalReadyJob(jobId);
+
+  const approvalResponse = await fetch(`${base}/api/jobs/${jobId}/approve-implementation`, {
+    method: 'POST',
+    headers: salesforceHeaders({ authorization: 'Bearer unit-test-token', canImplement: true }),
+    body: JSON.stringify({ planVersion: 1, planHash: (await getJobRecord(jobId)).plan.planHash, scopeHash: (await getJobRecord(jobId)).plan.scopeHash })
+  });
+
+  assert.equal(approvalResponse.status, 201);
+  let updated = await getJobRecord(jobId);
+  assert.equal(updated.status, 'IMPLEMENTING');
+  assert.equal(updated.dispatches[0].status, 'PENDING');
+  assert.equal(queued.length, 0);
+
+  fail = false;
+  await Promise.all([
+    deliverPendingDispatches({ enqueue: async (message, options) => queued.push({ message, options }) }),
+    deliverPendingDispatches({ enqueue: async (message, options) => queued.push({ message, options }) })
+  ]);
+
+  updated = await getJobRecord(jobId);
+  assert.equal(updated.dispatches[0].status, 'DISPATCHED');
+  assert.equal(queued.length, 1);
+  assert.equal(queued[0].options.jobId, updated.dispatches[0].dispatchKey);
+});
+
+test('stale approval racing with replan has zero mutation', async (t) => {
+  config.apiAuthToken = 'unit-test-token';
+  const queued = [];
+  const server = createApp({
+    resolveSameOrg: async (input) => trustedContext(input.authenticatedOrgId),
+    enqueue: async (message) => queued.push(message)
+  }).listen(0);
+  await new Promise((resolve) => server.once('listening', resolve));
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const jobId = `approval-stale-replan-${Date.now()}`;
+  await createApprovalReadyJob(jobId);
+  const stale = await getJobRecord(jobId);
+  await updateJob(jobId, { plan: { ...plan(), planVersion: 2 }, iteration: 2 });
+  const before = stableSnapshot(await getJobRecord(jobId));
+
+  const response = await fetch(`${base}/api/jobs/${jobId}/approve-implementation`, {
+    method: 'POST',
+    headers: salesforceHeaders({ authorization: 'Bearer unit-test-token', canImplement: true }),
+    body: JSON.stringify({ planVersion: 1, planHash: stale.plan.planHash, scopeHash: stale.plan.scopeHash })
+  });
+
+  assert.equal(response.status, 409);
+  assert.deepEqual(stableSnapshot(await getJobRecord(jobId)), before);
+  assert.deepEqual(queued, []);
+});
+
 test('implementation approval recomputes hashes and rejects tampered stored hashes', async (t) => {
   config.apiAuthToken = 'unit-test-token';
   const queued = [];
@@ -157,6 +226,8 @@ test('worker approval guard requires plan version hash and scope hash bindings',
 });
 
 async function createApprovalReadyJob(jobId, options = {}) {
+  const currentInspection = inspection();
+  const currentPlan = options.plan || plan(currentInspection);
   await createJobRecord({
     jobId,
     userId: USER_ID,
@@ -166,15 +237,15 @@ async function createApprovalReadyJob(jobId, options = {}) {
   });
   await updateJob(jobId, {
     status: 'AWAITING_IMPLEMENTATION_APPROVAL',
-    inspection: inspection(),
-    plan: options.plan || plan(),
-    metadataScope: { hash: (options.plan || plan()).scopeHash },
+    inspection: currentInspection,
+    plan: currentPlan,
+    metadataScope: { hash: currentPlan.scopeHash },
     orgContext: trustedContext(ORG_ID),
     workItems: []
   });
 }
 
-function plan() {
+function plan(currentInspection = inspection()) {
   const core = {
     planVersion: 1,
     requirement: 'Create a recurring donation installment Flow.',
@@ -186,18 +257,18 @@ function plan() {
     testingStrategy: ['Validate the Flow in the verified sandbox.'],
     risks: [],
     rollbackStrategy: 'Disable generated metadata before deployment.',
-    trustedBinding: { inspectionHash: 'inspection-hash', sourceOrgId: ORG_ID }
+    trustedBinding: { inspectionHash: currentInspection.hash, sourceOrgId: ORG_ID }
   };
   const hashes = architecturePlanHashes(core);
   return { ...core, planHash: hashes.planHash, scopeHash: hashes.scopeHash, materialChangeHash: hashes.scopeHash };
 }
 
 function inspection() {
-  return {
-    hash: 'inspection-hash',
+  const body = {
     sourceOrgId: ORG_ID,
-    evidence: [{ evidenceId: 'evidence:relationship', kind: 'RELATIONSHIP', sourceOrgId: ORG_ID, active: true, observedAt: '2026-08-12T00:00:00.000Z' }]
+    evidence: [{ evidenceId: 'evidence:relationship', kind: 'RELATIONSHIP', objectApiName: 'GiftTransaction', fieldApiName: 'GiftCommitmentId', targetObjectApiName: 'GiftCommitment', componentType: 'CustomField', componentApiName: 'GiftTransaction.GiftCommitmentId', sourceOrgId: ORG_ID, active: true, observedAt: new Date().toISOString() }]
   };
+  return { ...body, hash: canonicalInspectionHash(body) };
 }
 
 function trustedContext(expectedOrgId) {
@@ -205,7 +276,8 @@ function trustedContext(expectedOrgId) {
     orgRegistryId: 'providus_orgfarm_dev',
     expectedOrgId,
     environment: 'developer',
-    salesforceAlias: 'orgfarm-dev'
+    salesforceAlias: 'orgfarm-dev',
+    verified: { organizationId: expectedOrgId, verifiedAt: new Date().toISOString() }
   };
 }
 
@@ -230,7 +302,8 @@ function stableSnapshot(job) {
     logs: job.logs,
     commands: job.commands,
     workItems: job.workItems,
-    orgContext: job.orgContext
+    orgContext: job.orgContext,
+    dispatches: job.dispatches || []
   };
 }
 

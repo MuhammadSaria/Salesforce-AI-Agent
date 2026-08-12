@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { canonicalInspectionHash } from '../src/domain/inspection.js';
 import { processAgentJob, setDirectAnalysisDependenciesForTest } from '../src/services/agent.js';
-import { createJobRecord, getJobRecord, updateJob } from '../src/services/jobStore.js';
+import { appendConversation, createJobRecord, getJobRecord, updateJob } from '../src/services/jobStore.js';
 
 test('direct jobs use createArchitecturePlan and persist no source-generation fields', async (t) => {
   const jobId = `direct-planner-${Date.now()}`;
@@ -65,6 +66,67 @@ test('direct planning records material clarification without source generation',
   assert.equal(updated.status, 'AWAITING_CLARIFICATION');
   assert.equal(updated.plan, null);
   assert.equal(updated.workItems.length, 0);
+});
+
+test('direct clarification response resolves paid ambiguity without reusing original prompt as answer', async (t) => {
+  const jobId = `direct-clarification-e2e-${Date.now()}`;
+  const plannerCalls = [];
+  setDirectAnalysisDependenciesForTest({
+    inspectFlowRequirement: async () => ({
+      ...inspection(),
+      evidence: [
+        ...inspection().evidence,
+        { evidenceId: 'evidence:status-paid', kind: 'STATUS_VALUE', objectApiName: 'GiftTransaction', fieldApiName: 'Status', value: 'Paid', sourceOrgId: '00Dg500000E07e9EAB', active: true, observedAt: '2026-08-12T00:00:00.000Z' }
+      ],
+      statusCandidates: [{ objectApiName: 'GiftTransaction', fieldApiName: 'Status', values: ['Paid', 'Completed'] }]
+    }),
+    createArchitecturePlan: async (input) => {
+      plannerCalls.push(input);
+      if (!input.answers.some((answer) => answer.text === 'Paid' && answer.ambiguityId === 'material:status-values')) {
+        throw Object.assign(new Error('Confirm whether Paid or Completed is the verified qualifying status before planning.'), {
+          code: 'MATERIAL_CLARIFICATION_REQUIRED',
+          ambiguityId: 'material:status-values'
+        });
+      }
+      return { ...plan(), evidenceIds: ['evidence:relationship', 'evidence:status-paid'] };
+    }
+  });
+  t.after(() => setDirectAnalysisDependenciesForTest());
+
+  await createJobRecord({
+    jobId,
+    userId: '005g5000009ImIkAAK',
+    orgId: '00Dg500000E07e9EAB',
+    source: 'salesforce-chat',
+    prompt: 'When a Donation becomes Paid or Completed, number it.'
+  });
+  await updateJob(jobId, { orgContext: orgContext() });
+  await appendConversation(jobId, { role: 'user', kind: 'requirement', text: 'When a Donation becomes Paid or Completed, number it.', actor: '005g5000009ImIkAAK' });
+
+  await processAgentJob({ jobId, action: 'understand', actor: '005g5000009ImIkAAK' });
+  let updated = await getJobRecord(jobId);
+  assert.equal(updated.status, 'AWAITING_CLARIFICATION');
+  assert.equal(updated.clarifications[0].ambiguityId, 'material:status-values');
+
+  await appendConversation(jobId, {
+    role: 'user',
+    kind: 'clarification-response',
+    text: 'Paid',
+    actor: '005g5000009ImIkAAK',
+    ambiguityId: 'material:status-values',
+    responseToInspectionHash: updated.inspection.hash,
+    responseToPlanVersion: updated.iteration
+  });
+
+  await processAgentJob({ jobId, action: 'understand', actor: '005g5000009ImIkAAK' });
+  updated = await getJobRecord(jobId);
+  assert.equal(updated.status, 'AWAITING_IMPLEMENTATION_APPROVAL');
+  assert.deepEqual(plannerCalls.at(-1).answers, [{
+    ambiguityId: 'material:status-values',
+    text: 'Paid',
+    inspectionHash: updated.inspection.hash,
+    planVersion: updated.iteration
+  }]);
 });
 
 test('direct planning controlled failures leave planning with sanitized failed state', async (t) => {
@@ -140,14 +202,25 @@ function orgContext() {
 }
 
 function inspection() {
-  return {
-    hash: 'inspection-hash',
+  const body = {
     sourceOrgId: '00Dg500000E07e9EAB',
-    evidence: [{ evidenceId: 'evidence:relationship', kind: 'RELATIONSHIP', sourceOrgId: '00Dg500000E07e9EAB', active: true, observedAt: '2026-08-12T00:00:00.000Z' }],
+    evidence: [{
+      evidenceId: 'evidence:relationship',
+      kind: 'RELATIONSHIP',
+      objectApiName: 'GiftTransaction',
+      fieldApiName: 'GiftCommitmentId',
+      targetObjectApiName: 'GiftCommitment',
+      componentType: 'CustomField',
+      componentApiName: 'GiftTransaction.GiftCommitmentId',
+      sourceOrgId: '00Dg500000E07e9EAB',
+      active: true,
+      observedAt: new Date().toISOString()
+    }],
     objects: [{ apiName: 'GiftTransaction' }],
     relationships: [{ objectApiName: 'GiftTransaction', fieldApiName: 'GiftCommitmentId', referenceTo: 'GiftCommitment' }],
     ambiguities: []
   };
+  return { ...body, hash: canonicalInspectionHash(body) };
 }
 
 function plan() {

@@ -112,6 +112,65 @@ test('commits composed repository writes in one transaction', async () => {
   }
 });
 
+test('records approval and dispatch in one PostgreSQL transaction', async () => {
+  const pool = createTestPostgresPool();
+
+  try {
+    await resetPostgresSchema(pool);
+    await migrate(pool);
+
+    const repository = createJobRepository({ pool });
+    await repository.createJob({ jobId: 'job-outbox', userId: '005-user', orgId: '00D-org', prompt: 'Create a Flow' });
+    await repository.savePlan('job-outbox', { version: 1, planHash: 'plan-hash', scopeHash: 'scope-hash', body: {} });
+    await repository.approveImplementationAndDispatch('job-outbox', {
+      approvalId: 'a-outbox',
+      actorId: '005-admin',
+      planHash: 'plan-hash',
+      scopeHash: 'scope-hash',
+      dispatchKey: 'job-outbox:implement:v1:plan-hash:005-admin'
+    });
+
+    const job = await repository.getJob('job-outbox');
+    assert.equal(job.status, 'IMPLEMENTING');
+    assert.equal(job.approvals[0].approvalId, 'a-outbox');
+    assert.equal(job.dispatches[0].dispatchKey, 'job-outbox:implement:v1:plan-hash:005-admin');
+    assert.equal(job.dispatches[0].status, 'PENDING');
+  } finally {
+    await pool.end();
+  }
+});
+
+test('PostgreSQL dispatch claims are idempotent under duplicate delivery attempts', async () => {
+  const pool = createTestPostgresPool();
+
+  try {
+    await resetPostgresSchema(pool);
+    await migrate(pool);
+
+    const repository = createJobRepository({ pool });
+    await repository.createJob({ jobId: 'job-claim', userId: '005-user', orgId: '00D-org', prompt: 'Create a Flow' });
+    await repository.savePlan('job-claim', { version: 1, planHash: 'plan-hash', scopeHash: 'scope-hash', body: {} });
+    await repository.approveImplementationAndDispatch('job-claim', {
+      approvalId: 'a-claim',
+      actorId: '005-admin',
+      planHash: 'plan-hash',
+      scopeHash: 'scope-hash',
+      dispatchKey: 'job-claim:implement:v1:plan-hash:005-admin'
+    });
+
+    const [first, second] = await Promise.all([
+      repository.claimDispatch('job-claim:implement:v1:plan-hash:005-admin'),
+      repository.claimDispatch('job-claim:implement:v1:plan-hash:005-admin')
+    ]);
+
+    assert.equal([first, second].filter(Boolean).length, 1);
+    await repository.markDispatchDispatched('job-claim:implement:v1:plan-hash:005-admin');
+    assert.equal(await repository.claimDispatch('job-claim:implement:v1:plan-hash:005-admin'), null);
+  } finally {
+    await pool.end();
+  }
+});
+
 test('hydrates a job through one repeatable-read transaction', async () => {
   const queries = [];
   const client = {
@@ -148,7 +207,7 @@ test('hydrates a job through one repeatable-read transaction', async () => {
   assert.equal(job.jobId, 'job-snapshot');
   assert.equal(queries[0].sql, 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
   assert.equal(queries.at(-1).sql, 'COMMIT');
-  assert.equal(queries.filter((query) => query.params[0] === 'job-snapshot').length, 5);
+  assert.equal(queries.filter((query) => query.params[0] === 'job-snapshot').length, 6);
 });
 
 test('serializes concurrent migration runners and records each filename once', async () => {

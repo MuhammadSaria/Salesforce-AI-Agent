@@ -66,12 +66,15 @@ const sourceTerms = [
   /(?:^|[\s'"])(?:force-app|src|classes|triggers|lwc|aura|objects|flows)[/\\][^\s'"]+/i,
   /\b[A-Za-z]:\\[^\s'"]+/,
   /(?:^|[\s'"])\.{0,2}[/\\][^\s'"]+\.(?:cls|trigger|js|html|css|xml|json|yml|yaml|sh|ps1|cmd|bat)\b/i,
-  /\b[A-Za-z0-9+/]{80,}={0,2}\b/
+  /\b[A-Za-z0-9+/]{24,}={0,2}\b/,
+  /%(?:20|2f|5c|3b|26|7c|60)/i,
+  /\\u00(?:20|2f|5c|3b|26|7c|60|66)/i
 ];
 
 const sourceFreeString = (max) => z.string().min(1).max(max).superRefine((value, ctx) => {
   const normalized = value.replace(/\r\n?/g, '\n');
-  if (normalized.split('\n').length > 4 || sourceTerms.some((pattern) => pattern.test(normalized))) {
+  const decoded = decodeSuspicious(normalized);
+  if (/[\r\n]/.test(value) || sourceTerms.some((pattern) => pattern.test(normalized) || pattern.test(decoded))) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Architecture plans must not contain source code, XML, JavaScript, Apex, or shell commands.' });
   }
 });
@@ -80,11 +83,21 @@ const apiName = z.string().min(1).max(255).superRefine((value, ctx) => {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Architecture plans must not contain file paths, file operations, generated files, or component source.' });
   }
 });
-const evidenceId = z.string().min(1).max(200).regex(/^[A-Za-z0-9:_-]+$/, 'Invalid evidence identifier.').superRefine((value, ctx) => {
+const evidenceId = z.string().min(1).max(200).regex(/^[A-Za-z0-9:._-]+$/, 'Invalid evidence identifier.').superRefine((value, ctx) => {
   if (sourceTerms.some((pattern) => pattern.test(value))) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Architecture plans must not contain source code, XML, JavaScript, Apex, or shell commands.' });
   }
 });
+
+function decodeSuspicious(value) {
+  const variants = [value];
+  try { variants.push(decodeURIComponent(value)); } catch {}
+  variants.push(value.replace(/\\u([0-9a-fA-F]{4})/g, (_, code) => String.fromCharCode(Number.parseInt(code, 16))));
+  for (const token of value.match(/\b[A-Za-z0-9+/]{24,}={0,2}\b/g) || []) {
+    try { variants.push(Buffer.from(token, 'base64').toString('utf8')); } catch {}
+  }
+  return variants.join('\n');
+}
 
 const API_NAME_PATTERNS = {
   ApexClass: /^[A-Za-z][A-Za-z0-9_]*$/,

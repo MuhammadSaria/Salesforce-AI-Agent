@@ -39,6 +39,19 @@
     - Implementation approval is a locked compare-and-set mutation that recomputes plan/scope hashes, revalidates evidence/inspection/org binding, records approval, transitions state, and queues implementation only after commit with an idempotent key.
     - Paid and Completed status semantics are exact; ambiguous Paid/Completed wording requires clarification and clarification must match verified active status evidence.
     - Controlled planning/model/schema/evidence failures transition out of `PLANNING` to `AWAITING_CLARIFICATION` or `FAILED` with sanitized user-facing errors and no approval, queue, Salesforce command, or source generation side effects.
+  - Second correction date: 2026-08-12
+  - Second correction verification:
+    - `cd middleware && npm.cmd test -- test/orgInspectionService.test.js test/architecturePlanner.test.js test/agentClarificationEvidence.test.js test/agentSameOrg.test.js test/approval.test.js` - RED first, failed for expected missing shared inspection schema/hash, missing durable dispatch export, clarification-response binding gaps, and missing worker evidence rejection before side effects; then PASS, 69 tests, 0 skipped.
+    - `cd middleware && npm.cmd test -- test/agentClarificationEvidence.test.js test/architecturePlanner.test.js test/orgInspectionService.test.js test/approval.test.js test/agentSameOrg.test.js test/agentJiraIsolation.test.js test/agentQueue.test.js test/agentQueueFallback.test.js test/conversationApi.test.js test/apiAuth.test.js test/planActionability.test.js` - PASS, 108 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd test -- test/jobRepositoryPostgres.test.js` - RED first, failed for expected missing PostgreSQL approval/outbox transaction support; then PASS, 9 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 215 tests and 0 skipped.
+  - Second correction review:
+    - The real inspector now emits canonical root `sourceOrgId`, and planner, approval, and worker paths share one inspection schema plus canonical inspection hash.
+    - Direct-chat planning integration uses real inspector output and a real planner with only the final model-executor boundary stubbed, reaching `AWAITING_IMPLEMENTATION_APPROVAL`.
+    - Clarification questions persist stable ambiguity IDs, and later user clarification responses are stored separately from the original prompt and bound to the current ambiguity, inspection hash, and plan version.
+    - Worker implementation revalidates fresh same-org context, inspection hash, evidence uniqueness, evidence schema, evidence org binding, active/current evidence, freshness, plan hash, scope hash, plan version, and org-bound approval before implementation side effects.
+    - Approval records and durable implementation dispatch records are written atomically; dispatch delivery is idempotent and retryable after enqueue failures.
+    - Source-free architecture-plan validation now rejects CR/LF, short encoded executable/source payloads, percent-encoded command payloads, escaped command payloads, file/source-shaped values, and still permits benign business phrases such as `source record`.
   - Verification date: 2026-08-02
   - Verification:
     - `cd middleware && node --import ./test/setup.js --test test/architecturePlanner.test.js test/planActionability.test.js test/approval.test.js test/agentClarificationEvidence.test.js` - RED first, failed for expected missing architecture schema/actionability modules, missing direct-planner test hook, missing plan/hash/scope approval binding, empty evidence/component approval acceptance, and missing worker plan-version guard.
@@ -262,7 +275,7 @@
 
 ## Next Task
 
-Phase 1 Task 6: Reliable same-sandbox planning inputs.
+Phase 1 Task 7: Not started.
 
 ## Update Rules
 

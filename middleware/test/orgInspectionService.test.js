@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { inspectFlowRequirement } from '../src/services/orgInspectionService.js';
+import { canonicalInspectionHash, parseVerifiedInspection } from '../src/domain/inspection.js';
 import { buildPlan, extractRequirement } from '../src/services/planning.js';
 import { trustOrgContext } from '../src/services/orgContextTrust.js';
 
@@ -15,6 +16,9 @@ test('realistic discovery sequence identifies GiftTransaction to GiftCommitment 
   }, { sf: realisticSf(calls), clock: fixedClock, maxComponents: 25, maxObjects: 4, maxFieldsPerObject: 20 });
 
   assert.deepEqual(inspection.objects.map((item) => item.apiName), ['GiftCommitment', 'GiftTransaction']);
+  assert.equal(inspection.sourceOrgId, ORG_ID);
+  assert.equal(inspection.hash, canonicalInspectionHash(inspection));
+  assert.doesNotThrow(() => parseVerifiedInspection(inspection, { orgContext: trustedContext(), clock: fixedClock }));
   assert.deepEqual(inspection.relationships.map((item) => `${item.objectApiName}.${item.fieldApiName}->${item.referenceTo}`), ['GiftTransaction.GiftCommitmentId->GiftCommitment']);
   assert.ok(inspection.statusCandidates.some((item) => item.objectApiName === 'GiftTransaction' && item.values.includes('Paid')));
   assert.deepEqual(inspection.apexAutomation.map((item) => `${item.type}:${item.apiName}`), ['ApexClass:GiftAutomation', 'ApexTrigger:GiftTransactionTrigger']);

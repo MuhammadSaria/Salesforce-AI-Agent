@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ARCHITECTURE_PLAN_SCHEMA, architecturePlanHashes } from '../src/domain/architecturePlan.js';
+import { canonicalInspectionHash } from '../src/domain/inspection.js';
+import { inspectFlowRequirement } from '../src/services/orgInspectionService.js';
 import { createArchitecturePlan, createProductionArchitecturePlannerDependencies } from '../src/services/architecturePlanner.js';
+import { trustOrgContext } from '../src/services/orgContextTrust.js';
 
 test('architecture plan contains behavior and components but no source', async () => {
   const plan = await createArchitecturePlan({
@@ -39,7 +42,26 @@ test('production architecture planner dependencies invoke configured model execu
 
   assert.equal(calls.length, 1);
   assert.equal(plan.trustedBinding.sourceOrgId, ORG_ID);
-  assert.equal(plan.trustedBinding.inspectionHash, 'inspection-hash');
+  assert.equal(plan.trustedBinding.inspectionHash, verifiedInspection().hash);
+});
+
+test('real inspector output feeds planner with only model boundary stubbed', async () => {
+  const inspection = await inspectFlowRequirement({
+    requirement: requirement('When a Donation becomes Paid, number it.'),
+    orgContext: fullTrustedContext()
+  }, { sf: plannerSf(), clock: fixedClock, maxComponents: 8, maxObjects: 2 });
+
+  const plan = await createArchitecturePlan({
+    requirement: requirement('When a Donation becomes Paid, number it.'),
+    inspection,
+    orgContext: fullTrustedContext(),
+    answers: []
+  }, { modelRunner: deterministicModelRunner({ evidenceIds: ['relationship:GiftTransaction.GiftCommitmentId', 'statusValue:GiftTransaction.Status.Paid'] }), clock: fixedClock });
+
+  assert.equal(inspection.sourceOrgId, ORG_ID);
+  assert.equal(inspection.hash, canonicalInspectionHash(inspection));
+  assert.equal(plan.trustedBinding.sourceOrgId, ORG_ID);
+  assert.equal(plan.trustedBinding.inspectionHash, inspection.hash);
 });
 
 test('production architecture planner fails closed when no model executor is configured', async () => {
@@ -110,6 +132,20 @@ test('schema allows benign business phrasing that mentions source records', () =
   }));
 });
 
+test('schema rejects multiline encoded and escaped executable payloads while preserving benign prose', () => {
+  const malicious = [
+    'Review first line\nsf project deploy start',
+    'Line 1\nLine 2\nLine 3\nLine 4',
+    'c2YgcHJvamVjdCBkZXBsb3kgc3RhcnQ=',
+    'sf%20project%20deploy%20start',
+    's\\u0066 project deploy start'
+  ];
+  for (const payload of malicious) {
+    assert.throws(() => ARCHITECTURE_PLAN_SCHEMA.parse({ ...sourceFreePlan(), risks: [payload] }), /Architecture plans must not contain/i, payload);
+  }
+  assert.doesNotThrow(() => ARCHITECTURE_PLAN_SCHEMA.parse({ ...sourceFreePlan(), risks: ['Review the source record owner before changing status automation.'] }));
+});
+
 test('paid-status ambiguity returns clarification rather than assumptions', async () => {
   await assert.rejects(
     () => createArchitecturePlan({
@@ -146,7 +182,7 @@ test('inspection evidence must bind to current verified org and inspection hash'
   await assert.rejects(
     () => createArchitecturePlan({
       requirement: requirement(),
-      inspection: verifiedInspection({ sourceOrgId: '00Dother000000000AAA' }),
+      inspection: verifiedInspection({ sourceOrgId: '00Dg500000E07fAEAR' }),
       orgContext: orgContext(),
       answers: ['Paid']
     }, { modelRunner: deterministicModelRunner() }),
@@ -159,7 +195,7 @@ test('inspection evidence must bind to current verified org and inspection hash'
       inspection: verifiedInspection({
         evidence: [
           ...verifiedInspection().evidence,
-          { evidenceId: 'evidence:other-org', kind: 'FIELD', sourceOrgId: '00Dother000000000AAA' }
+          { evidenceId: 'evidence:other-org', kind: 'FIELD', objectApiName: 'GiftTransaction', fieldApiName: 'Status', componentType: 'CustomField', componentApiName: 'GiftTransaction.Status', sourceOrgId: '00Dg500000E07fAEAR', active: true, observedAt: new Date().toISOString() }
         ]
       }),
       orgContext: orgContext(),
@@ -268,27 +304,94 @@ function requirement(text = 'Create a recurring donation installment Flow when D
 }
 
 function verifiedInspection(overrides = {}) {
-  return {
-    hash: 'inspection-hash',
+  const inspection = {
     sourceOrgId: ORG_ID,
     objects: [{ apiName: 'GiftTransaction' }, { apiName: 'GiftCommitment' }],
     relationships: [{ objectApiName: 'GiftTransaction', fieldApiName: 'GiftCommitmentId', referenceTo: 'GiftCommitment', evidenceId: 'evidence:relationship' }],
     statusCandidates: [{ objectApiName: 'GiftTransaction', fieldApiName: 'Status', values: ['Paid'] }],
     evidence: [
-      { evidenceId: 'evidence:relationship', kind: 'RELATIONSHIP', sourceOrgId: ORG_ID, active: true, observedAt: '2026-08-12T00:00:00.000Z' },
-      { evidenceId: 'evidence:field-status', kind: 'FIELD', objectApiName: 'GiftTransaction', fieldApiName: 'Status', sourceOrgId: ORG_ID, active: true, observedAt: '2026-08-12T00:00:00.000Z' },
-      { evidenceId: 'evidence:status-paid', kind: 'STATUS_VALUE', objectApiName: 'GiftTransaction', fieldApiName: 'Status', value: 'Paid', sourceOrgId: ORG_ID, active: true, observedAt: '2026-08-12T00:00:00.000Z' }
+      { evidenceId: 'evidence:relationship', kind: 'RELATIONSHIP', objectApiName: 'GiftTransaction', fieldApiName: 'GiftCommitmentId', targetObjectApiName: 'GiftCommitment', componentType: 'CustomField', componentApiName: 'GiftTransaction.GiftCommitmentId', sourceOrgId: ORG_ID, active: true, observedAt: new Date().toISOString() },
+      { evidenceId: 'evidence:field-status', kind: 'FIELD', objectApiName: 'GiftTransaction', fieldApiName: 'Status', sourceOrgId: ORG_ID, active: true, observedAt: new Date().toISOString() },
+      { evidenceId: 'evidence:status-paid', kind: 'STATUS_VALUE', objectApiName: 'GiftTransaction', fieldApiName: 'Status', value: 'Paid', sourceOrgId: ORG_ID, active: true, observedAt: new Date().toISOString() }
     ],
     ambiguities: [],
     ...overrides
   };
+  try {
+    return { ...inspection, hash: canonicalInspectionHash(inspection) };
+  } catch {
+    return { ...inspection, hash: 'invalid-inspection-hash' };
+  }
 }
 
 function orgContext() {
   return {
     expectedOrgId: ORG_ID,
-    verified: { organizationId: ORG_ID, verifiedAt: '2026-08-12T00:00:00.000Z' }
+    verified: { organizationId: ORG_ID, verifiedAt: new Date().toISOString() }
   };
+}
+
+function fullTrustedContext() {
+  return trustOrgContext({
+    orgRegistryId: 'providus_orgfarm_dev',
+    salesforceAlias: 'verified-alias',
+    expectedOrgId: ORG_ID,
+    environment: 'developer',
+    instanceUrl: 'https://orgfarm-9914d7f2f7-dev-ed.develop.my.salesforce.com',
+    allowedMetadataTypes: ['CustomObject', 'CustomField'],
+    restrictedMetadataTypes: [],
+    verified: { organizationId: ORG_ID, verifiedAt: '2026-08-12T00:00:00.000Z' }
+  });
+}
+
+function plannerSf() {
+  return {
+    async query(request) {
+      if (request.operationId === 'object-candidates') {
+        return jsonResult([
+          { DurableId: 'GiftCommitment', QualifiedApiName: 'GiftCommitment', Label: 'Gift Commitment' },
+          { DurableId: 'GiftTransaction', QualifiedApiName: 'GiftTransaction', Label: 'Gift Transaction' }
+        ].slice(0, request.limit));
+      }
+      if (request.operationId === 'field-definition-exact:GiftTransaction.GiftCommitmentId') {
+        return jsonResult([{ EntityDefinition: { QualifiedApiName: 'GiftTransaction' }, QualifiedApiName: 'GiftCommitmentId', Label: 'Gift Commitment', DataType: 'Lookup', ReferenceTo: 'GiftCommitment' }]);
+      }
+      if (request.operationId === 'field-definition-exact:GiftTransaction.Status') {
+        return jsonResult([{ EntityDefinition: { QualifiedApiName: 'GiftTransaction' }, QualifiedApiName: 'Status', Label: 'Status', DataType: 'Picklist' }]);
+      }
+      if (request.operationId === 'picklist-values:GiftTransaction.Status') {
+        return jsonResult([
+          { EntityParticle: { EntityDefinition: { QualifiedApiName: 'GiftTransaction' }, QualifiedApiName: 'Status' }, Value: 'Paid', Label: 'Paid', IsActive: true },
+          { EntityParticle: { EntityDefinition: { QualifiedApiName: 'GiftTransaction' }, QualifiedApiName: 'Status' }, Value: 'Completed', Label: 'Completed', IsActive: true }
+        ]);
+      }
+      return jsonResult([]);
+    },
+    async verifyOrg() {
+      return { organizationId: ORG_ID };
+    },
+    async retrieveMetadata({ components }) {
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          status: 0,
+          result: {
+            done: true,
+            status: 'Succeeded',
+            files: components.map((component) => ({ type: component.type, fullName: component.apiName, state: 'Changed' }))
+          }
+        })
+      };
+    }
+  };
+}
+
+function jsonResult(records) {
+  return { exitCode: 0, stdout: JSON.stringify({ status: 0, result: { records } }), stderr: '' };
+}
+
+function fixedClock() {
+  return new Date('2026-08-12T00:00:00.000Z');
 }
 
 function statusEvidence(value, overrides = {}) {
@@ -300,7 +403,7 @@ function statusEvidence(value, overrides = {}) {
     value,
     sourceOrgId: ORG_ID,
     active: true,
-    observedAt: '2026-08-12T00:00:00.000Z',
+    observedAt: new Date().toISOString(),
     ...overrides
   };
 }

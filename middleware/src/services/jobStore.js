@@ -32,6 +32,8 @@ export async function createJobRecord(input) {
     pendingRevision: false,
     followUpRequired: false,
     conversation: [],
+    clarifications: [],
+    dispatches: [],
     metadataScope: null,
     plan: null,
     iteration: 1,
@@ -170,7 +172,10 @@ export async function appendConversation(jobId, entry) {
       text: String(entry.text || '').slice(0, 4000),
       actor: String(entry.actor || ''),
       timestamp: entry.timestamp || new Date().toISOString(),
-      responseToMessageId: entry.responseToMessageId || ''
+      responseToMessageId: entry.responseToMessageId || '',
+      ambiguityId: entry.ambiguityId || '',
+      responseToInspectionHash: entry.responseToInspectionHash || '',
+      responseToPlanVersion: entry.responseToPlanVersion || 0
     }];
     record.conversation = conversation.slice(-200);
     await save(record);
@@ -380,6 +385,57 @@ async function writeSnapshot(record) {
   await mkdir(directory, { recursive: true });
   await writeFile(temporary, JSON.stringify(record, null, 2), { encoding: 'utf8', mode: 0o600 });
   await renameWithRetry(temporary, path);
+}
+
+export async function claimPendingDispatch(dispatchKey) {
+  return updateDispatch(dispatchKey, (record, dispatch) => {
+    if (!dispatch || dispatch.status === 'DISPATCHED' || dispatch.status === 'DISPATCHING') return null;
+    dispatch.status = 'DISPATCHING';
+    dispatch.updatedAt = new Date().toISOString();
+    return { job: record, dispatch: structuredClone(dispatch) };
+  });
+}
+
+export async function markDispatchDispatched(dispatchKey) {
+  return updateDispatch(dispatchKey, (record, dispatch) => {
+    if (!dispatch) return null;
+    dispatch.status = 'DISPATCHED';
+    dispatch.dispatchedAt = new Date().toISOString();
+    dispatch.updatedAt = dispatch.dispatchedAt;
+    return { job: record, dispatch: structuredClone(dispatch) };
+  });
+}
+
+export async function markDispatchPending(dispatchKey, error) {
+  return updateDispatch(dispatchKey, (record, dispatch) => {
+    if (!dispatch) return null;
+    dispatch.status = 'PENDING';
+    dispatch.attempts = Number(dispatch.attempts || 0) + 1;
+    dispatch.lastError = String(error?.message || error || '').slice(0, 500);
+    dispatch.updatedAt = new Date().toISOString();
+    return { job: record, dispatch: structuredClone(dispatch) };
+  });
+}
+
+export async function listPendingDispatches() {
+  const jobs = await listJobRecords();
+  return jobs.flatMap((job) => (job.dispatches || [])
+    .filter((dispatch) => dispatch.status === 'PENDING')
+    .map((dispatch) => ({ jobId: job.jobId, dispatch })));
+}
+
+async function updateDispatch(dispatchKey, operation) {
+  const jobs = await listJobRecords();
+  const job = jobs.find((candidate) => (candidate.dispatches || []).some((dispatch) => dispatch.dispatchKey === dispatchKey));
+  if (!job) return null;
+  return withJobLock(job.jobId, async () => {
+    const record = await requiredJob(job.jobId);
+    const dispatch = (record.dispatches || []).find((item) => item.dispatchKey === dispatchKey);
+    const result = operation(record, dispatch);
+    record.updatedAt = new Date().toISOString();
+    await save(record);
+    return result;
+  });
 }
 
 async function renameWithRetry(source, destination) {

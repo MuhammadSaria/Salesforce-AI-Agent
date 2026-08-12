@@ -2,8 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { config } from '../src/config.js';
 import { architecturePlanHashes } from '../src/domain/architecturePlan.js';
+import { canonicalInspectionHash } from '../src/domain/inspection.js';
 import { createApp } from '../src/server.js';
 import { createJobRecord, getJobRecord, updateJob } from '../src/services/jobStore.js';
+import { trustOrgContext } from '../src/services/orgContextTrust.js';
 
 test('API rejects missing authentication and accepts configured bearer token', async (t) => {
   config.apiAuthToken = 'unit-test-token';
@@ -517,6 +519,8 @@ test('same-org Salesforce claims retain owner, implementation, and deployment pe
 });
 
 async function createApprovalReadyJob(jobId, { userId = ORG_A_USER_ID, orgId = ORG_A_ID } = {}) {
+  const currentInspection = inspection(orgId);
+  const currentPlan = architectureReadyPlan(orgId, currentInspection);
   await createJobRecord({
     jobId,
     userId,
@@ -526,9 +530,9 @@ async function createApprovalReadyJob(jobId, { userId = ORG_A_USER_ID, orgId = O
   });
   await updateJob(jobId, {
     status: 'AWAITING_IMPLEMENTATION_APPROVAL',
-    inspection: inspection(orgId),
-    plan: architectureReadyPlan(orgId),
-    metadataScope: { hash: architectureReadyPlan(orgId).scopeHash },
+    inspection: currentInspection,
+    plan: currentPlan,
+    metadataScope: { hash: currentPlan.scopeHash },
     orgContext: { orgRegistryId: 'providus_orgfarm_dev', expectedOrgId: orgId, environment: 'developer' }
   });
 }
@@ -542,15 +546,16 @@ async function createDeploymentReadyJob(jobId, options = {}) {
 }
 
 function trustedTestContext(expectedOrgId) {
-  return {
+  return trustOrgContext({
     orgRegistryId: 'providus_orgfarm_dev',
     expectedOrgId,
     environment: 'developer',
-    salesforceAlias: 'orgfarm-dev'
-  };
+    salesforceAlias: 'orgfarm-dev',
+    verified: { organizationId: expectedOrgId, verifiedAt: new Date().toISOString() }
+  });
 }
 
-function architectureReadyPlan(orgId = ORG_A_ID) {
+function architectureReadyPlan(orgId = ORG_A_ID, currentInspection = inspection(orgId)) {
   const core = {
     planVersion: 1,
     requirement: 'Create a Flow',
@@ -562,18 +567,29 @@ function architectureReadyPlan(orgId = ORG_A_ID) {
     testingStrategy: ['Validate in the verified org.'],
     risks: [],
     rollbackStrategy: 'Do not deploy the generated metadata.',
-    trustedBinding: { inspectionHash: 'inspection-hash', sourceOrgId: orgId }
+    trustedBinding: { inspectionHash: currentInspection.hash, sourceOrgId: orgId }
   };
   const hashes = architecturePlanHashes(core);
   return { ...core, planHash: hashes.planHash, materialChangeHash: hashes.scopeHash, scopeHash: hashes.scopeHash };
 }
 
 function inspection(orgId = ORG_A_ID) {
-  return {
-    hash: 'inspection-hash',
+  const body = {
     sourceOrgId: orgId,
-    evidence: [{ evidenceId: 'evidence:relationship', kind: 'RELATIONSHIP', sourceOrgId: orgId, active: true, observedAt: '2026-08-12T00:00:00.000Z' }]
+    evidence: [{
+      evidenceId: 'evidence:relationship',
+      kind: 'RELATIONSHIP',
+      objectApiName: 'GiftTransaction',
+      fieldApiName: 'GiftCommitmentId',
+      targetObjectApiName: 'GiftCommitment',
+      componentType: 'CustomField',
+      componentApiName: 'GiftTransaction.GiftCommitmentId',
+      sourceOrgId: orgId,
+      active: true,
+      observedAt: new Date().toISOString()
+    }]
   };
+  return { ...body, hash: canonicalInspectionHash(body) };
 }
 
 function approvalBody(job) {

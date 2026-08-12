@@ -6,7 +6,7 @@ import { nanoid } from 'nanoid';
 import { config } from './config.js';
 import { logger } from './logger.js';
 import { enqueueAgentJob } from './queue/agentQueue.js';
-import { appendAudit, appendConversation, createJobRecord, getJobRecord, invalidateForOrgChange, invalidateForPlanChange, listJobRecords, transitionJob, updateJob, updateJobAtomically } from './services/jobStore.js';
+import { appendAudit, appendConversation, claimPendingDispatch, createJobRecord, getJobRecord, invalidateForOrgChange, invalidateForPlanChange, listJobRecords, listPendingDispatches, markDispatchDispatched, markDispatchPending, transitionJob, updateJob, updateJobAtomically } from './services/jobStore.js';
 import { sanitizePrompt, sanitizeUntrustedText } from './utils/sanitize.js';
 import { applySalesforceClaims, requireApiAuth, requireRole, requireSalesforceClaims } from './middleware/auth.js';
 import { getRegisteredOrg, listPublicOrgs } from './services/orgRegistry.js';
@@ -127,8 +127,8 @@ export function createApp(options = {}) {
 
   app.post('/api/jobs/:jobId/approve-implementation', mutableJobRoute(async (req, res, job) => {
     if (!requireImplementationPermission(req, res, job)) return;
-    const approval = await approveImplementationAtomically(job.jobId, req, sameOrgResolver);
-    await enqueue({ jobId: job.jobId, action: 'implement', actor: req.actor.id }, { jobId: `${job.jobId}:implement:v${approval.planVersion}:${approval.planHash}:${req.actor.id}` });
+    const { approval, dispatch } = await approveImplementationAtomically(job.jobId, req, sameOrgResolver);
+    await deliverDispatch(dispatch.dispatchKey, enqueue).catch(() => {});
     res.status(201).json({ approval });
   }));
   app.post('/api/jobs/:jobId/reject-plan', mutableJobRoute(async (req, res, job) => {
@@ -246,8 +246,22 @@ async function approveImplementationAtomically(jobId, req, sameOrgResolver) {
     assertTransition(current.status, JOB_STATES.IMPLEMENTING, current);
     const approval = approvalRecord({ ...current, orgContext, metadataScope: { ...(current.metadataScope || {}), hash: hashes.scopeHash } }, req, 'IMPLEMENTATION', { decision: 'APPROVED' });
     const now = new Date().toISOString();
+    const dispatchKey = `${current.jobId}:implement:v${approval.planVersion}:${approval.planHash}:${req.actor.id}`;
+    const dispatch = {
+      dispatchKey,
+      jobId: current.jobId,
+      action: 'implement',
+      actor: req.actor.id,
+      status: 'PENDING',
+      attempts: 0,
+      createdAt: now,
+      updatedAt: now
+    };
     current.orgContext = current.source === 'salesforce-chat' ? orgContext : current.orgContext;
     current.approvals = [...(current.approvals || []), approval];
+    current.dispatches = (current.dispatches || []).some((item) => item.dispatchKey === dispatchKey)
+      ? current.dispatches
+      : [...(current.dispatches || []), dispatch];
     current.workItems = approveSpecialistWorkItems(current.workItems || [], approval.approvalId);
     current.stateHistory.push({
       previousState: current.status,
@@ -261,8 +275,28 @@ async function approveImplementationAtomically(jobId, req, sameOrgResolver) {
     current.status = JOB_STATES.IMPLEMENTING;
     current.error = '';
     current.updatedAt = now;
-    return approval;
+    return { approval, dispatch };
   });
+}
+
+export async function deliverPendingDispatches({ enqueue = enqueueAgentJob } = {}) {
+  for (const item of await listPendingDispatches()) {
+    await deliverDispatch(item.dispatch.dispatchKey, enqueue);
+  }
+}
+
+async function deliverDispatch(dispatchKey, enqueue) {
+  const claimed = await claimPendingDispatch(dispatchKey);
+  if (!claimed?.dispatch) return null;
+  const dispatch = claimed.dispatch;
+  try {
+    await enqueue({ jobId: dispatch.jobId, action: dispatch.action, actor: dispatch.actor }, { jobId: dispatch.dispatchKey });
+    await markDispatchDispatched(dispatch.dispatchKey);
+  } catch (error) {
+    await markDispatchPending(dispatch.dispatchKey, error);
+    throw error;
+  }
+  return dispatch;
 }
 function safeContext() { return { selectedOrgRegistryId: '', customerName: '', environment: '' }; }
 function conflict(res, message) { return res.status(409).json({ error: { message } }); }

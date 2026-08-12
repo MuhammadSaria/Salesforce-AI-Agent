@@ -5,6 +5,7 @@ const { Pool } = pg;
 
 const providusTablesInDeleteOrder = [
   'component_locks',
+  'job_dispatches',
   'job_events',
   'job_approvals',
   'job_plans',

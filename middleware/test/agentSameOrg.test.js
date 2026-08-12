@@ -5,8 +5,10 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { config } from '../src/config.js';
 import { architecturePlanHashes } from '../src/domain/architecturePlan.js';
+import { canonicalInspectionHash } from '../src/domain/inspection.js';
 import { processAgentJob, setSameOrgResolverForTest } from '../src/services/agent.js';
 import { createJobRecord, getJobRecord, updateJob } from '../src/services/jobStore.js';
+import { trustOrgContext } from '../src/services/orgContextTrust.js';
 
 test('worker re-resolves direct Salesforce org context before validation execution', async (t) => {
   config.workspaceRoot = await mkdtemp(join(tmpdir(), 'providus-agent-same-org-'));
@@ -208,6 +210,44 @@ test('worker implementation with mismatched approval org ID rejects with no pers
   assert.deepEqual(sideEffectSnapshot(await getJobRecord(jobId)), before);
 });
 
+test('worker rejects invalid inspection evidence before implementation side effects', async (t) => {
+  config.workspaceRoot = await mkdtemp(join(tmpdir(), 'providus-agent-same-org-'));
+  setSameOrgResolverForTest(async ({ authenticatedOrgId }) => trustedContext(authenticatedOrgId));
+  t.after(() => setSameOrgResolverForTest(null));
+
+  const corruptions = [
+    { name: 'missing referenced evidence', inspection: { ...inspection(), evidence: [] } },
+    { name: 'duplicate evidence', inspection: { ...inspection(), evidence: [inspection().evidence[0], inspection().evidence[0]] } },
+    { name: 'unknown kind', inspection: { ...inspection(), evidence: [{ ...inspection().evidence[0], kind: 'SOURCE_FILE' }] } },
+    { name: 'missing active', inspection: { ...inspection(), evidence: [{ ...inspection().evidence[0], active: undefined }] } },
+    { name: 'stale observedAt', inspection: { ...inspection(), evidence: [{ ...inspection().evidence[0], observedAt: '2026-01-01T00:00:00.000Z' }] } },
+    { name: 'future observedAt', inspection: { ...inspection(), evidence: [{ ...inspection().evidence[0], observedAt: '2999-01-01T00:00:00.000Z' }] } },
+    { name: 'mixed org', inspection: { ...inspection(), evidence: [{ ...inspection().evidence[0], sourceOrgId: '00Dg500000E07fAEAR' }] } },
+    { name: 'tampered inspection hash', inspection: { ...inspection(), hash: 'f'.repeat(64) } }
+  ];
+
+  for (const corruption of corruptions) {
+    const jobId = `same-org-worker-inspection-${corruption.name.replace(/\s+/g, '-')}-${Date.now()}`;
+    await createJobRecord({
+      jobId,
+      userId: '005g5000009ImIkAAK',
+      orgId: '00Dg500000E07e9EAB',
+      source: 'salesforce-chat',
+      prompt: 'Create a Flow'
+    });
+    await updateJob(jobId, implementationReadyPatch({ inspection: corruption.inspection }));
+    const before = sideEffectSnapshot(await getJobRecord(jobId));
+
+    await assert.rejects(
+      processAgentJob({ jobId, action: 'implement', actor: '005g5000009ImIkAAK' }),
+      /current implementation approval|inspection|evidence/i,
+      corruption.name
+    );
+
+    assert.deepEqual(sideEffectSnapshot(await getJobRecord(jobId)), before, corruption.name);
+  }
+});
+
 test('worker validation with invalid approval binding rejects with no persistent side effects', async (t) => {
   config.workspaceRoot = await mkdtemp(join(tmpdir(), 'providus-agent-same-org-'));
   setSameOrgResolverForTest(async ({ authenticatedOrgId }) => trustedContext(authenticatedOrgId));
@@ -294,10 +334,11 @@ test('worker same-org approval path persists trusted org context after approval 
 });
 
 function implementationReadyPatch(overrides = {}) {
-  const currentPlan = architecturePlan();
+  const currentInspection = overrides.inspection || inspection();
+  const currentPlan = architecturePlan(currentInspection);
   return {
     status: 'IMPLEMENTING',
-    inspection: inspection(),
+    inspection: currentInspection,
     plan: currentPlan,
     metadataScope: { hash: currentPlan.scopeHash },
     approvals: [implementationApproval({}, currentPlan)],
@@ -307,9 +348,10 @@ function implementationReadyPatch(overrides = {}) {
 }
 
 function deploymentReadyPatch(overrides = {}) {
-  const currentPlan = architecturePlan();
+  const currentInspection = overrides.inspection || inspection();
+  const currentPlan = architecturePlan(currentInspection);
   return {
-    ...implementationReadyPatch(),
+    ...implementationReadyPatch({ inspection: currentInspection }),
     status: 'AWAITING_DEPLOYMENT_APPROVAL',
     implementation: { approvalId: 'approval-1', sourceHash: 'source-hash', commitHash: 'commit-hash', changedFiles: [], workspacePath: 'implementation/project' },
     validation: {
@@ -356,7 +398,7 @@ function deploymentApproval(overrides = {}, currentPlan = architecturePlan()) {
   };
 }
 
-function architecturePlan() {
+function architecturePlan(currentInspection = inspection()) {
   const core = {
     planVersion: 1,
     requirement: 'Create a recurring donation installment Flow.',
@@ -368,7 +410,7 @@ function architecturePlan() {
     testingStrategy: ['Validate the Flow in the verified sandbox.'],
     risks: [],
     rollbackStrategy: 'Disable generated metadata before deployment.',
-    trustedBinding: { inspectionHash: 'inspection-hash', sourceOrgId: '00Dg500000E07e9EAB' },
+    trustedBinding: { inspectionHash: currentInspection.hash, sourceOrgId: '00Dg500000E07e9EAB' },
     fileOperations: [],
     dataOperations: []
   };
@@ -377,11 +419,22 @@ function architecturePlan() {
 }
 
 function inspection() {
-  return {
-    hash: 'inspection-hash',
+  const body = {
     sourceOrgId: '00Dg500000E07e9EAB',
-    evidence: [{ evidenceId: 'evidence:relationship', kind: 'RELATIONSHIP', sourceOrgId: '00Dg500000E07e9EAB', active: true, observedAt: '2026-08-12T00:00:00.000Z' }]
+    evidence: [{
+      evidenceId: 'evidence:relationship',
+      kind: 'RELATIONSHIP',
+      objectApiName: 'GiftTransaction',
+      fieldApiName: 'GiftCommitmentId',
+      targetObjectApiName: 'GiftCommitment',
+      componentType: 'CustomField',
+      componentApiName: 'GiftTransaction.GiftCommitmentId',
+      sourceOrgId: '00Dg500000E07e9EAB',
+      active: true,
+      observedAt: new Date().toISOString()
+    }]
   };
+  return { ...body, hash: canonicalInspectionHash(body) };
 }
 
 function sideEffectSnapshot(job) {
@@ -400,7 +453,7 @@ function sideEffectSnapshot(job) {
 }
 
 function trustedContext(expectedOrgId) {
-  return {
+  return trustOrgContext({
     orgRegistryId: 'providus_orgfarm_dev',
     salesforceAlias: 'orgfarm-dev',
     expectedOrgId,
@@ -424,7 +477,8 @@ function trustedContext(expectedOrgId) {
       instanceUrl: 'https://orgfarm-9914d7f2f7-dev-ed.develop.my.salesforce.com',
       username: 'saria4505102.8535b64837ad@agentforce.com',
       connected: true,
-      environment: 'developer'
+      environment: 'developer',
+      verifiedAt: new Date().toISOString()
     }
-  };
+  });
 }

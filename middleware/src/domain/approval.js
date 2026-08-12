@@ -1,5 +1,6 @@
 import { sameSalesforceId } from '../utils/salesforceId.js';
 import { architecturePlanHashes } from './architecturePlan.js';
+import { canonicalInspectionHash, parseVerifiedInspection } from './inspection.js';
 
 const SHA256 = /^[a-f0-9]{64}$/;
 
@@ -32,6 +33,7 @@ export function orgBoundApproval(job, approvalType, options = {}) {
   if (!sameSalesforceId(approval.salesforceOrganizationId, orgContext?.expectedOrgId)) throw approvalError();
   if (job.source === 'salesforce-chat') {
     if (!sameSalesforceId(job.orgId, orgContext?.expectedOrgId) || !sameSalesforceId(approval.salesforceOrganizationId, job.orgId)) throw approvalError();
+    if (approvalType === 'IMPLEMENTATION') assertPlanInspectionBinding(job, orgContext);
   }
   if (approvalType === 'DEPLOYMENT') {
     if (!validation || approval.validationId !== validation.validationId) throw approvalError();
@@ -71,7 +73,13 @@ export function assertPlanInspectionBinding(job, orgContext = job.orgContext) {
     code: 'APPROVAL_REQUIRED'
   });
   if (!binding?.inspectionHash || !binding?.sourceOrgId || !sameSalesforceId(binding.sourceOrgId, expectedOrgId)) throw fail();
-  if (!inspection?.hash || inspection.hash !== binding.inspectionHash || !sameSalesforceId(inspection.sourceOrgId, expectedOrgId)) throw fail();
+  let parsedInspection;
+  try {
+    parsedInspection = parseVerifiedInspection(inspection, { orgContext });
+  } catch {
+    throw fail();
+  }
+  if (canonicalInspectionHash(parsedInspection) !== binding.inspectionHash || !sameSalesforceId(parsedInspection.sourceOrgId, expectedOrgId)) throw fail();
   const evidence = new Map((inspection.evidence || []).map((item) => [item.evidenceId, item]));
   const seen = new Set();
   for (const id of job.plan.evidenceIds || []) {

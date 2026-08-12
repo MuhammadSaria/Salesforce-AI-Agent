@@ -1,4 +1,5 @@
 import { architecturePlanHashes, parseArchitecturePlan } from '../domain/architecturePlan.js';
+import { canonicalInspectionHash, parseVerifiedInspection } from '../domain/inspection.js';
 import { enrichPlanWithModel } from './modelExecutor.js';
 import { sameSalesforceId } from '../utils/salesforceId.js';
 
@@ -16,6 +17,11 @@ export function createProductionArchitecturePlannerDependencies(overrides = {}) 
 
 export async function createArchitecturePlan({ requirement, inspection, orgContext, answers = [] }, dependencies = {}) {
   const verifiedOrgId = verifiedOrgIdFor(orgContext);
+  try {
+    inspection = parseVerifiedInspection(inspection, { orgContext, clock: dependencies.clock, maxEvidenceAgeMs: dependencies.maxEvidenceAgeMs });
+  } catch (error) {
+    throw controlledPlanningError(error.code || 'INSPECTION_EVIDENCE_REQUIRED', controlledInspectionMessage(error));
+  }
   assertVerifiedInspectionEvidence(inspection, verifiedOrgId);
   assertNoMaterialAmbiguity(inspection);
   assertPaidStatusVerified(requirement, inspection, answers);
@@ -32,7 +38,7 @@ export async function createArchitecturePlan({ requirement, inspection, orgConte
   const plan = parsePlanClosed(draft);
   assertEvidenceIdsExist(plan.evidenceIds, inspection, verifiedOrgId);
   const trustedBinding = {
-    inspectionHash: String(inspection.hash || ''),
+    inspectionHash: canonicalInspectionHash(inspection),
     sourceOrgId: verifiedOrgId
   };
   const hashes = architecturePlanHashes({ ...plan, trustedBinding });
@@ -86,7 +92,7 @@ function assertNoMaterialAmbiguity(inspection) {
 
 function assertPaidStatusVerified(requirement, inspection, answers) {
   const requirementText = requirementTextFor(requirement);
-  const answerText = (answers || []).join(' ');
+  const answerText = (answers || []).map((answer) => typeof answer === 'string' ? answer : answer?.text).filter(Boolean).join(' ');
   const requirementMentionsPaid = /\bpaid\b/i.test(requirementText);
   const requirementMentionsCompleted = /\bcompleted\b/i.test(requirementText);
   const answerMentionsPaid = /\bpaid\b/i.test(answerText);
@@ -152,9 +158,18 @@ function controlledPlanningError(code, message) {
   return Object.assign(new Error(message), { code, statusCode: 409 });
 }
 
+function controlledInspectionMessage(error) {
+  if (error?.code === 'INSPECTION_ORG_MISMATCH') return error.message;
+  if (error?.code === 'INSPECTION_HASH_MISMATCH') return 'Inspection hash must match the verified inspection content.';
+  if (error?.code === 'EVIDENCE_ORG_MISMATCH') return error.message;
+  if (error?.code === 'DUPLICATED_INSPECTION_EVIDENCE') return error.message;
+  if (error?.code === 'STALE_INSPECTION_EVIDENCE') return error.message;
+  return 'Verified inspection evidence is required for architecture planning.';
+}
+
 function verifiedOrgIdFor(orgContext) {
   const expected = orgContext?.expectedOrgId;
-  const verified = orgContext?.verified?.organizationId || expected;
+  const verified = orgContext?.verified?.organizationId;
   if (!expected || !sameSalesforceId(expected, verified)) {
     throw Object.assign(new Error('A verified Salesforce org context is required for architecture planning.'), { code: 'VERIFIED_ORG_REQUIRED', statusCode: 409 });
   }
@@ -163,7 +178,8 @@ function verifiedOrgIdFor(orgContext) {
 
 function plannerInspectionView(inspection) {
   return {
-    hash: inspection.hash,
+    hash: canonicalInspectionHash(inspection),
+    sourceOrgId: inspection.sourceOrgId,
     objects: inspection.objects || [],
     fields: inspection.fields || [],
     relationships: inspection.relationships || [],

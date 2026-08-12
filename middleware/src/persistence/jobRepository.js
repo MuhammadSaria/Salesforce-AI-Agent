@@ -94,6 +94,81 @@ function repositoryFor(db, { ownsTransactions }) {
         ]
       );
     },
+    async approveImplementationAndDispatch(jobId, approval) {
+      await runInTransaction(async (client) => {
+        const result = await client.query(
+          `SELECT status, current_plan_version
+           FROM development_jobs
+           WHERE job_id = $1
+           FOR UPDATE`,
+          [jobId]
+        );
+        if (!result.rowCount) throw notFound();
+        const current = result.rows[0];
+        if (current.status !== DEVELOPMENT_JOB_STATES.AWAITING_IMPLEMENTATION_APPROVAL) {
+          throw stateConflict(`Expected job ${jobId} to be ${DEVELOPMENT_JOB_STATES.AWAITING_IMPLEMENTATION_APPROVAL} but found ${current.status}.`);
+        }
+        await client.query(
+          `INSERT INTO job_approvals (approval_id, job_id, approval_type, decision, actor_id, plan_hash, scope_hash, body)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`,
+          [
+            approval.approvalId,
+            jobId,
+            'IMPLEMENTATION',
+            'APPROVED',
+            approval.actorId,
+            approval.planHash,
+            approval.scopeHash,
+            JSON.stringify(approval.body || {})
+          ]
+        );
+        await client.query(
+          `INSERT INTO job_dispatches (dispatch_key, job_id, action, actor_id, status)
+           VALUES ($1, $2, $3, $4, 'PENDING')
+           ON CONFLICT (dispatch_key) DO NOTHING`,
+          [approval.dispatchKey, jobId, 'implement', approval.actorId]
+        );
+        await client.query(
+          `UPDATE development_jobs
+           SET status = $2, updated_at = now()
+           WHERE job_id = $1`,
+          [jobId, DEVELOPMENT_JOB_STATES.IMPLEMENTING]
+        );
+        await client.query(
+          `INSERT INTO job_events (job_id, event_type, actor_id, body)
+           VALUES ($1, $2, $3, $4::jsonb)`,
+          [jobId, 'STATE_TRANSITION', approval.actorId, JSON.stringify({ from: current.status, to: DEVELOPMENT_JOB_STATES.IMPLEMENTING, approvalId: approval.approvalId })]
+        );
+      });
+    },
+    async claimDispatch(dispatchKey) {
+      return runInTransaction(async (client) => {
+        const result = await client.query(
+          `UPDATE job_dispatches
+           SET status = 'DISPATCHING', updated_at = now()
+           WHERE dispatch_key = $1 AND status = 'PENDING'
+           RETURNING dispatch_key, job_id, action, actor_id, status`,
+          [dispatchKey]
+        );
+        if (!result.rowCount) return null;
+        const row = result.rows[0];
+        return {
+          dispatchKey: row.dispatch_key,
+          jobId: row.job_id,
+          action: row.action,
+          actorId: row.actor_id,
+          status: row.status
+        };
+      });
+    },
+    async markDispatchDispatched(dispatchKey) {
+      await db.query(
+        `UPDATE job_dispatches
+         SET status = 'DISPATCHED', dispatched_at = now(), updated_at = now()
+         WHERE dispatch_key = $1`,
+        [dispatchKey]
+      );
+    },
     async transition(jobId, expectedState, nextState, details = {}) {
       await runInTransaction(async (client) => {
         const result = await client.query('SELECT status FROM development_jobs WHERE job_id = $1 FOR UPDATE', [jobId]);
@@ -153,7 +228,7 @@ async function hydrateJobInSnapshot(client, jobId) {
   );
   if (!jobResult.rowCount) return null;
 
-  const [messages, plans, approvals, events] = await Promise.all([
+  const [messages, plans, approvals, events, dispatches] = await Promise.all([
     client.query(
       `SELECT message_id, role, kind, text, body, created_at
        FROM job_messages
@@ -180,6 +255,13 @@ async function hydrateJobInSnapshot(client, jobId) {
        FROM job_events
        WHERE job_id = $1
        ORDER BY created_at, event_id`,
+      [jobId]
+    ),
+    client.query(
+      `SELECT dispatch_key, action, actor_id, status, attempts, last_error, created_at, updated_at, dispatched_at
+       FROM job_dispatches
+       WHERE job_id = $1
+       ORDER BY created_at, dispatch_key`,
       [jobId]
     )
   ]);
@@ -225,6 +307,17 @@ async function hydrateJobInSnapshot(client, jobId) {
       actorId: row.actor_id,
       body: row.body,
       createdAt: row.created_at.toISOString()
+    })),
+    dispatches: dispatches.rows.map((row) => ({
+      dispatchKey: row.dispatch_key,
+      action: row.action,
+      actorId: row.actor_id,
+      status: row.status,
+      attempts: row.attempts,
+      lastError: row.last_error,
+      createdAt: row.created_at.toISOString(),
+      updatedAt: row.updated_at.toISOString(),
+      dispatchedAt: row.dispatched_at?.toISOString() || ''
     }))
   };
 }

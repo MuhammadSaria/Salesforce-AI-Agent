@@ -1,4 +1,5 @@
 import { config } from '../config.js';
+import { canonicalInspectionHash } from '../domain/inspection.js';
 import { stableHash } from '../utils/hash.js';
 import { assertTrustedOrgContext } from './orgContextTrust.js';
 import { retrieveMetadata as retrieveSfMetadata, runSfCommand, verifySelectedOrg } from './sfExecutor.js';
@@ -264,8 +265,9 @@ function applyPicklistValues(state, statusField, values, operationId) {
       value: item.value,
       label: item.label,
       operationId,
-      sourceOrgId: state.orgContext.expectedOrgId,
-      observedAt: state.observedAt
+    sourceOrgId: state.orgContext.expectedOrgId,
+    active: true,
+    observedAt: state.observedAt
     });
   }
 }
@@ -339,6 +341,7 @@ async function retrieveAndMark(state, sf, orgContext) {
 function toInspection(state) {
   const primaryMetadata = [...state.components.values()].sort(compareComponent);
   const inspection = {
+    sourceOrgId: state.orgContext.expectedOrgId,
     objects: state.objects,
     fields: state.fields,
     relationships: state.relationships,
@@ -358,7 +361,7 @@ function toInspection(state) {
     maximumDependencyDepth: state.limits.maxDepth,
     maximumComponents: state.limits.maxComponents
   };
-  return { ...inspection, hash: stableHash({ ...inspection, evidence: inspection.evidence.map((item) => ({ ...item, observedAt: '' })) }) };
+  return { ...inspection, hash: canonicalInspectionHash(inspection) };
 }
 
 function buildEvidence(state) {
@@ -377,7 +380,28 @@ function buildEvidence(state) {
 }
 
 function evidenceRecord(kind, item, state) {
-  return { evidenceId: item.evidenceId, kind, objectApiName: item.objectApiName, fieldApiName: item.fieldApiName || item.apiName, targetObjectApiName: item.referenceTo, componentType: item.type, componentApiName: item.apiName, sourceOrgId: state.orgContext.expectedOrgId, observedAt: state.observedAt };
+  return { evidenceId: item.evidenceId, kind, objectApiName: item.objectApiName, fieldApiName: item.fieldApiName || item.apiName, targetObjectApiName: item.referenceTo, componentType: item.type || metadataTypeForEvidence(kind), componentApiName: componentApiNameForEvidence(kind, item), sourceOrgId: state.orgContext.expectedOrgId, active: true, observedAt: state.observedAt };
+}
+
+function metadataTypeForEvidence(kind) {
+  return {
+    OBJECT: 'CustomObject',
+    FIELD: 'CustomField',
+    RELATIONSHIP: 'CustomField',
+    STATUS_CANDIDATE: 'CustomField',
+    STATUS_VALUE: 'CustomField',
+    FLOW: 'Flow',
+    APEX_AUTOMATION: 'ApexClass',
+    VALIDATION_RULE: 'ValidationRule',
+    LAYOUT: 'Layout',
+    PERMISSION_SET: 'PermissionSet'
+  }[kind] || '';
+}
+
+function componentApiNameForEvidence(kind, item) {
+  if (['FIELD', 'RELATIONSHIP', 'STATUS_CANDIDATE', 'STATUS_VALUE'].includes(kind)) return `${item.objectApiName}.${item.fieldApiName || item.apiName}`;
+  if (kind === 'VALIDATION_RULE') return `${item.objectApiName}.${item.apiName}`;
+  return item.apiName || '';
 }
 
 function hasConnectedRelationship(state) {
