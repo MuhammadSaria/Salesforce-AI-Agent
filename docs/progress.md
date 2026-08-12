@@ -2,7 +2,7 @@
 
 **Branch:** `feature/providus-phase1-execution`  
 **Base:** `main`  
-**Last updated:** 2026-08-02
+**Last updated:** 2026-08-12
 
 ## Repository Workflow Setup
 
@@ -20,6 +20,25 @@
 - Phase 1 Task 6: Separate source-free architecture planning from source generation
   - Implementation commit: 56c4d3841792d5a7d8c5425d7aa7df38fbe5bc72
   - Progress documentation commit: 3a0c18b9d0d2ed30ed715afb043bbdcdaa72c041
+  - Correction date: 2026-08-12
+  - Correction verification:
+    - `cd middleware && npm.cmd test -- test/architecturePlanner.test.js` - RED first, failed for expected missing production architecture planner dependency construction; then PASS, 14 tests, 0 skipped.
+    - `cd middleware && npm.cmd test -- test/agentClarificationEvidence.test.js` - PASS, 4 tests, 0 skipped.
+    - `cd middleware && npm.cmd test -- test/approval.test.js` - PASS, 7 tests, 0 skipped.
+    - `cd middleware && npm.cmd test -- test/agentSameOrg.test.js` - PASS, 9 tests, 0 skipped.
+    - `cd middleware && npm.cmd test -- test/apiAuth.test.js` - PASS, 17 tests, 0 skipped.
+    - `cd middleware && npm.cmd test -- test/agentClarificationEvidence.test.js test/architecturePlanner.test.js test/approval.test.js test/agentSameOrg.test.js test/apiAuth.test.js test/conversationApi.test.js` - PASS, 67 tests, 0 skipped.
+    - `cd middleware && npm.cmd test -- test/planActionability.test.js` - PASS, 2 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --input-type=module -e "import pg from 'pg'; const c = new pg.Client({ connectionString: process.env.TEST_DATABASE_URL }); await c.connect(); const r = await c.query('select current_database() as db, inet_server_addr() as addr, inet_server_port() as port'); console.log(JSON.stringify(r.rows[0])); await c.end();"` - PASS, connected to `providus_nexus_test`.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 207 tests and 0 skipped.
+  - Correction review:
+    - Production direct-chat architecture planning now uses explicit production dependencies wired to `enrichPlanWithModel`; the deterministic planner fallback was removed from production.
+    - Direct architecture planning uses a source-free model executor path separate from the legacy Jira source-generation Codex planner.
+    - Architecture plans are recursively source-free, metadata-type allowlisted, owner allowlisted, and API-name grammar checked.
+    - Plan hashes bind trusted plan content to the verified inspection hash and source org ID; model output cannot set trusted binding metadata.
+    - Implementation approval is a locked compare-and-set mutation that recomputes plan/scope hashes, revalidates evidence/inspection/org binding, records approval, transitions state, and queues implementation only after commit with an idempotent key.
+    - Paid and Completed status semantics are exact; ambiguous Paid/Completed wording requires clarification and clarification must match verified active status evidence.
+    - Controlled planning/model/schema/evidence failures transition out of `PLANNING` to `AWAITING_CLARIFICATION` or `FAILED` with sanitized user-facing errors and no approval, queue, Salesforce command, or source generation side effects.
   - Verification date: 2026-08-02
   - Verification:
     - `cd middleware && node --import ./test/setup.js --test test/architecturePlanner.test.js test/planActionability.test.js test/approval.test.js test/agentClarificationEvidence.test.js` - RED first, failed for expected missing architecture schema/actionability modules, missing direct-planner test hook, missing plan/hash/scope approval binding, empty evidence/component approval acceptance, and missing worker plan-version guard.

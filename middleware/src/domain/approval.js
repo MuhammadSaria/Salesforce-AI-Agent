@@ -1,4 +1,7 @@
 import { sameSalesforceId } from '../utils/salesforceId.js';
+import { architecturePlanHashes } from './architecturePlan.js';
+
+const SHA256 = /^[a-f0-9]{64}$/;
 
 export function latestApproval(job, approvalType, validationId = '') {
   return [...(job.approvals || [])].reverse().find((approval) =>
@@ -22,7 +25,7 @@ export function orgBoundApproval(job, approvalType, options = {}) {
   });
 
   const planMatches = approvalType === 'IMPLEMENTATION' && job.source === 'salesforce-chat'
-    ? approval?.planHash === job.plan?.planHash && Number(approval?.planVersion) === Number(job.plan?.planVersion)
+    ? implementationApprovalHashesMatch(job, approval)
     : approval?.planHash === job.plan?.planHash
       || (approvalType === 'IMPLEMENTATION' && approval?.materialChangeHash && approval.materialChangeHash === job.plan?.materialChangeHash);
   if (!approval || approval.decision !== 'APPROVED' || !planMatches || approval.metadataScopeHash !== job.metadataScope?.hash) throw approvalError();
@@ -37,4 +40,58 @@ export function orgBoundApproval(job, approvalType, options = {}) {
     if (job.source === 'salesforce-chat' && !sameSalesforceId(validation.targetOrgId, job.orgId)) throw approvalError();
   }
   return approval;
+}
+
+export function assertCurrentImplementationApprovalBinding(job, submitted = {}, orgContext = job.orgContext) {
+  const approvalError = (message = 'A current implementation approval for this exact plan, scope, and org is required.') => Object.assign(new Error(message), {
+    statusCode: 409,
+    code: 'APPROVAL_REQUIRED'
+  });
+  const version = Number(submitted.planVersion);
+  if (!Number.isInteger(version) || version <= 0 || version !== Number(job.plan?.planVersion)) throw approvalError('Approval must identify the current positive plan version.');
+  if (!SHA256.test(String(submitted.planHash || '')) || !SHA256.test(String(submitted.scopeHash || ''))) throw approvalError('Approval must identify canonical plan and scope hashes.');
+  const hashes = recomputedImplementationHashes(job);
+  if (submitted.planHash !== hashes.planHash || submitted.scopeHash !== hashes.scopeHash) throw approvalError();
+  if (job.plan?.planHash !== hashes.planHash || (job.metadataScope?.hash || job.plan?.scopeHash) !== hashes.scopeHash) throw approvalError();
+  assertPlanInspectionBinding(job, orgContext);
+  return hashes;
+}
+
+export function recomputedImplementationHashes(job) {
+  if (!job?.plan) throw Object.assign(new Error('A current implementation approval for this exact plan, scope, and org is required.'), { statusCode: 409, code: 'APPROVAL_REQUIRED' });
+  return architecturePlanHashes(job.plan);
+}
+
+export function assertPlanInspectionBinding(job, orgContext = job.orgContext) {
+  const binding = job.plan?.trustedBinding;
+  const expectedOrgId = orgContext?.expectedOrgId;
+  const inspection = job.inspection;
+  const fail = () => Object.assign(new Error('A current implementation approval for this exact plan, scope, and org is required.'), {
+    statusCode: 409,
+    code: 'APPROVAL_REQUIRED'
+  });
+  if (!binding?.inspectionHash || !binding?.sourceOrgId || !sameSalesforceId(binding.sourceOrgId, expectedOrgId)) throw fail();
+  if (!inspection?.hash || inspection.hash !== binding.inspectionHash || !sameSalesforceId(inspection.sourceOrgId, expectedOrgId)) throw fail();
+  const evidence = new Map((inspection.evidence || []).map((item) => [item.evidenceId, item]));
+  const seen = new Set();
+  for (const id of job.plan.evidenceIds || []) {
+    if (seen.has(id)) throw fail();
+    seen.add(id);
+    const item = evidence.get(id);
+    if (!item || item.stale === true || item.active === false || !sameSalesforceId(item.sourceOrgId, expectedOrgId)) throw fail();
+  }
+}
+
+function implementationApprovalHashesMatch(job, approval) {
+  if (!approval || !Number.isInteger(Number(job.plan?.planVersion)) || Number(job.plan?.planVersion) <= 0) return false;
+  if (Number(approval.planVersion) !== Number(job.plan?.planVersion)) return false;
+  try {
+    const hashes = recomputedImplementationHashes(job);
+    return approval.planHash === hashes.planHash
+      && approval.metadataScopeHash === hashes.scopeHash
+      && job.plan.planHash === hashes.planHash
+      && (job.metadataScope?.hash || job.plan?.scopeHash) === hashes.scopeHash;
+  } catch {
+    return false;
+  }
 }

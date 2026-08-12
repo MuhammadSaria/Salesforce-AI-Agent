@@ -6,14 +6,14 @@ import { nanoid } from 'nanoid';
 import { config } from './config.js';
 import { logger } from './logger.js';
 import { enqueueAgentJob } from './queue/agentQueue.js';
-import { appendAudit, appendConversation, createJobRecord, getJobRecord, invalidateForOrgChange, invalidateForPlanChange, listJobRecords, transitionJob, updateJob } from './services/jobStore.js';
+import { appendAudit, appendConversation, createJobRecord, getJobRecord, invalidateForOrgChange, invalidateForPlanChange, listJobRecords, transitionJob, updateJob, updateJobAtomically } from './services/jobStore.js';
 import { sanitizePrompt, sanitizeUntrustedText } from './utils/sanitize.js';
 import { applySalesforceClaims, requireApiAuth, requireRole, requireSalesforceClaims } from './middleware/auth.js';
 import { getRegisteredOrg, listPublicOrgs } from './services/orgRegistry.js';
 import { claimWebhookEvent, parseJiraWebhook, verifyJiraWebhook } from './services/jira.js';
-import { JOB_STATES } from './domain/jobState.js';
+import { assertTransition, JOB_STATES } from './domain/jobState.js';
 import { startJiraPoller } from './services/jiraPoller.js';
-import { orgBoundApproval } from './domain/approval.js';
+import { assertCurrentImplementationApprovalBinding, orgBoundApproval } from './domain/approval.js';
 import { assertArchitecturePlanActionable } from './domain/planActionability.js';
 import { approveSpecialistWorkItems, overallSpecialistStatus } from './services/orchestrator.js';
 import { WORK_ITEM_STATUSES } from './domain/specialistAgents.js';
@@ -127,12 +127,8 @@ export function createApp(options = {}) {
 
   app.post('/api/jobs/:jobId/approve-implementation', mutableJobRoute(async (req, res, job) => {
     if (!requireImplementationPermission(req, res, job)) return;
-    if (!isAwaitingImplementationApproval(job)) return conflict(res, 'Job is not awaiting implementation approval.');
-    if (!assertImplementationApprovalBinding(req, res, job)) return;
-    const approval = approvalRecord(job, req, 'IMPLEMENTATION', { decision: 'APPROVED' });
-    await updateJob(job.jobId, { approvals: [...job.approvals, approval], workItems: approveSpecialistWorkItems(job.workItems || [], approval.approvalId) });
-    await transitionJob(job.jobId, JOB_STATES.IMPLEMENTING, { actor: req.actor.id, reason: 'Explicit implementation approval recorded.', approvalId: approval.approvalId });
-    await enqueue({ jobId: job.jobId, action: 'implement', actor: req.actor.id }, { jobId: `${job.jobId}:implement:${Date.now()}` });
+    const approval = await approveImplementationAtomically(job.jobId, req, sameOrgResolver);
+    await enqueue({ jobId: job.jobId, action: 'implement', actor: req.actor.id }, { jobId: `${job.jobId}:implement:v${approval.planVersion}:${approval.planHash}:${req.actor.id}` });
     res.status(201).json({ approval });
   }));
   app.post('/api/jobs/:jobId/reject-plan', mutableJobRoute(async (req, res, job) => {
@@ -240,26 +236,33 @@ function jobRoute(handler) { return asyncRoute(async (req, res) => { const job =
 function mutableJobRoute(handler) { return jobRoute((req, res, job) => isJiraSource(job) && !config.jiraEnabled ? jiraDisabled(res) : handler(req, res, job)); }
 function asyncRoute(handler) { return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next); }
 function approvalRecord(job, req, type, extra) { return { approvalId: nanoid(), jobId: job.jobId, jiraIssueKey: job.jiraIssueKey, approvalType: type, planVersion: job.plan?.planVersion, planHash: job.plan?.planHash, materialChangeHash: job.plan?.materialChangeHash || '', metadataScopeHash: job.metadataScope?.hash, orgRegistryId: job.orgContext?.orgRegistryId, salesforceOrganizationId: isSalesforceChat(job) ? req.actor?.orgId : job.orgContext?.expectedOrgId, environment: job.orgContext?.environment, approverIdentity: req.actor.id, comments: sanitizeUntrustedText(req.body?.comments, 1000), approvalTimestamp: new Date().toISOString(), ...extra }; }
-function assertImplementationApprovalBinding(req, res, job) {
-  if (Number(req.body?.planVersion) !== job.plan?.planVersion) {
-    conflict(res, 'Approval must identify the current plan version.');
-    return false;
-  }
-  if (String(req.body?.planHash || '') !== String(job.plan?.planHash || '')) {
-    conflict(res, 'Approval must identify the current plan hash.');
-    return false;
-  }
-  if (String(req.body?.scopeHash || '') !== String(job.metadataScope?.hash || job.plan?.scopeHash || '')) {
-    conflict(res, 'Approval must identify the current scope hash.');
-    return false;
-  }
-  try {
-    assertArchitecturePlanActionable(job.plan);
-  } catch (error) {
-    res.status(error.statusCode || 409).json({ error: { code: error.code || 'PLAN_NOT_ACTIONABLE', message: error.message } });
-    return false;
-  }
-  return true;
+async function approveImplementationAtomically(jobId, req, sameOrgResolver) {
+  return updateJobAtomically(jobId, async (current) => {
+    if (!hasImplementationPermission(req.actor, current)) throw Object.assign(new Error('This action is not permitted.'), { statusCode: 403, code: 'FORBIDDEN' });
+    if (!isAwaitingImplementationApproval(current)) throw Object.assign(new Error('Job is not awaiting implementation approval.'), { statusCode: 409 });
+    const orgContext = await trustedOrgContextForJob(current, req.actor, sameOrgResolver);
+    assertArchitecturePlanActionable(current.plan);
+    const hashes = assertCurrentImplementationApprovalBinding(current, req.body, orgContext);
+    assertTransition(current.status, JOB_STATES.IMPLEMENTING, current);
+    const approval = approvalRecord({ ...current, orgContext, metadataScope: { ...(current.metadataScope || {}), hash: hashes.scopeHash } }, req, 'IMPLEMENTATION', { decision: 'APPROVED' });
+    const now = new Date().toISOString();
+    current.orgContext = current.source === 'salesforce-chat' ? orgContext : current.orgContext;
+    current.approvals = [...(current.approvals || []), approval];
+    current.workItems = approveSpecialistWorkItems(current.workItems || [], approval.approvalId);
+    current.stateHistory.push({
+      previousState: current.status,
+      newState: JOB_STATES.IMPLEMENTING,
+      timestamp: now,
+      actor: req.actor.id,
+      reason: 'Explicit implementation approval recorded.',
+      approvalId: approval.approvalId,
+      orgId: orgContext?.expectedOrgId || ''
+    });
+    current.status = JOB_STATES.IMPLEMENTING;
+    current.error = '';
+    current.updatedAt = now;
+    return approval;
+  });
 }
 function safeContext() { return { selectedOrgRegistryId: '', customerName: '', environment: '' }; }
 function conflict(res, message) { return res.status(409).json({ error: { message } }); }

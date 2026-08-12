@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { config } from '../src/config.js';
+import { architecturePlanHashes } from '../src/domain/architecturePlan.js';
 import { createApp } from '../src/server.js';
 import { createJobRecord, getJobRecord, updateJob } from '../src/services/jobStore.js';
 
@@ -292,7 +293,7 @@ test('Salesforce implementation and deployment permission claims are independent
   const implementation = await fetch(`${base}/api/jobs/${implementJobId}/approve-implementation`, {
     method: 'POST',
     headers: salesforceHeaders({ authorization: 'Bearer unit-test-token', canImplement: true, canDeploy: false }),
-    body: JSON.stringify({ planVersion: 1, planHash: 'plan-hash', scopeHash: 'scope-hash' })
+    body: JSON.stringify(approvalBody(await getJobRecord(implementJobId)))
   });
   assert.equal(implementation.status, 201);
 
@@ -501,7 +502,7 @@ test('same-org Salesforce claims retain owner, implementation, and deployment pe
   const implementationApproval = await fetch(`${base}/api/jobs/${implementationJobId}/approve-implementation`, {
     method: 'POST',
     headers: salesforceHeaders({ authorization: 'Bearer unit-test-token', orgId: ORG_A_ID, userId: ORG_A_USER_ID, canImplement: true }),
-    body: JSON.stringify({ planVersion: 1, planHash: 'plan-hash', scopeHash: 'scope-hash' })
+    body: JSON.stringify(approvalBody(await getJobRecord(implementationJobId)))
   });
   assert.equal(implementationApproval.status, 201);
 
@@ -525,8 +526,9 @@ async function createApprovalReadyJob(jobId, { userId = ORG_A_USER_ID, orgId = O
   });
   await updateJob(jobId, {
     status: 'AWAITING_IMPLEMENTATION_APPROVAL',
-    plan: architectureReadyPlan(),
-    metadataScope: { hash: 'scope-hash' },
+    inspection: inspection(orgId),
+    plan: architectureReadyPlan(orgId),
+    metadataScope: { hash: architectureReadyPlan(orgId).scopeHash },
     orgContext: { orgRegistryId: 'providus_orgfarm_dev', expectedOrgId: orgId, environment: 'developer' }
   });
 }
@@ -548,12 +550,9 @@ function trustedTestContext(expectedOrgId) {
   };
 }
 
-function architectureReadyPlan() {
-  return {
+function architectureReadyPlan(orgId = ORG_A_ID) {
+  const core = {
     planVersion: 1,
-    planHash: 'plan-hash',
-    materialChangeHash: 'scope-hash',
-    scopeHash: 'scope-hash',
     requirement: 'Create a Flow',
     acceptanceCriteria: ['The approved behavior is observable.'],
     assumptions: [],
@@ -562,8 +561,23 @@ function architectureReadyPlan() {
     expectedBehavior: ['The approved behavior runs in the verified org.'],
     testingStrategy: ['Validate in the verified org.'],
     risks: [],
-    rollbackStrategy: 'Do not deploy the generated metadata.'
+    rollbackStrategy: 'Do not deploy the generated metadata.',
+    trustedBinding: { inspectionHash: 'inspection-hash', sourceOrgId: orgId }
   };
+  const hashes = architecturePlanHashes(core);
+  return { ...core, planHash: hashes.planHash, materialChangeHash: hashes.scopeHash, scopeHash: hashes.scopeHash };
+}
+
+function inspection(orgId = ORG_A_ID) {
+  return {
+    hash: 'inspection-hash',
+    sourceOrgId: orgId,
+    evidence: [{ evidenceId: 'evidence:relationship', kind: 'RELATIONSHIP', sourceOrgId: orgId, active: true, observedAt: '2026-08-12T00:00:00.000Z' }]
+  };
+}
+
+function approvalBody(job) {
+  return { planVersion: job.plan.planVersion, planHash: job.plan.planHash, scopeHash: job.plan.scopeHash };
 }
 
 function stableJobSnapshot(job) {

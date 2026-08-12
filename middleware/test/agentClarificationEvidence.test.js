@@ -67,6 +67,42 @@ test('direct planning records material clarification without source generation',
   assert.equal(updated.workItems.length, 0);
 });
 
+test('direct planning controlled failures leave planning with sanitized failed state', async (t) => {
+  for (const scenario of [
+    { name: 'model failure', modelRunner: async () => { throw Object.assign(new Error('raw model stack public class Secret {}'), { code: 'PLANNING_MODEL_FAILED' }); } },
+    { name: 'timeout', modelRunner: async () => { throw Object.assign(new Error('model timeout'), { code: 'PLANNING_MODEL_TIMEOUT' }); } },
+    { name: 'schema failure', modelRunner: async () => ({ ...plan(), fileOperations: [{ path: 'force-app/main/default/flows/Evil.flow-meta.xml', content: '<Flow/>' }] }) },
+    { name: 'unknown evidence', modelRunner: async () => ({ ...plan(), evidenceIds: ['evidence:missing'] }) }
+  ]) {
+    const jobId = `direct-failure-${scenario.name.replace(/\s+/g, '-')}-${Date.now()}`;
+    setDirectAnalysisDependenciesForTest({
+      inspectFlowRequirement: async () => inspection(),
+      architecturePlannerDependencies: { modelRunner: scenario.modelRunner }
+    });
+
+    await createJobRecord({
+      jobId,
+      userId: '005g5000009ImIkAAK',
+      orgId: '00Dg500000E07e9EAB',
+      source: 'salesforce-chat',
+      prompt: 'Create a recurring donation installment Flow.'
+    });
+    await updateJob(jobId, { orgContext: orgContext() });
+
+    const result = await processAgentJob({ jobId, action: 'understand', actor: '005g5000009ImIkAAK' });
+    const updated = await getJobRecord(jobId);
+
+    assert.equal(result.status, 'FAILED', scenario.name);
+    assert.equal(updated.status, 'FAILED', scenario.name);
+    assert.equal(updated.plan, null, scenario.name);
+    assert.equal(updated.commands.length, 0, scenario.name);
+    assert.equal(updated.approvals.length, 0, scenario.name);
+    assert.equal(JSON.stringify(updated).includes('<Flow'), false, scenario.name);
+    assert.equal(/public class|Secret|stack/i.test(updated.error), false, scenario.name);
+  }
+  t.after(() => setDirectAnalysisDependenciesForTest());
+});
+
 test('legacy Jira analysis remains isolated from direct architecture planner', async (t) => {
   const jobId = `jira-legacy-${Date.now()}`;
   let plannerCalled = false;
@@ -106,7 +142,8 @@ function orgContext() {
 function inspection() {
   return {
     hash: 'inspection-hash',
-    evidence: [{ evidenceId: 'evidence:relationship', kind: 'RELATIONSHIP', sourceOrgId: '00Dg500000E07e9EAB' }],
+    sourceOrgId: '00Dg500000E07e9EAB',
+    evidence: [{ evidenceId: 'evidence:relationship', kind: 'RELATIONSHIP', sourceOrgId: '00Dg500000E07e9EAB', active: true, observedAt: '2026-08-12T00:00:00.000Z' }],
     objects: [{ apiName: 'GiftTransaction' }],
     relationships: [{ objectApiName: 'GiftTransaction', fieldApiName: 'GiftCommitmentId', referenceTo: 'GiftCommitment' }],
     ambiguities: []

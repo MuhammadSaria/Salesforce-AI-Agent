@@ -4,6 +4,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { config } from '../src/config.js';
+import { architecturePlanHashes } from '../src/domain/architecturePlan.js';
 import { processAgentJob, setSameOrgResolverForTest } from '../src/services/agent.js';
 import { createJobRecord, getJobRecord, updateJob } from '../src/services/jobStore.js';
 
@@ -25,18 +26,8 @@ test('worker re-resolves direct Salesforce org context before validation executi
     prompt: 'Create a Flow'
   });
   await updateJob(jobId, {
+    ...implementationReadyPatch(),
     status: 'IMPLEMENTING',
-    plan: { planVersion: 1, planHash: 'plan-hash', materialChangeHash: 'material-hash', fileOperations: [], dataOperations: [] },
-    metadataScope: { hash: 'scope-hash' },
-    approvals: [{
-      approvalId: 'approval-1',
-      approvalType: 'IMPLEMENTATION',
-      decision: 'APPROVED',
-      planVersion: 1,
-      planHash: 'plan-hash',
-      metadataScopeHash: 'scope-hash',
-      salesforceOrganizationId: '00Dg500000E07e9EAB'
-    }],
     orgContext: { orgRegistryId: 'forged', expectedOrgId: '00D000000000BAD', environment: 'sandbox', verified: true },
     implementation: { sourceHash: 'source-hash', changedFiles: [], workspaceClean: true }
   });
@@ -303,17 +294,20 @@ test('worker same-org approval path persists trusted org context after approval 
 });
 
 function implementationReadyPatch(overrides = {}) {
+  const currentPlan = architecturePlan();
   return {
     status: 'IMPLEMENTING',
-    plan: { planVersion: 1, planHash: 'plan-hash', materialChangeHash: 'material-hash', fileOperations: [], dataOperations: [] },
-    metadataScope: { hash: 'scope-hash' },
-    approvals: [implementationApproval()],
+    inspection: inspection(),
+    plan: currentPlan,
+    metadataScope: { hash: currentPlan.scopeHash },
+    approvals: [implementationApproval({}, currentPlan)],
     orgContext: trustedContext('00Dg500000E07e9EAB'),
     ...overrides
   };
 }
 
 function deploymentReadyPatch(overrides = {}) {
+  const currentPlan = architecturePlan();
   return {
     ...implementationReadyPatch(),
     status: 'AWAITING_DEPLOYMENT_APPROVAL',
@@ -324,41 +318,69 @@ function deploymentReadyPatch(overrides = {}) {
       status: 'PASSED',
       sourceHash: 'source-hash',
       commitHash: 'commit-hash',
-      planHash: 'plan-hash',
-      metadataScopeHash: 'scope-hash',
+      planHash: currentPlan.planHash,
+      metadataScopeHash: currentPlan.scopeHash,
       packageHash: 'package-hash',
       expiryTimestamp: new Date(Date.now() + 60000).toISOString()
     },
-    approvals: [implementationApproval(), deploymentApproval()],
+    approvals: [implementationApproval({}, currentPlan), deploymentApproval({}, currentPlan)],
     ...overrides
   };
 }
 
-function implementationApproval(overrides = {}) {
+function implementationApproval(overrides = {}, currentPlan = architecturePlan()) {
   return {
     approvalId: 'approval-1',
     approvalType: 'IMPLEMENTATION',
     decision: 'APPROVED',
     planVersion: 1,
-    planHash: 'plan-hash',
-    metadataScopeHash: 'scope-hash',
+    planHash: currentPlan.planHash,
+    metadataScopeHash: currentPlan.scopeHash,
     salesforceOrganizationId: '00Dg500000E07e9EAB',
     ...overrides
   };
 }
 
-function deploymentApproval(overrides = {}) {
+function deploymentApproval(overrides = {}, currentPlan = architecturePlan()) {
   return {
     approvalId: 'approval-deploy-1',
     approvalType: 'DEPLOYMENT',
     decision: 'APPROVED',
-    planHash: 'plan-hash',
-    metadataScopeHash: 'scope-hash',
+    planHash: currentPlan.planHash,
+    metadataScopeHash: currentPlan.scopeHash,
     validationId: 'validation-1',
     validatedSourceHash: 'source-hash',
     deploymentPackageHash: 'package-hash',
     salesforceOrganizationId: '00Dg500000E07e9EAB',
     ...overrides
+  };
+}
+
+function architecturePlan() {
+  const core = {
+    planVersion: 1,
+    requirement: 'Create a recurring donation installment Flow.',
+    acceptanceCriteria: ['Only paid donations are numbered.'],
+    assumptions: [],
+    evidenceIds: ['evidence:relationship'],
+    components: [{ operation: 'modify', metadataType: 'Flow', apiName: 'Assign_Installment', owner: 'flow-specialist', reason: 'Implement the requested behavior.' }],
+    expectedBehavior: ['Paid donations are numbered.'],
+    testingStrategy: ['Validate the Flow in the verified sandbox.'],
+    risks: [],
+    rollbackStrategy: 'Disable generated metadata before deployment.',
+    trustedBinding: { inspectionHash: 'inspection-hash', sourceOrgId: '00Dg500000E07e9EAB' },
+    fileOperations: [],
+    dataOperations: []
+  };
+  const hashes = architecturePlanHashes(core);
+  return { ...core, planHash: hashes.planHash, scopeHash: hashes.scopeHash, materialChangeHash: hashes.scopeHash };
+}
+
+function inspection() {
+  return {
+    hash: 'inspection-hash',
+    sourceOrgId: '00Dg500000E07e9EAB',
+    evidence: [{ evidenceId: 'evidence:relationship', kind: 'RELATIONSHIP', sourceOrgId: '00Dg500000E07e9EAB', active: true, observedAt: '2026-08-12T00:00:00.000Z' }]
   };
 }
 

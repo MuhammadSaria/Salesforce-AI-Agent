@@ -11,7 +11,7 @@ import { ensureJobWorkspace, writeOrgContext } from './jobWorkspace.js';
 import { addJiraComment, getJiraIssue } from './jira.js';
 import { analyzeDependencies, buildMetadataScope, buildPlan, expandScopeForFileOperations, extractRequirement, writeManifest } from './planning.js';
 import { inspectFlowRequirement } from './orgInspectionService.js';
-import { createArchitecturePlan } from './architecturePlanner.js';
+import { createArchitecturePlan, createProductionArchitecturePlannerDependencies } from './architecturePlanner.js';
 import { runSfCommand, verifySelectedOrg } from './sfExecutor.js';
 import { resolveSameOrg } from './sameOrgService.js';
 import { runGit } from './gitExecutor.js';
@@ -27,7 +27,8 @@ import { sameSalesforceId } from '../utils/salesforceId.js';
 let sameOrgResolver = resolveSameOrg;
 let directAnalysisDependencies = {
   inspectFlowRequirement,
-  createArchitecturePlan
+  createArchitecturePlan,
+  architecturePlannerDependencies: createProductionArchitecturePlannerDependencies()
 };
 
 export function setSameOrgResolverForTest(resolver) {
@@ -37,7 +38,8 @@ export function setSameOrgResolverForTest(resolver) {
 export function setDirectAnalysisDependenciesForTest(dependencies = null) {
   directAnalysisDependencies = {
     inspectFlowRequirement: dependencies?.inspectFlowRequirement || inspectFlowRequirement,
-    createArchitecturePlan: dependencies?.createArchitecturePlan || createArchitecturePlan
+    createArchitecturePlan: dependencies?.createArchitecturePlan || createArchitecturePlan,
+    architecturePlannerDependencies: dependencies?.architecturePlannerDependencies || createProductionArchitecturePlannerDependencies(dependencies || {})
   };
 }
 
@@ -394,8 +396,9 @@ async function analyzeDirectSalesforceChat(job, actor) {
     let architecturePlan = await directAnalysisDependencies.createArchitecturePlan({
       requirement,
       inspection,
+      orgContext,
       answers: (job.conversation || []).filter((entry) => entry.role === 'user').map((entry) => entry.text)
-    });
+    }, directAnalysisDependencies.architecturePlannerDependencies);
     const planVersion = Number(job.nextPlanVersion || job.iteration || 1);
     architecturePlan = {
       ...architecturePlan,
@@ -417,11 +420,41 @@ async function analyzeDirectSalesforceChat(job, actor) {
     return { jobId: job.jobId, status: JOB_STATES.AWAITING_IMPLEMENTATION_APPROVAL };
   } catch (error) {
     if (error.code === 'MATERIAL_CLARIFICATION_REQUIRED') {
-      await transitionJob(job.jobId, JOB_STATES.AWAITING_CLARIFICATION, { actor, reason: error.message, error: error.message });
+      const message = sanitizedPlanningError(error, 'Clarification is required before planning can continue.');
+      await transitionJob(job.jobId, JOB_STATES.AWAITING_CLARIFICATION, { actor, reason: message, error: message });
       return { jobId: job.jobId, status: JOB_STATES.AWAITING_CLARIFICATION, clarificationRequired: true };
+    }
+    if (isControlledPlanningFailure(error)) {
+      const message = sanitizedPlanningError(error, 'Architecture planning could not be completed. Review the request and try again.');
+      await transitionJob(job.jobId, JOB_STATES.FAILED, { actor, reason: message, error: message });
+      return { jobId: job.jobId, status: JOB_STATES.FAILED };
     }
     throw error;
   }
+}
+
+function isControlledPlanningFailure(error) {
+  return [
+    'PLANNING_MODEL_UNAVAILABLE',
+    'PLANNING_MODEL_FAILED',
+    'PLANNING_MODEL_TIMEOUT',
+    'PLANNING_MODEL_MALFORMED_OUTPUT',
+    'ARCHITECTURE_PLAN_SCHEMA_INVALID',
+    'UNKNOWN_INSPECTION_EVIDENCE',
+    'DUPLICATED_INSPECTION_EVIDENCE',
+    'STALE_INSPECTION_EVIDENCE',
+    'EVIDENCE_ORG_MISMATCH',
+    'INSPECTION_ORG_MISMATCH',
+    'INSPECTION_EVIDENCE_REQUIRED',
+    'INSPECTION_HASH_REQUIRED',
+    'VERIFIED_ORG_REQUIRED'
+  ].includes(error?.code);
+}
+
+function sanitizedPlanningError(error, fallback) {
+  const message = String(error?.message || fallback).replace(/\s+/g, ' ').trim();
+  if (/<[A-Za-z]|\b(?:token|secret|password|stack|prompt|public class|function|sf project|git commit)\b/i.test(message)) return fallback;
+  return message.slice(0, 500) || fallback;
 }
 
 async function transitionForDirectPlanning(job, state, actor, reason) {

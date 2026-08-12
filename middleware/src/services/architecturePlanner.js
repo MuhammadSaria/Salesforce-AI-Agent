@@ -1,61 +1,74 @@
 import { architecturePlanHashes, parseArchitecturePlan } from '../domain/architecturePlan.js';
+import { enrichPlanWithModel } from './modelExecutor.js';
+import { sameSalesforceId } from '../utils/salesforceId.js';
 
-export async function createArchitecturePlan({ requirement, inspection, answers = [] }, dependencies = {}) {
-  assertVerifiedInspectionEvidence(inspection);
+export function createProductionArchitecturePlannerDependencies(overrides = {}) {
+  const modelExecutor = overrides.modelExecutor || enrichPlanWithModel;
+  return {
+    modelRunner: async ({ requirement, inspection, answers, orgContext }) => modelExecutor({
+      requirement,
+      inspection,
+      answers,
+      orgContext
+    })
+  };
+}
+
+export async function createArchitecturePlan({ requirement, inspection, orgContext, answers = [] }, dependencies = {}) {
+  const verifiedOrgId = verifiedOrgIdFor(orgContext);
+  assertVerifiedInspectionEvidence(inspection, verifiedOrgId);
   assertNoMaterialAmbiguity(inspection);
   assertPaidStatusVerified(requirement, inspection, answers);
 
-  const draft = dependencies.modelRunner
-    ? await dependencies.modelRunner({ requirement, inspection: plannerInspectionView(inspection), answers })
-    : deterministicPlan({ requirement, inspection, answers });
-  const plan = parseArchitecturePlan(draft);
-  assertEvidenceIdsExist(plan.evidenceIds, inspection);
-  const hashes = architecturePlanHashes(plan);
+  if (!dependencies.modelRunner) {
+    throw controlledPlanningError('PLANNING_MODEL_UNAVAILABLE', 'Architecture planning requires the configured model executor.');
+  }
+  let draft;
+  try {
+    draft = await dependencies.modelRunner({ requirement, inspection: plannerInspectionView(inspection), answers, orgContext });
+  } catch (error) {
+    throw controlledPlanningError(error.code || 'PLANNING_MODEL_FAILED', 'Architecture planning could not be completed with the configured model executor.');
+  }
+  const plan = parsePlanClosed(draft);
+  assertEvidenceIdsExist(plan.evidenceIds, inspection, verifiedOrgId);
+  const trustedBinding = {
+    inspectionHash: String(inspection.hash || ''),
+    sourceOrgId: verifiedOrgId
+  };
+  const hashes = architecturePlanHashes({ ...plan, trustedBinding });
   return {
     ...plan,
+    trustedBinding,
     planHash: hashes.planHash,
     scopeHash: hashes.scopeHash,
     materialChangeHash: hashes.scopeHash
   };
 }
 
-function deterministicPlan({ requirement, inspection }) {
-  const requirementText = requirementTextFor(requirement);
-  const evidenceIds = inspection.evidence.map((item) => item.evidenceId).sort();
-  const components = deterministicComponents(inspection);
-  return {
-    requirement: requirementText,
-    acceptanceCriteria: normalizedCriteria(requirement),
-    assumptions: [],
-    evidenceIds,
-    components,
-    expectedBehavior: ['The verified Salesforce org implements the requested behavior using only approved component intents.'],
-    testingStrategy: ['Validate the approved component behavior in the same verified Salesforce org before deployment approval.'],
-    risks: risksFor(requirementText),
-    rollbackStrategy: 'Withdraw implementation approval or remove generated metadata before deployment; after deployment, use the separately approved rollback process.'
-  };
-}
-
-function deterministicComponents(inspection) {
-  const components = [];
-  for (const field of inspection.fields || []) {
-    components.push({ operation: 'modify', metadataType: 'CustomField', apiName: field.objectApiName ? `${field.objectApiName}.${field.apiName}` : field.apiName, owner: 'object-field-specialist', reason: 'Use verified field behavior in the approved design.' });
-  }
-  for (const permissionSet of inspection.permissionSets || []) {
-    components.push({ operation: 'modify', metadataType: 'PermissionSet', apiName: permissionSet.apiName, owner: 'security-specialist', reason: 'Grant only approved access required by the behavior.' });
-  }
-  const flowName = (inspection.flows || []).find((flow) => flow.apiName)?.apiName || 'Providus_Nexus_Requested_Flow';
-  components.push({ operation: (inspection.flows || []).length ? 'modify' : 'create', metadataType: 'Flow', apiName: flowName, owner: 'flow-specialist', reason: 'Implement the requested automation behavior after approval.' });
-  return components.sort((left, right) => `${left.metadataType}:${left.apiName}`.localeCompare(`${right.metadataType}:${right.apiName}`));
-}
-
-function assertVerifiedInspectionEvidence(inspection) {
+function assertVerifiedInspectionEvidence(inspection, verifiedOrgId) {
   if (!inspection || !Array.isArray(inspection.evidence) || inspection.evidence.length === 0) {
     throw Object.assign(new Error('Verified inspection evidence is required for architecture planning.'), { code: 'INSPECTION_EVIDENCE_REQUIRED', statusCode: 409 });
   }
+  if (!inspection.hash) {
+    throw Object.assign(new Error('Verified inspection hash is required for architecture planning.'), { code: 'INSPECTION_HASH_REQUIRED', statusCode: 409 });
+  }
+  if (!sameSalesforceId(inspection.sourceOrgId, verifiedOrgId)) {
+    throw Object.assign(new Error('Inspection evidence must come from the authenticated verified Salesforce org.'), { code: 'INSPECTION_ORG_MISMATCH', statusCode: 409 });
+  }
+  const seen = new Set();
   for (const item of inspection.evidence) {
     if (!item?.evidenceId || !item.kind || !item.sourceOrgId) {
       throw Object.assign(new Error('Verified inspection evidence is required for architecture planning.'), { code: 'INSPECTION_EVIDENCE_REQUIRED', statusCode: 409 });
+    }
+    if (seen.has(item.evidenceId)) {
+      throw Object.assign(new Error('Inspection evidence contains duplicate evidence IDs.'), { code: 'DUPLICATED_INSPECTION_EVIDENCE', statusCode: 409 });
+    }
+    seen.add(item.evidenceId);
+    if (item.stale === true || item.active === false) {
+      throw Object.assign(new Error('Inspection evidence must be active and current.'), { code: 'STALE_INSPECTION_EVIDENCE', statusCode: 409 });
+    }
+    if (!sameSalesforceId(item.sourceOrgId, verifiedOrgId)) {
+      throw Object.assign(new Error('Inspection evidence must match the authenticated verified Salesforce org.'), { code: 'EVIDENCE_ORG_MISMATCH', statusCode: 409 });
     }
   }
 }
@@ -72,23 +85,80 @@ function assertNoMaterialAmbiguity(inspection) {
 }
 
 function assertPaidStatusVerified(requirement, inspection, answers) {
-  const text = `${requirementTextFor(requirement)} ${(answers || []).join(' ')}`;
-  if (!/\b(paid|completed)\b/i.test(text)) return;
-  const statusValues = new Set((inspection.evidence || [])
-    .filter((item) => item.kind === 'STATUS_VALUE')
-    .map((item) => String(item.value || '').toLowerCase()));
-  if (!statusValues.has('paid') && !statusValues.has('completed')) {
-    throw Object.assign(new Error('Confirm the verified paid or completed status before planning source changes.'), {
-      code: 'MATERIAL_CLARIFICATION_REQUIRED',
+  const requirementText = requirementTextFor(requirement);
+  const answerText = (answers || []).join(' ');
+  const requirementMentionsPaid = /\bpaid\b/i.test(requirementText);
+  const requirementMentionsCompleted = /\bcompleted\b/i.test(requirementText);
+  const answerMentionsPaid = /\bpaid\b/i.test(answerText);
+  const answerMentionsCompleted = /\bcompleted\b/i.test(answerText);
+  if (requirementMentionsPaid && requirementMentionsCompleted && !answerMentionsPaid && !answerMentionsCompleted) {
+    throw clarificationRequired('Confirm whether Paid or Completed is the verified qualifying status before planning.');
+  }
+  if (answerMentionsPaid && answerMentionsCompleted) {
+    throw clarificationRequired('Choose one verified active qualifying status before planning.');
+  }
+  const requiredStatus = answerMentionsPaid ? 'paid'
+    : answerMentionsCompleted ? 'completed'
+      : requirementMentionsPaid && !requirementMentionsCompleted ? 'paid'
+        : requirementMentionsCompleted && !requirementMentionsPaid ? 'completed'
+          : '';
+  if (!requiredStatus && (requirementMentionsPaid || requirementMentionsCompleted)) {
+    throw clarificationRequired('Confirm the verified qualifying status before planning.');
+  }
+  if (!requiredStatus) return;
+  const matching = (inspection.evidence || [])
+    .filter((item) => item.kind === 'STATUS_VALUE' && String(item.value || '').toLowerCase() === requiredStatus && item.active !== false && item.stale !== true);
+  if (matching.length !== 1) {
+    throw clarificationRequired(`Confirm the verified active ${requiredStatus} status before planning source changes.`);
+  }
+}
+
+function clarificationRequired(message) {
+  return Object.assign(new Error(message), {
+    code: 'MATERIAL_CLARIFICATION_REQUIRED',
+    statusCode: 409
+  });
+}
+
+function assertEvidenceIdsExist(evidenceIds, inspection, verifiedOrgId) {
+  const known = new Map(inspection.evidence.map((item) => [item.evidenceId, item]));
+  const used = new Set();
+  for (const id of evidenceIds) {
+    if (used.has(id)) throw Object.assign(new Error(`Architecture plan references duplicated inspection evidence: ${id}`), { code: 'DUPLICATED_INSPECTION_EVIDENCE', statusCode: 409 });
+    used.add(id);
+    const evidence = known.get(id);
+    if (!evidence) throw Object.assign(new Error(`Architecture plan references unknown inspection evidence: ${id}`), { code: 'UNKNOWN_INSPECTION_EVIDENCE', statusCode: 409 });
+    if (!sameSalesforceId(evidence.sourceOrgId, verifiedOrgId)) {
+      throw Object.assign(new Error('Architecture plan references evidence from a different Salesforce org.'), { code: 'EVIDENCE_ORG_MISMATCH', statusCode: 409 });
+    }
+    if (evidence.stale === true || evidence.active === false) {
+      throw Object.assign(new Error('Architecture plan references stale inspection evidence.'), { code: 'STALE_INSPECTION_EVIDENCE', statusCode: 409 });
+    }
+  }
+}
+
+function parsePlanClosed(draft) {
+  try {
+    return parseArchitecturePlan(draft);
+  } catch {
+    throw Object.assign(new Error('Architecture planning returned an invalid source-free plan.'), {
+      code: 'ARCHITECTURE_PLAN_SCHEMA_INVALID',
       statusCode: 409
     });
   }
 }
 
-function assertEvidenceIdsExist(evidenceIds, inspection) {
-  const known = new Set(inspection.evidence.map((item) => item.evidenceId));
-  const unknown = evidenceIds.filter((id) => !known.has(id));
-  if (unknown.length) throw Object.assign(new Error(`Architecture plan references unknown inspection evidence: ${unknown.join(', ')}`), { code: 'UNKNOWN_INSPECTION_EVIDENCE', statusCode: 409 });
+function controlledPlanningError(code, message) {
+  return Object.assign(new Error(message), { code, statusCode: 409 });
+}
+
+function verifiedOrgIdFor(orgContext) {
+  const expected = orgContext?.expectedOrgId;
+  const verified = orgContext?.verified?.organizationId || expected;
+  if (!expected || !sameSalesforceId(expected, verified)) {
+    throw Object.assign(new Error('A verified Salesforce org context is required for architecture planning.'), { code: 'VERIFIED_ORG_REQUIRED', statusCode: 409 });
+  }
+  return expected;
 }
 
 function plannerInspectionView(inspection) {
@@ -107,19 +177,6 @@ function plannerInspectionView(inspection) {
   };
 }
 
-function normalizedCriteria(requirement) {
-  const criteria = Array.isArray(requirement?.acceptanceCriteria) ? requirement.acceptanceCriteria.filter(Boolean) : [];
-  return criteria.length ? criteria : ['The approved behavior is observable in the verified Salesforce org.'];
-}
-
 function requirementTextFor(requirement) {
   return String(requirement?.businessRequirement || requirement?.summary || requirement || '').trim();
 }
-
-function risksFor(requirementText) {
-  if (/\b(sequence|sequential|number)\b/i.test(requirementText)) {
-    return ['Concurrent completed donations can require a locking-capable design to guarantee strict uniqueness.'];
-  }
-  return [];
-}
-

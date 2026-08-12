@@ -102,6 +102,16 @@ export async function updateJob(jobId, patch) {
   });
 }
 
+export async function updateJobAtomically(jobId, operation) {
+  return withJobLock(jobId, async () => {
+    const record = await requiredJob(jobId);
+    const result = await operation(record);
+    record.updatedAt = new Date().toISOString();
+    await save(record);
+    return result ?? record;
+  });
+}
+
 export async function transitionJob(jobId, newState, details = {}) {
   return withJobLock(jobId, async () => {
     const record = await requiredJob(jobId);
@@ -369,7 +379,19 @@ async function writeSnapshot(record) {
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   await mkdir(directory, { recursive: true });
   await writeFile(temporary, JSON.stringify(record, null, 2), { encoding: 'utf8', mode: 0o600 });
-  await rename(temporary, path);
+  await renameWithRetry(temporary, path);
+}
+
+async function renameWithRetry(source, destination) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      await rename(source, destination);
+      return;
+    } catch (error) {
+      if (!['EPERM', 'EBUSY'].includes(error.code) || attempt === 19) throw error;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 50 * (attempt + 1)));
+    }
+  }
 }
 
 async function ensureSnapshot(record) {
