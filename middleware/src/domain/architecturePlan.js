@@ -62,6 +62,8 @@ const sourceTerms = [
   /\bsfdx\s+[A-Za-z]/i,
   /\bgit\s+(?:add|commit|push|checkout|reset|clean|worktree|rm|mv|switch|merge|rebase|pull)\b/i,
   /\bnpm(?:\.cmd)?\s+(?:run|install|test|exec|start)\b/i,
+  /\bpowershell\s+-/i,
+  /\bpwd\b/i,
   /\b(?:rm|del|copy|move|mkdir|cat|curl|wget)\s+[-./\\\w]/i,
   /(?:^|[\s'"])(?:force-app|src|classes|triggers|lwc|aura|objects|flows)[/\\][^\s'"]+/i,
   /\b[A-Za-z]:\\[^\s'"]+/,
@@ -93,8 +95,12 @@ function decodeSuspicious(value) {
   const variants = [value];
   try { variants.push(decodeURIComponent(value)); } catch {}
   variants.push(value.replace(/\\u([0-9a-fA-F]{4})/g, (_, code) => String.fromCharCode(Number.parseInt(code, 16))));
-  for (const token of value.match(/\b[A-Za-z0-9+/]{24,}={0,2}\b/g) || []) {
-    try { variants.push(Buffer.from(token, 'base64').toString('utf8')); } catch {}
+  for (const token of value.match(/\b[A-Za-z0-9+/]{4,256}={0,2}(?=\b|$)/g) || []) {
+    if (token.length % 4 !== 0) continue;
+    try {
+      const decoded = Buffer.from(token, 'base64').toString('utf8');
+      if (/^[\x09\x0a\x0d\x20-\x7e]{2,256}$/.test(decoded)) variants.push(decoded);
+    } catch {}
   }
   return variants.join('\n');
 }

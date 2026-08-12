@@ -171,6 +171,80 @@ test('PostgreSQL dispatch claims are idempotent under duplicate delivery attempt
   }
 });
 
+test('migration 002 upgrades a database that already recorded released 001', async () => {
+  const pool = createTestPostgresPool();
+
+  try {
+    await resetPostgresSchema(pool);
+    await applyReleased001(pool);
+    await pool.query(`INSERT INTO schema_migrations (filename) VALUES ('001_phase1_jobs.sql')`);
+
+    await migrate(pool);
+
+    const dispatchTable = await pool.query(`SELECT to_regclass('public.job_dispatches') AS table_name`);
+    const indexes = await pool.query(`
+      SELECT indexname
+      FROM pg_indexes
+      WHERE schemaname = 'public' AND tablename = 'job_dispatches'
+      ORDER BY indexname
+    `);
+    const migrations = await pool.query('SELECT filename FROM schema_migrations ORDER BY filename');
+
+    assert.equal(dispatchTable.rows[0].table_name, 'job_dispatches');
+    assert.deepEqual(migrations.rows.map((row) => row.filename), ['001_phase1_jobs.sql', '002_task6_job_dispatches.sql']);
+    assert.ok(indexes.rows.some((row) => row.indexname === 'job_dispatches_claimable_idx'));
+    assert.ok(indexes.rows.some((row) => row.indexname === 'job_dispatches_job_id_created_at_idx'));
+
+    await migrate(pool);
+    const repeated = await pool.query('SELECT filename, count(*)::int AS count FROM schema_migrations GROUP BY filename ORDER BY filename');
+    assert.deepEqual(repeated.rows, [
+      { filename: '001_phase1_jobs.sql', count: 1 },
+      { filename: '002_task6_job_dispatches.sql', count: 1 }
+    ]);
+  } finally {
+    await pool.end();
+  }
+});
+
+test('dispatch leases recover after crash and are not reclaimed once delivered', async () => {
+  const pool = createTestPostgresPool();
+
+  try {
+    await resetPostgresSchema(pool);
+    await migrate(pool);
+
+    const repository = createJobRepository({ pool, dispatchLeaseMs: 200, workerId: 'worker-a' });
+    await repository.createJob({ jobId: 'job-lease', userId: '005-user', orgId: '00D-org', prompt: 'Create a Flow' });
+    await repository.savePlan('job-lease', { version: 1, planHash: 'plan-hash', scopeHash: 'scope-hash', body: {} });
+    await repository.approveImplementationAndDispatch('job-lease', {
+      approvalId: 'a-lease',
+      actorId: '005-admin',
+      planHash: 'plan-hash',
+      scopeHash: 'scope-hash',
+      dispatchKey: 'job-lease:implement:v1:plan-hash:005-admin'
+    });
+
+    const first = await repository.claimNextDispatch();
+    assert.equal(first.dispatchKey, 'job-lease:implement:v1:plan-hash:005-admin');
+    assert.equal(first.status, 'DISPATCHING');
+    assert.equal(first.claimantId, 'worker-a');
+    assert.equal(first.attempts, 1);
+    assert.equal(await createJobRepository({ pool, workerId: 'worker-b' }).claimNextDispatch(), null);
+
+    await new Promise((resolve) => setTimeout(resolve, 240));
+    const reclaimer = createJobRepository({ pool, dispatchLeaseMs: 1000, workerId: 'worker-b' });
+    const reclaimed = await reclaimer.claimNextDispatch();
+    assert.equal(reclaimed.dispatchKey, first.dispatchKey);
+    assert.equal(reclaimed.claimantId, 'worker-b');
+    assert.equal(reclaimed.attempts, 2);
+
+    await reclaimer.markDispatchDispatched(reclaimed.dispatchKey);
+    assert.equal(await createJobRepository({ pool, workerId: 'worker-c' }).claimNextDispatch(), null);
+  } finally {
+    await pool.end();
+  }
+});
+
 test('hydrates a job through one repeatable-read transaction', async () => {
   const queries = [];
   const client = {
@@ -224,7 +298,10 @@ test('serializes concurrent migration runners and records each filename once', a
        ORDER BY filename`
     );
 
-    assert.deepEqual(result.rows, [{ filename: '001_phase1_jobs.sql', count: 1 }]);
+    assert.deepEqual(result.rows, [
+      { filename: '001_phase1_jobs.sql', count: 1 },
+      { filename: '002_task6_job_dispatches.sql', count: 1 }
+    ]);
   } finally {
     await pool.end();
   }
@@ -239,7 +316,7 @@ test('migration execution is idempotent after the first successful run', async (
     await migrate(pool);
 
     const result = await pool.query('SELECT count(*)::int AS count FROM schema_migrations');
-    assert.equal(result.rows[0].count, 1);
+    assert.equal(result.rows[0].count, 2);
   } finally {
     await pool.end();
   }
@@ -247,4 +324,76 @@ test('migration execution is idempotent after the first successful run', async (
 
 function normalizeSql(sql) {
   return sql.trim().replace(/\s+/g, ' ');
+}
+
+async function applyReleased001(pool) {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      filename text PRIMARY KEY,
+      applied_at timestamptz NOT NULL DEFAULT now()
+    );
+
+    CREATE TABLE IF NOT EXISTS development_jobs (
+      job_id text PRIMARY KEY,
+      user_id text NOT NULL,
+      org_id text NOT NULL,
+      prompt text NOT NULL,
+      status text NOT NULL,
+      current_plan_version integer NOT NULL DEFAULT 0,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    );
+
+    CREATE TABLE IF NOT EXISTS job_messages (
+      message_id text PRIMARY KEY,
+      job_id text NOT NULL REFERENCES development_jobs(job_id) ON DELETE RESTRICT,
+      role text NOT NULL,
+      kind text NOT NULL,
+      text text NOT NULL,
+      body jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+
+    CREATE TABLE IF NOT EXISTS job_plans (
+      plan_id bigserial PRIMARY KEY,
+      job_id text NOT NULL REFERENCES development_jobs(job_id) ON DELETE RESTRICT,
+      version integer NOT NULL,
+      plan_hash text NOT NULL,
+      scope_hash text NOT NULL,
+      body jsonb NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      UNIQUE (job_id, version)
+    );
+
+    CREATE TABLE IF NOT EXISTS job_approvals (
+      approval_id text PRIMARY KEY,
+      job_id text NOT NULL REFERENCES development_jobs(job_id) ON DELETE RESTRICT,
+      approval_type text NOT NULL,
+      decision text NOT NULL,
+      actor_id text NOT NULL,
+      plan_hash text NOT NULL,
+      scope_hash text NOT NULL,
+      body jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+
+    CREATE TABLE IF NOT EXISTS job_events (
+      event_id bigserial PRIMARY KEY,
+      job_id text NOT NULL REFERENCES development_jobs(job_id) ON DELETE RESTRICT,
+      event_type text NOT NULL,
+      actor_id text NOT NULL DEFAULT 'system',
+      body jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+
+    CREATE TABLE IF NOT EXISTS component_locks (
+      lock_id text PRIMARY KEY,
+      job_id text NOT NULL REFERENCES development_jobs(job_id) ON DELETE RESTRICT,
+      component_key text NOT NULL,
+      lease_expires_at timestamptz NOT NULL,
+      released_at timestamptz,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    );
+  `);
 }

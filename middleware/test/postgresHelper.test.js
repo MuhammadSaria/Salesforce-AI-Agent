@@ -39,10 +39,13 @@ test('accepts cleanup only when the pool is connected to the expected test datab
   process.env.TEST_DATABASE_URL = 'postgres://providus:providus@127.0.0.1:5432/providus_nexus_test';
   const queries = [];
   const pool = {
-    async query(sql) {
+    async query(sql, params = []) {
       queries.push(normalizeSql(sql));
       if (sql === 'SELECT current_database() AS database_name') {
         return { rows: [{ database_name: 'providus_nexus_test' }] };
+      }
+      if (sql === 'SELECT to_regclass($1) AS table_name') {
+        return { rows: [{ table_name: params[0]?.endsWith('component_locks') ? 'component_locks' : null }] };
       }
       return { rows: [] };
     }
@@ -51,7 +54,7 @@ test('accepts cleanup only when the pool is connected to the expected test datab
   try {
     await resetPostgresSchema(pool);
     assert.equal(queries[0], 'SELECT current_database() AS database_name');
-    assert.ok(queries.some((query) => query.includes('DELETE FROM component_locks')));
+    assert.ok(queries.some((query) => query.includes('TRUNCATE TABLE component_locks RESTART IDENTITY CASCADE')));
   } finally {
     if (originalTestDatabaseUrl === undefined) delete process.env.TEST_DATABASE_URL;
     else process.env.TEST_DATABASE_URL = originalTestDatabaseUrl;

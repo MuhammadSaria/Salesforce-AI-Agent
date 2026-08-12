@@ -380,7 +380,9 @@ function validApproval(job, type, options = {}) {
 
 async function analyzeDirectSalesforceChat(job, actor) {
   if (!job.orgId && !job.orgContext) return { jobId: job.jobId, status: job.status };
-  const orgContext = job.orgContext || await sameOrgResolver({ authenticatedOrgId: job.orgId, actorId: actor });
+  const orgContext = job.source === 'salesforce-chat'
+    ? await sameOrgResolver({ authenticatedOrgId: job.orgId || job.orgContext?.expectedOrgId, actorId: actor })
+    : job.orgContext;
   if (!orgContext?.verified) return { jobId: job.jobId, status: job.status };
   const requirement = directRequirement(job);
   await transitionForDirectPlanning(job, JOB_STATES.UNDERSTANDING, actor, 'Understanding direct Salesforce requirement.');
@@ -498,7 +500,7 @@ async function transitionForDirectPlanning(job, state, actor, reason) {
 
 function directRequirement(job) {
   const messages = (job.conversation || [])
-    .filter((entry) => entry.role === 'user')
+    .filter((entry) => entry.role === 'user' && entry.kind !== 'clarification-response')
     .map((entry) => entry.text)
     .filter(Boolean);
   const prompt = String(job.prompt || messages[0] || '').trim();

@@ -5,7 +5,14 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { config } from '../src/config.js';
 import { createApp } from '../src/server.js';
+import { ARCHITECTURE_PLAN_SCHEMA } from '../src/domain/architecturePlan.js';
+import { canonicalInspectionHash } from '../src/domain/inspection.js';
+import { processAgentJob, setDirectAnalysisDependenciesForTest, setSameOrgResolverForTest } from '../src/services/agent.js';
+import { trustOrgContext } from '../src/services/orgContextTrust.js';
 import { createJobRecord, getJobRecord, updateJob } from '../src/services/jobStore.js';
+import { inspectFlowRequirement } from '../src/services/orgInspectionService.js';
+import { createTestPostgresPool } from './helpers/postgres.js';
+import { migrate } from '../src/persistence/migrate.js';
 
 const promptRequired = {
   error: {
@@ -234,6 +241,101 @@ test('Salesforce chat messages still append when Jira is disabled', async (t) =>
   assert.equal(after.status, before.status);
 });
 
+test('Salesforce chat clarification is bound by HTTP endpoint and replans with only that response', async (t) => {
+  config.apiAuthToken = 'unit-test-token';
+  const queued = [];
+  const plannerCalls = [];
+  setDirectAnalysisDependenciesForTest({
+    inspectFlowRequirement: (input) => inspectFlowRequirement(input, { sf: clarificationSf(), clock: fixedClock, maxComponents: 8, maxObjects: 2 }),
+    architecturePlannerDependencies: {
+      clock: fixedClock,
+      modelRunner: async (input) => {
+        plannerCalls.push(input);
+        return sourceFreePlan();
+      }
+    }
+  });
+  setSameOrgResolverForTest(async ({ authenticatedOrgId }) => trustedContext(authenticatedOrgId));
+  const { base, close } = await testServer(t, {
+    apiAuthToken: 'unit-test-token',
+    resolveSameOrg: async ({ authenticatedOrgId }) => trustedContext(authenticatedOrgId),
+    enqueue: async (message, options) => queued.push({ message, options })
+  });
+  t.after(() => {
+    setDirectAnalysisDependenciesForTest();
+    setSameOrgResolverForTest();
+    close();
+  });
+
+  const created = await postJson(`${base}/api/jobs`, {
+    prompt: 'When a Donation becomes Paid or Completed, number it.'
+  }, salesforceChatHeaders('005g5000009ImIkAAK'));
+  assert.equal(created.status, 201);
+
+  await processAgentJob(queued.shift().message);
+  let job = await getJobRecord(created.body.jobId);
+  assert.equal(job.status, 'AWAITING_CLARIFICATION');
+  assert.equal(job.clarifications.length, 1);
+  assert.equal(job.conversation.filter((entry) => entry.kind === 'clarification-response').length, 0);
+
+  const response = await postJson(`${base}/api/jobs/${created.body.jobId}/messages`, {
+    text: 'Paid',
+    ambiguityId: 'attacker-controlled',
+    responseToInspectionHash: 'attacker-controlled',
+    responseToPlanVersion: 999,
+    orgId: '00Dg500000E07fAEAR'
+  }, salesforceChatHeaders('005g5000009ImIkAAK'));
+
+  assert.equal(response.status, 202);
+  job = await getJobRecord(created.body.jobId);
+  const clarification = job.conversation.at(-1);
+  assert.equal(clarification.kind, 'clarification-response');
+  assert.equal(clarification.text, 'Paid');
+  assert.equal(clarification.ambiguityId, job.clarifications[0].ambiguityId);
+  assert.equal(clarification.responseToInspectionHash, job.inspection.hash);
+  assert.equal(clarification.responseToInspectionHash, canonicalInspectionHash(job.inspection));
+  assert.equal(clarification.responseToPlanVersion, job.iteration);
+  assert.equal(clarification.actor, '005g5000009ImIkAAK');
+  assert.equal(queued.length, 1);
+
+  await processAgentJob(queued.shift().message);
+  job = await getJobRecord(created.body.jobId);
+  assert.equal(job.status, 'AWAITING_IMPLEMENTATION_APPROVAL');
+  assert.deepEqual(plannerCalls.at(-1).answers, [{
+    ambiguityId: 'material:status-values',
+    text: 'Paid',
+    inspectionHash: job.inspection.hash,
+    planVersion: job.iteration
+  }]);
+  assert.equal(job.requirement.businessRequirement.includes('Paid\nPaid'), false);
+  assert.equal(job.requirement.acceptanceCriteria.includes('Paid'), false);
+});
+
+test('production PostgreSQL repository wiring persists API jobs outside legacy memory store', async (t) => {
+  const pool = createTestPostgresPool();
+  await migrate(pool);
+  t.after(() => pool.end());
+
+  const { base, close } = await testServer(t, {
+    pool,
+    enqueue: async () => {}
+  });
+  t.after(close);
+
+  const created = await postJson(`${base}/api/jobs`, {
+    prompt: 'Create a validation rule'
+  }, viewerHeaders('005-postgres-owner'));
+  assert.equal(created.status, 201);
+
+  const durable = await pool.query('SELECT job_id, record FROM development_jobs WHERE job_id = $1', [created.body.jobId]);
+  assert.equal(durable.rowCount, 1);
+  assert.equal(durable.rows[0].record.prompt, 'Create a validation rule');
+
+  const read = await getJson(`${base}/api/jobs/${created.body.jobId}`, viewerHeaders('005-postgres-owner'));
+  assert.equal(read.status, 200);
+  assert.equal(read.body.jobId, created.body.jobId);
+});
+
 test('Jira-source messages still append when Jira is enabled', async (t) => {
   config.jiraEnabled = true;
   const { base, close } = await testServer(t);
@@ -405,6 +507,18 @@ function deployerHeaders(userId) {
   };
 }
 
+function salesforceChatHeaders(userId) {
+  return {
+    Authorization: 'Bearer unit-test-token',
+    'X-Agent-User-Id': userId,
+    'X-Agent-Source': 'Salesforce-Apex',
+    'X-Agent-Org-Id': '00Dg500000E07e9EAB',
+    'X-Agent-Can-Implement': 'false',
+    'X-Agent-Can-Deploy': 'false',
+    'Content-Type': 'application/json'
+  };
+}
+
 async function postJson(url, body, headers) {
   const response = await fetch(url, {
     method: 'POST',
@@ -483,11 +597,80 @@ function sideEffectSnapshot(job, queueCalls) {
 }
 
 function trustedContext(expectedOrgId) {
-  return {
+  return trustOrgContext({
     orgRegistryId: 'providus_orgfarm_dev',
+    salesforceAlias: 'orgfarm-dev',
     expectedOrgId,
     environment: 'developer',
     deploymentPermission: 'allowed',
-    allowedOperations: ['read', 'retrieve', 'validate', 'deploy']
+    allowedOperations: ['read', 'retrieve', 'validate', 'deploy'],
+    verified: { organizationId: expectedOrgId, verifiedAt: fixedClock().toISOString() }
+  });
+}
+
+function clarificationSf() {
+  return {
+    async query(request) {
+      if (request.operationId === 'object-candidates') {
+        return jsonResult([
+          { DurableId: 'GiftCommitment', QualifiedApiName: 'GiftCommitment', Label: 'Gift Commitment' },
+          { DurableId: 'GiftTransaction', QualifiedApiName: 'GiftTransaction', Label: 'Gift Transaction' }
+        ].slice(0, request.limit));
+      }
+      if (request.operationId === 'field-definition-exact:GiftTransaction.GiftCommitmentId') {
+        return jsonResult([{ EntityDefinition: { QualifiedApiName: 'GiftTransaction' }, QualifiedApiName: 'GiftCommitmentId', Label: 'Gift Commitment', DataType: 'Lookup', ReferenceTo: 'GiftCommitment' }]);
+      }
+      if (request.operationId === 'field-definition-exact:GiftTransaction.Status') {
+        return jsonResult([{ EntityDefinition: { QualifiedApiName: 'GiftTransaction' }, QualifiedApiName: 'Status', Label: 'Status', DataType: 'Picklist' }]);
+      }
+      if (request.operationId === 'picklist-values:GiftTransaction.Status') {
+        return jsonResult([
+          { EntityParticle: { EntityDefinition: { QualifiedApiName: 'GiftTransaction' }, QualifiedApiName: 'Status' }, Value: 'Paid', Label: 'Paid', IsActive: true },
+          { EntityParticle: { EntityDefinition: { QualifiedApiName: 'GiftTransaction' }, QualifiedApiName: 'Status' }, Value: 'Completed', Label: 'Completed', IsActive: true }
+        ]);
+      }
+      return jsonResult([]);
+    },
+    async verifyOrg() {
+      return { organizationId: '00Dg500000E07e9EAB' };
+    },
+    async retrieveMetadata({ components }) {
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          status: 0,
+          result: {
+            done: true,
+            status: 'Succeeded',
+            files: components.map((component) => ({ type: component.type, fullName: component.apiName, state: 'Changed' }))
+          }
+        }),
+        stderr: ''
+      };
+    }
   };
+}
+
+function jsonResult(records) {
+  return { exitCode: 0, stdout: JSON.stringify({ status: 0, result: { records } }), stderr: '' };
+}
+
+function fixedClock() {
+  return new Date('2026-08-12T00:00:00.000Z');
+}
+
+function sourceFreePlan() {
+  const core = {
+    requirement: 'When a Donation becomes Paid, number it.',
+    acceptanceCriteria: ['Assign a sequential installment number only after a donation is paid.'],
+    assumptions: [],
+    evidenceIds: ['relationship:GiftTransaction.GiftCommitmentId', 'statusValue:GiftTransaction.Status.Paid'],
+    components: [{ operation: 'modify', metadataType: 'Flow', apiName: 'Assign_Installment', owner: 'flow-specialist', reason: 'Implement verified paid numbering behavior.' }],
+    expectedBehavior: ['Paid donations are numbered.'],
+    testingStrategy: ['Validate in the verified sandbox.'],
+    risks: [],
+    rollbackStrategy: 'Disable generated metadata before deployment.'
+  };
+  ARCHITECTURE_PLAN_SCHEMA.parse(core);
+  return core;
 }

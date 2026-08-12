@@ -1,10 +1,10 @@
 import { DEVELOPMENT_JOB_STATES, assertDevelopmentTransition } from '../domain/developmentJob.js';
 
-export function createJobRepository({ pool }) {
-  return repositoryFor(pool, { ownsTransactions: true });
+export function createJobRepository({ pool, dispatchLeaseMs = 30000, workerId = `worker-${process.pid}` } = {}) {
+  return repositoryFor(pool, { ownsTransactions: true, dispatchLeaseMs, workerId });
 }
 
-function repositoryFor(db, { ownsTransactions }) {
+function repositoryFor(db, { ownsTransactions, dispatchLeaseMs, workerId }) {
   async function runInTransaction(work) {
     if (!ownsTransactions) return work(db);
     const client = await db.connect();
@@ -22,11 +22,11 @@ function repositoryFor(db, { ownsTransactions }) {
   }
 
   async function withTransaction(work) {
-    if (!ownsTransactions) return work(repositoryFor(db, { ownsTransactions: false }));
+    if (!ownsTransactions) return work(repositoryFor(db, { ownsTransactions: false, dispatchLeaseMs, workerId }));
     const client = await db.connect();
     try {
       await client.query('BEGIN');
-      const value = await work(repositoryFor(client, { ownsTransactions: false }));
+      const value = await work(repositoryFor(client, { ownsTransactions: false, dispatchLeaseMs, workerId }));
       await client.query('COMMIT');
       return value;
     } catch (error) {
@@ -145,26 +145,57 @@ function repositoryFor(db, { ownsTransactions }) {
       return runInTransaction(async (client) => {
         const result = await client.query(
           `UPDATE job_dispatches
-           SET status = 'DISPATCHING', updated_at = now()
-           WHERE dispatch_key = $1 AND status = 'PENDING'
-           RETURNING dispatch_key, job_id, action, actor_id, status`,
-          [dispatchKey]
+           SET status = 'DISPATCHING',
+               attempts = attempts + 1,
+               claimed_at = now(),
+               lease_expires_at = now() + ($2::int * interval '1 millisecond'),
+               claimant_id = $3,
+               updated_at = now()
+           WHERE dispatch_key = $1
+             AND (status = 'PENDING' OR (status = 'DISPATCHING' AND lease_expires_at <= now()))
+           RETURNING dispatch_key, job_id, action, actor_id, status, attempts, claimed_at, lease_expires_at, claimant_id`,
+          [dispatchKey, dispatchLeaseMs, workerId]
         );
         if (!result.rowCount) return null;
-        const row = result.rows[0];
-        return {
-          dispatchKey: row.dispatch_key,
-          jobId: row.job_id,
-          action: row.action,
-          actorId: row.actor_id,
-          status: row.status
-        };
+        return dispatchFromRow(result.rows[0]);
+      });
+    },
+    async claimNextDispatch() {
+      return runInTransaction(async (client) => {
+        const result = await client.query(
+          `WITH next_dispatch AS (
+             SELECT dispatch_key
+             FROM job_dispatches
+             WHERE status = 'PENDING' OR (status = 'DISPATCHING' AND lease_expires_at <= now())
+             ORDER BY created_at, dispatch_key
+             FOR UPDATE SKIP LOCKED
+             LIMIT 1
+           )
+           UPDATE job_dispatches d
+           SET status = 'DISPATCHING',
+               attempts = attempts + 1,
+               claimed_at = now(),
+               lease_expires_at = now() + ($1::int * interval '1 millisecond'),
+               claimant_id = $2,
+               updated_at = now()
+           FROM next_dispatch
+           WHERE d.dispatch_key = next_dispatch.dispatch_key
+           RETURNING d.dispatch_key, d.job_id, d.action, d.actor_id, d.status, d.attempts, d.claimed_at, d.lease_expires_at, d.claimant_id`,
+          [dispatchLeaseMs, workerId]
+        );
+        if (!result.rowCount) return null;
+        return dispatchFromRow(result.rows[0]);
       });
     },
     async markDispatchDispatched(dispatchKey) {
       await db.query(
         `UPDATE job_dispatches
-         SET status = 'DISPATCHED', dispatched_at = now(), updated_at = now()
+         SET status = 'DISPATCHED',
+             dispatched_at = now(),
+             claimed_at = NULL,
+             lease_expires_at = NULL,
+             claimant_id = '',
+             updated_at = now()
          WHERE dispatch_key = $1`,
         [dispatchKey]
       );
@@ -258,7 +289,7 @@ async function hydrateJobInSnapshot(client, jobId) {
       [jobId]
     ),
     client.query(
-      `SELECT dispatch_key, action, actor_id, status, attempts, last_error, created_at, updated_at, dispatched_at
+      `SELECT dispatch_key, action, actor_id, status, attempts, last_error, claimed_at, lease_expires_at, claimant_id, created_at, updated_at, dispatched_at
        FROM job_dispatches
        WHERE job_id = $1
        ORDER BY created_at, dispatch_key`,
@@ -315,10 +346,27 @@ async function hydrateJobInSnapshot(client, jobId) {
       status: row.status,
       attempts: row.attempts,
       lastError: row.last_error,
+      claimedAt: row.claimed_at?.toISOString() || '',
+      leaseExpiresAt: row.lease_expires_at?.toISOString() || '',
+      claimantId: row.claimant_id || '',
       createdAt: row.created_at.toISOString(),
       updatedAt: row.updated_at.toISOString(),
       dispatchedAt: row.dispatched_at?.toISOString() || ''
     }))
+  };
+}
+
+function dispatchFromRow(row) {
+  return {
+    dispatchKey: row.dispatch_key,
+    jobId: row.job_id,
+    action: row.action,
+    actorId: row.actor_id,
+    status: row.status,
+    attempts: row.attempts,
+    claimedAt: row.claimed_at?.toISOString() || '',
+    leaseExpiresAt: row.lease_expires_at?.toISOString() || '',
+    claimantId: row.claimant_id || ''
   };
 }
 

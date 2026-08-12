@@ -54,15 +54,13 @@ export function createTestPostgresPool() {
 
 export async function resetPostgresSchema(pool) {
   await verifyTestDatabaseIdentity(pool);
+  const existingTables = [];
   for (const table of providusTablesInDeleteOrder) {
-    await pool.query(`
-      DO $$
-      BEGIN
-        IF to_regclass('public.${table}') IS NOT NULL THEN
-          DELETE FROM ${table};
-        END IF;
-      END $$;
-    `);
+    const result = await pool.query('SELECT to_regclass($1) AS table_name', [`public.${table}`]);
+    if (result.rows[0]?.table_name) existingTables.push(table);
+  }
+  if (existingTables.length) {
+    await pool.query(`TRUNCATE TABLE ${existingTables.join(', ')} RESTART IDENTITY CASCADE`);
   }
 }
 

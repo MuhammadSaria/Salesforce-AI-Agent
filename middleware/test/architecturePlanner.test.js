@@ -146,6 +146,24 @@ test('schema rejects multiline encoded and escaped executable payloads while pre
   assert.doesNotThrow(() => ARCHITECTURE_PLAN_SCHEMA.parse({ ...sourceFreePlan(), risks: ['Review the source record owner before changing status automation.'] }));
 });
 
+test('schema rejects short encoded command payloads without blocking benign short identifiers', () => {
+  const malicious = [
+    'c2YgZGVwbG95',
+    'Z2l0IHB1bGw=',
+    'bnBtIHJ1biBidWlsZA==',
+    'cHdk',
+    'sf%20deploy',
+    'g\\u0069t pull'
+  ];
+  for (const payload of malicious) {
+    assert.throws(() => ARCHITECTURE_PLAN_SCHEMA.parse({ ...sourceFreePlan(), risks: [payload] }), /Architecture plans must not contain/i, payload);
+  }
+
+  for (const payload of ['Paid', 'GiftOps', 'Assign_1', 'APIv2']) {
+    assert.doesNotThrow(() => ARCHITECTURE_PLAN_SCHEMA.parse({ ...sourceFreePlan(), risks: [payload] }), payload);
+  }
+});
+
 test('paid-status ambiguity returns clarification rather than assumptions', async () => {
   await assert.rejects(
     () => createArchitecturePlan({

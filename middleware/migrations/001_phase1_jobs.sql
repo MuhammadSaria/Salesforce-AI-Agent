@@ -51,19 +51,6 @@ CREATE TABLE IF NOT EXISTS job_events (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS job_dispatches (
-  dispatch_key text PRIMARY KEY,
-  job_id text NOT NULL REFERENCES development_jobs(job_id) ON DELETE RESTRICT,
-  action text NOT NULL,
-  actor_id text NOT NULL,
-  status text NOT NULL,
-  attempts integer NOT NULL DEFAULT 0,
-  last_error text NOT NULL DEFAULT '',
-  created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now(),
-  dispatched_at timestamptz
-);
-
 CREATE TABLE IF NOT EXISTS component_locks (
   lock_id text PRIMARY KEY,
   job_id text NOT NULL REFERENCES development_jobs(job_id) ON DELETE RESTRICT,
@@ -78,7 +65,6 @@ CREATE INDEX IF NOT EXISTS job_messages_job_id_created_at_idx ON job_messages(jo
 CREATE INDEX IF NOT EXISTS job_plans_job_id_version_idx ON job_plans(job_id, version);
 CREATE INDEX IF NOT EXISTS job_approvals_job_id_created_at_idx ON job_approvals(job_id, created_at);
 CREATE INDEX IF NOT EXISTS job_events_job_id_created_at_idx ON job_events(job_id, created_at);
-CREATE INDEX IF NOT EXISTS job_dispatches_status_created_at_idx ON job_dispatches(status, created_at);
 CREATE UNIQUE INDEX IF NOT EXISTS component_locks_active_component_key_idx
   ON component_locks(component_key)
   WHERE released_at IS NULL;

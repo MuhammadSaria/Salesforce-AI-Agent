@@ -22,17 +22,22 @@ import { conversationService } from './services/conversationService.js';
 import { runtimeReadiness } from './services/runtimeHealth.js';
 import { resolveSameOrg } from './services/sameOrgService.js';
 import { sameSalesforceId } from './utils/salesforceId.js';
+import { createPostgresJobRecordStore } from './persistence/jobRecordStore.js';
+import { databasePool } from './persistence/database.js';
+import { migrate } from './persistence/migrate.js';
 
 export function createApp(options = {}) {
   const app = express();
   const sameOrgResolver = options.resolveSameOrg || resolveSameOrg;
+  const jobStore = options.jobStore || createConfiguredJobStore(options);
+  app.locals.jobStore = jobStore;
   app.use(helmet());
   app.use(cors({ origin: config.allowedOrigins.length ? config.allowedOrigins : false }));
   app.use(express.json({ limit: '64kb', verify: (req, res, buffer) => { req.rawBody = buffer; } }));
   app.use(pinoHttp({ logger }));
   const enqueue = options.enqueue || enqueueAgentJob;
   const conversations = conversationService({
-    repository: jobStoreRepository(),
+    repository: conversationRepository(jobStore),
     enqueue
   });
 
@@ -62,7 +67,7 @@ export function createApp(options = {}) {
   }));
 
   app.get('/api/jobs', requireDirectSalesforceClaims, asyncRoute(async (req, res) => {
-    const jobs = (await listJobRecords()).filter((job) => canListJob(req.actor, job)).map(publicJob);
+    const jobs = (await jobStore.list()).filter((job) => canListJob(req.actor, job)).map(publicJob);
     res.json({ jobs });
   }));
   app.get('/api/jobs/:jobId', jobRoute((req, res, job) => res.json(publicJob(job))));
@@ -107,7 +112,7 @@ export function createApp(options = {}) {
       const instructionId = nanoid();
       const instructions = [...job.instructions, { instructionId, text, actor: req.actor.id, timestamp }];
       await updateJob(job.jobId, { instructions });
-      await appendConversation(job.jobId, { conversationId: instructionId, role: 'user', kind: 'instruction', source: 'salesforce-ui', text, actor: req.actor.id, timestamp });
+    await jobStore.appendConversation(job.jobId, { conversationId: instructionId, role: 'user', kind: 'instruction', source: 'salesforce-ui', text, actor: req.actor.id, timestamp });
       const activeOperation = [JOB_STATES.IMPLEMENTING, JOB_STATES.VALIDATING, JOB_STATES.DEPLOYING].includes(job.status);
       let revised = await getJobRecord(job.jobId);
       if (activeOperation) {
@@ -127,9 +132,9 @@ export function createApp(options = {}) {
 
   app.post('/api/jobs/:jobId/approve-implementation', mutableJobRoute(async (req, res, job) => {
     if (!requireImplementationPermission(req, res, job)) return;
-    const { approval, dispatch } = await approveImplementationAtomically(job.jobId, req, sameOrgResolver);
+    const { approval, dispatch } = await approveImplementationAtomically(job.jobId, req, sameOrgResolver, req.app.locals.jobStore);
     await deliverDispatch(dispatch.dispatchKey, enqueue).catch(() => {});
-    res.status(201).json({ approval });
+    res.status(201).json({ approval, dispatchStatus: dispatch.status === 'DISPATCHED' ? 'queued' : 'pending-dispatch' });
   }));
   app.post('/api/jobs/:jobId/reject-plan', mutableJobRoute(async (req, res, job) => {
     if (!requireImplementationPermission(req, res, job)) return;
@@ -232,12 +237,12 @@ function assertDeploymentApprovalReady(job, approval, orgContext) {
 function requireDirectSalesforceClaims(req, res, next) { return req.actor?.authMode === 'test-bypass' && !req.get('x-agent-source') ? next() : requireSalesforceClaims(req, res, next); }
 function requireImplementationPermission(req, res, job) { if (requiresSalesforceClaims(req, res, job)) return false; if (hasImplementationPermission(req.actor, job)) return true; res.status(403).json({ error: { code: 'FORBIDDEN', message: 'This action is not permitted.' } }); return false; }
 function requireDeploymentPermission(req, res, job) { if (requiresSalesforceClaims(req, res, job)) return false; if (hasDeploymentPermission(req.actor, job)) return true; res.status(403).json({ error: { code: 'FORBIDDEN', message: 'This action is not permitted.' } }); return false; }
-function jobRoute(handler) { return asyncRoute(async (req, res) => { const job = await getJobRecord(req.params.jobId); if (!job) return res.status(404).json({ error: { message: 'Job not found.' } }); if (requiresSalesforceClaims(req, res, job)) return; if (!canAccessJob(req.actor, job)) return res.status(404).json({ error: { message: 'Job not found.' } }); return handler(req, res, job); }); }
+function jobRoute(handler) { return asyncRoute(async (req, res) => { const job = await req.app.locals.jobStore.get(req.params.jobId); if (!job) return res.status(404).json({ error: { message: 'Job not found.' } }); if (requiresSalesforceClaims(req, res, job)) return; if (!canAccessJob(req.actor, job)) return res.status(404).json({ error: { message: 'Job not found.' } }); return handler(req, res, job); }); }
 function mutableJobRoute(handler) { return jobRoute((req, res, job) => isJiraSource(job) && !config.jiraEnabled ? jiraDisabled(res) : handler(req, res, job)); }
 function asyncRoute(handler) { return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next); }
 function approvalRecord(job, req, type, extra) { return { approvalId: nanoid(), jobId: job.jobId, jiraIssueKey: job.jiraIssueKey, approvalType: type, planVersion: job.plan?.planVersion, planHash: job.plan?.planHash, materialChangeHash: job.plan?.materialChangeHash || '', metadataScopeHash: job.metadataScope?.hash, orgRegistryId: job.orgContext?.orgRegistryId, salesforceOrganizationId: isSalesforceChat(job) ? req.actor?.orgId : job.orgContext?.expectedOrgId, environment: job.orgContext?.environment, approverIdentity: req.actor.id, comments: sanitizeUntrustedText(req.body?.comments, 1000), approvalTimestamp: new Date().toISOString(), ...extra }; }
-async function approveImplementationAtomically(jobId, req, sameOrgResolver) {
-  return updateJobAtomically(jobId, async (current) => {
+async function approveImplementationAtomically(jobId, req, sameOrgResolver, store = legacyJobStore()) {
+  return store.updateAtomically(jobId, async (current) => {
     if (!hasImplementationPermission(req.actor, current)) throw Object.assign(new Error('This action is not permitted.'), { statusCode: 403, code: 'FORBIDDEN' });
     if (!isAwaitingImplementationApproval(current)) throw Object.assign(new Error('Job is not awaiting implementation approval.'), { statusCode: 409 });
     const orgContext = await trustedOrgContextForJob(current, req.actor, sameOrgResolver);
@@ -342,16 +347,51 @@ function isSalesforceClaimsActor(actor) { return actor?.authMode === 'salesforce
 function isSalesforceChat(job) { return job.source === 'salesforce-chat'; }
 function isAwaitingImplementationApproval(job) { return [JOB_STATES.AWAITING_PLAN_APPROVAL, JOB_STATES.AWAITING_IMPLEMENTATION_APPROVAL].includes(job.status); }
 function isJiraSource(job) { return Boolean(job.jiraIssueKey || String(job.source || '').startsWith('jira-')); }
-function jobStoreRepository() {
+function conversationRepository(store) {
+  return {
+    create: store.create,
+    appendConversation: store.appendConversation,
+    appendAudit: store.appendAudit,
+    transition: store.transition
+  };
+}
+
+function legacyJobStore() {
   return {
     create: createJobRecord,
+    get: getJobRecord,
+    list: listJobRecords,
+    update: updateJob,
+    updateAtomically: updateJobAtomically,
     appendConversation,
     appendAudit,
     transition: transitionJob
   };
 }
 
-if (process.env.NODE_ENV !== 'test') createApp().listen(config.port, () => {
-  logger.info({ port: config.port }, 'Agent middleware listening');
-  if (config.jiraEnabled) startJiraPoller();
-});
+function createConfiguredJobStore(options = {}) {
+  if (options.pool) return createPostgresJobRecordStore({ pool: options.pool });
+  if (options.allowMemoryStore === true || config.nodeEnv === 'test') return legacyJobStore();
+  throw new Error('PostgreSQL job persistence pool is required in production.');
+}
+
+export async function startServer(options = {}) {
+  const pool = options.pool || databasePool();
+  await migrate(pool);
+  const app = createApp({ ...options, pool });
+  const server = app.listen(config.port, () => {
+    logger.info({ port: config.port }, 'Agent middleware listening');
+    if (config.jiraEnabled) startJiraPoller();
+  });
+  server.on('close', () => {
+    pool.end().catch((error) => logger.warn({ err: error }, 'Failed to close PostgreSQL pool'));
+  });
+  return { app, server, pool };
+}
+
+if (process.env.NODE_ENV !== 'test') {
+  startServer().catch((error) => {
+    logger.fatal({ err: error }, 'Agent middleware failed to start');
+    process.exitCode = 1;
+  });
+}

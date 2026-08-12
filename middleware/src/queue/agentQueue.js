@@ -4,7 +4,7 @@ import { logger } from '../logger.js';
 import { redisConnection } from './connection.js';
 import { processAgentJob } from '../services/agent.js';
 import { appendLog, getJobRecord, transitionJob } from '../services/jobStore.js';
-import { JOB_STATES } from '../domain/jobState.js';
+import { assertTransition, JOB_STATES } from '../domain/jobState.js';
 
 export const AGENT_QUEUE_NAME = 'salesforce-agent-jobs';
 
@@ -37,7 +37,12 @@ export async function enqueueAgentJob(job, options = {}) {
       await appendLog(job.jobId, 'error', error.message);
       const current = await getJobRecord(job.jobId);
       if (current && ![JOB_STATES.FAILED, JOB_STATES.CANCELLED, JOB_STATES.COMPLETED, JOB_STATES.VALIDATION_FAILED, JOB_STATES.ORG_VERIFICATION_FAILED].includes(current.status)) {
-        await transitionJob(job.jobId, JOB_STATES.FAILED, { actor: 'worker', reason: 'In-memory worker stage failed.', error: error.message });
+        try {
+          assertTransition(current.status, JOB_STATES.FAILED, current);
+          await transitionJob(job.jobId, JOB_STATES.FAILED, { actor: 'worker', reason: 'In-memory worker stage failed.', error: error.message });
+        } catch (transitionError) {
+          logger.warn({ jobId: job.jobId, currentStatus: current.status, error: transitionError.message }, 'Worker failure cannot transition current job state');
+        }
       }
       logger.error({ jobId: job.jobId, error }, 'In-memory agent job failed');
     }

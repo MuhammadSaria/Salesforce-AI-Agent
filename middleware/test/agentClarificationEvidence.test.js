@@ -1,8 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { canonicalInspectionHash } from '../src/domain/inspection.js';
-import { processAgentJob, setDirectAnalysisDependenciesForTest } from '../src/services/agent.js';
+import { processAgentJob, setDirectAnalysisDependenciesForTest, setSameOrgResolverForTest } from '../src/services/agent.js';
 import { appendConversation, createJobRecord, getJobRecord, updateJob } from '../src/services/jobStore.js';
+
+test.beforeEach(() => {
+  setSameOrgResolverForTest(async ({ authenticatedOrgId }) => orgContext(authenticatedOrgId));
+});
+
+test.afterEach(() => {
+  setSameOrgResolverForTest();
+});
 
 test('direct jobs use createArchitecturePlan and persist no source-generation fields', async (t) => {
   const jobId = `direct-planner-${Date.now()}`;
