@@ -2,7 +2,7 @@
 
 **Branch:** `feature/providus-phase1-execution`  
 **Base:** `main`  
-**Last updated:** 2026-08-12
+**Last updated:** 2026-08-13
 
 ## Repository Workflow Setup
 
@@ -69,6 +69,20 @@
     - PostgreSQL dispatch claims now use atomic leases with claimant, claim timestamps, lease expiry, and attempt count; expired dispatches are reclaimable, delivered dispatches are not, and duplicate delivery attempts remain idempotent.
     - Short encoded command validation rejects compact Base64, percent-encoded, and escaped command/source payloads such as `c2YgZGVwbG95` without blocking benign short identifiers.
     - The in-memory queue fallback now logs worker failures without attempting invalid `FAILED` transitions from states that cannot transition there, preserving same-org approval state during authorization regressions.
+  - Fourth correction date: 2026-08-13
+  - Fourth correction verification:
+    - `cd middleware && npm.cmd test -- test/productionStoreWiring.test.js` - RED first, failed for expected direct production imports of `services/jobStore.js`; then PASS, 1 test, 0 skipped.
+    - `cd middleware && npm.cmd test -- test/agentQueueFallback.test.js` - PASS, 2 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd test -- test/jobRepositoryPostgres.test.js test/conversationApi.test.js test/productionStoreWiring.test.js` - PASS, 30 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd test -- test/outboxDispatcher.test.js` - PASS, 4 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 227 tests and 0 skipped.
+  - Fourth correction review:
+    - Live server, worker, queue, agent, and conversation paths now receive a unified JobStore through `createApp`, worker startup, queue options, and async store context; a static dependency test scans production source and permits legacy `services/jobStore.js` imports only inside the compatibility adapter.
+    - PostgreSQL startup runs migrations, verifies connectivity, configures one PostgreSQL-backed store, and hydrates durable dispatches from `job_dispatches`; memory mode remains explicit for tests/local execution only.
+    - Implementation approval creates a normalized durable dispatch row, attempts immediate delivery, rereads the durable dispatch, and returns `queued` only for `DELIVERED`; retryable or leased dispatches return `pending-dispatch` with a stable dispatch ID.
+    - The outbox dispatcher scans immediately at startup, polls on a bounded interval, atomically claims pending/retryable/expired rows with leases, marks delivery only after queue acceptance, marks failures retryable with sanitized errors, recovers expired claims, prevents duplicate loops for one store, and stops timers on shutdown.
+    - Redis/BullMQ enqueue failures no longer execute jobs inline; inline execution is limited to explicit `QUEUE_DRIVER=memory`.
+    - Readiness now checks PostgreSQL connectivity/schema, Redis connectivity when Redis queue mode is selected, dispatcher state, and Jira only when enabled.
   - Verification date: 2026-08-02
   - Verification:
     - `cd middleware && node --import ./test/setup.js --test test/architecturePlanner.test.js test/planActionability.test.js test/approval.test.js test/agentClarificationEvidence.test.js` - RED first, failed for expected missing architecture schema/actionability modules, missing direct-planner test hook, missing plan/hash/scope approval binding, empty evidence/component approval acceptance, and missing worker plan-version guard.

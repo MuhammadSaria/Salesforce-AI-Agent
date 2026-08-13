@@ -4,7 +4,7 @@ import { nanoid } from 'nanoid';
 import { JOB_STATES } from '../domain/jobState.js';
 import { config } from '../config.js';
 import { stableHash } from '../utils/hash.js';
-import { appendCommand, appendLog, claimFileOwnership, getJobRecord, releaseFileOwnership, transitionJob, transitionWorkItem, updateJob } from './jobStore.js';
+import { currentJobStore, withJobStore } from '../persistence/jobStore.js';
 import { auditEvent } from './auditLog.js';
 import { buildOrgContext, isDataObjectAllowed, selectOrgForJob } from './orgRegistry.js';
 import { ensureJobWorkspace, writeOrgContext } from './jobWorkspace.js';
@@ -43,7 +43,8 @@ export function setDirectAnalysisDependenciesForTest(dependencies = null) {
   };
 }
 
-export async function processAgentJob(message) {
+export async function processAgentJob(message, options = {}) {
+  if (options.jobStore) return withJobStore(options.jobStore, () => processAgentJob(message));
   const job = await requiredJob(message.jobId);
   const actor = message.actor || 'system';
   assertJiraActionAllowed(job);
@@ -727,6 +728,15 @@ async function transitionAgentWorkItem(jobId, agentId, newStatus, summary) {
   await auditEvent(specialistAuditEvent(job, transitioned, 'SPECIALIST_STATUS_CHANGED', 'success', { previousStatus: item.status, newStatus, summary: compactText(summary) }));
   return transitioned;
 }
+
+async function getJobRecord(jobId) { return currentJobStore().get(jobId); }
+async function updateJob(jobId, patch) { return currentJobStore().update(jobId, patch); }
+async function transitionJob(jobId, newState, details) { return currentJobStore().transition(jobId, newState, details); }
+async function appendLog(jobId, level, message) { return currentJobStore().appendLog(jobId, level, message); }
+async function appendCommand(jobId, commandLog) { return currentJobStore().appendCommand(jobId, commandLog); }
+async function transitionWorkItem(jobId, workItemId, newStatus, details) { return currentJobStore().transitionWorkItem(jobId, workItemId, newStatus, details); }
+async function claimFileOwnership(jobId, path, workItemId, owningAgent, baselineHash) { return currentJobStore().claimFileOwnership(jobId, path, workItemId, owningAgent, baselineHash); }
+async function releaseFileOwnership(jobId, path, workItemId, currentHash) { return currentJobStore().releaseFileOwnership(jobId, path, workItemId, currentHash); }
 
 async function completeImplementationWorkItems(jobId) {
   const job = await requiredJob(jobId);

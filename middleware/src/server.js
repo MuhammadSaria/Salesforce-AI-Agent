@@ -6,7 +6,7 @@ import { nanoid } from 'nanoid';
 import { config } from './config.js';
 import { logger } from './logger.js';
 import { enqueueAgentJob } from './queue/agentQueue.js';
-import { appendAudit, appendConversation, claimPendingDispatch, createJobRecord, getJobRecord, invalidateForOrgChange, invalidateForPlanChange, listJobRecords, listPendingDispatches, markDispatchDispatched, markDispatchPending, transitionJob, updateJob, updateJobAtomically } from './services/jobStore.js';
+import { startOutboxDispatcher } from './queue/outboxDispatcher.js';
 import { sanitizePrompt, sanitizeUntrustedText } from './utils/sanitize.js';
 import { applySalesforceClaims, requireApiAuth, requireRole, requireSalesforceClaims } from './middleware/auth.js';
 import { getRegisteredOrg, listPublicOrgs } from './services/orgRegistry.js';
@@ -22,7 +22,7 @@ import { conversationService } from './services/conversationService.js';
 import { runtimeReadiness } from './services/runtimeHealth.js';
 import { resolveSameOrg } from './services/sameOrgService.js';
 import { sameSalesforceId } from './utils/salesforceId.js';
-import { createPostgresJobRecordStore } from './persistence/jobRecordStore.js';
+import { createMemoryJobStore, createPostgresJobStore, setDefaultJobStore } from './persistence/jobStore.js';
 import { databasePool } from './persistence/database.js';
 import { migrate } from './persistence/migrate.js';
 
@@ -31,6 +31,9 @@ export function createApp(options = {}) {
   const sameOrgResolver = options.resolveSameOrg || resolveSameOrg;
   const jobStore = options.jobStore || createConfiguredJobStore(options);
   app.locals.jobStore = jobStore;
+  app.locals.pool = options.pool || null;
+  app.locals.dispatcher = options.dispatcher || null;
+  setDefaultJobStore(jobStore);
   app.use(helmet());
   app.use(cors({ origin: config.allowedOrigins.length ? config.allowedOrigins : false }));
   app.use(express.json({ limit: '64kb', verify: (req, res, buffer) => { req.rawBody = buffer; } }));
@@ -43,7 +46,7 @@ export function createApp(options = {}) {
 
   app.get('/health', (req, res) => res.json({ ok: true }));
   app.get('/ready', asyncRoute(async (req, res) => {
-    const readiness = await runtimeReadiness();
+    const readiness = await runtimeReadiness({ pool: req.app.locals.pool, dispatcher: req.app.locals.dispatcher });
     res.status(readiness.ready ? 200 : 503).json(readiness);
   }));
   if (config.jiraEnabled) app.post('/api/webhooks/jira', jiraWebhook);
@@ -90,7 +93,7 @@ export function createApp(options = {}) {
     if (job.source === 'salesforce-chat') return conflict(res, 'Direct Phase 1 actions must use the authenticated same Salesforce sandbox.');
     const org = await getRegisteredOrg(String(req.body?.orgRegistryId || ''));
     if (!org) return res.status(422).json({ error: { message: 'Select an active org from the registry.' } });
-    const updated = await invalidateForOrgChange(job.jobId, org.id, req.actor.id);
+    const updated = await req.app.locals.jobStore.invalidateForOrgChange(job.jobId, org.id, req.actor.id);
     await enqueue({ jobId: job.jobId, action: 'analyze', actor: req.actor.id }, { jobId: `${job.jobId}:analyze:${Date.now()}` });
     res.json({ jobId: updated.jobId, status: updated.status, message: 'Org selected. Prior artifacts and approvals were invalidated.' });
   }));
@@ -99,7 +102,7 @@ export function createApp(options = {}) {
     app.post('/api/jobs/:jobId/analyze', requireRole('developer', 'deployer', 'admin'), mutableJobRoute(async (req, res, job) => {
       if (job.source === 'salesforce-chat') return conflict(res, 'Direct Salesforce chat jobs continue through conversation messages.');
       if (![JOB_STATES.RECEIVED, JOB_STATES.PLAN_REJECTED, JOB_STATES.ORG_VERIFICATION_FAILED].includes(job.status)) return conflict(res, 'Job is not ready for analysis.');
-      if (job.status === JOB_STATES.PLAN_REJECTED) await invalidateForPlanChange(job.jobId, req.actor.id);
+      if (job.status === JOB_STATES.PLAN_REJECTED) await req.app.locals.jobStore.invalidateForPlanChange(job.jobId, req.actor.id);
       await enqueue({ jobId: job.jobId, action: 'analyze', actor: req.actor.id }, { jobId: `${job.jobId}:analyze:${Date.now()}` });
       res.status(202).json({ jobId: job.jobId, message: 'Analysis queued.' });
     }));
@@ -111,17 +114,17 @@ export function createApp(options = {}) {
       const timestamp = new Date().toISOString();
       const instructionId = nanoid();
       const instructions = [...job.instructions, { instructionId, text, actor: req.actor.id, timestamp }];
-      await updateJob(job.jobId, { instructions });
+      await req.app.locals.jobStore.update(job.jobId, { instructions });
     await jobStore.appendConversation(job.jobId, { conversationId: instructionId, role: 'user', kind: 'instruction', source: 'salesforce-ui', text, actor: req.actor.id, timestamp });
       const activeOperation = [JOB_STATES.IMPLEMENTING, JOB_STATES.VALIDATING, JOB_STATES.DEPLOYING].includes(job.status);
-      let revised = await getJobRecord(job.jobId);
+      let revised = await req.app.locals.jobStore.get(job.jobId);
       if (activeOperation) {
-        await updateJob(job.jobId, { pendingRevision: true, followUpRequired: true });
-        await appendAudit(job.jobId, { actor: req.actor.id, action: 'USER_INSTRUCTION_ADDED', result: 'queued', safeMetadata: { instructionLength: text.length, currentStatus: job.status } });
+        await req.app.locals.jobStore.update(job.jobId, { pendingRevision: true, followUpRequired: true });
+        await req.app.locals.jobStore.appendAudit(job.jobId, { actor: req.actor.id, action: 'USER_INSTRUCTION_ADDED', result: 'queued', safeMetadata: { instructionLength: text.length, currentStatus: job.status } });
         return res.status(202).json({ instructions, status: job.status, nextPlanVersion: revised.nextPlanVersion, message: 'Instruction accepted. It will be applied after the current operation finishes.' });
       }
-      if (![JOB_STATES.RECEIVED, JOB_STATES.AWAITING_ORG_SELECTION].includes(job.status)) revised = await invalidateForPlanChange(job.jobId, req.actor.id, { instruction: text });
-      await appendAudit(job.jobId, { actor: req.actor.id, action: 'USER_INSTRUCTION_ADDED', result: 'accepted', safeMetadata: { instructionLength: text.length, nextPlanVersion: revised.nextPlanVersion } });
+      if (![JOB_STATES.RECEIVED, JOB_STATES.AWAITING_ORG_SELECTION].includes(job.status)) revised = await req.app.locals.jobStore.invalidateForPlanChange(job.jobId, req.actor.id, { instruction: text });
+      await req.app.locals.jobStore.appendAudit(job.jobId, { actor: req.actor.id, action: 'USER_INSTRUCTION_ADDED', result: 'accepted', safeMetadata: { instructionLength: text.length, nextPlanVersion: revised.nextPlanVersion } });
       if (revised.status === JOB_STATES.RECEIVED) {
         await enqueue({ jobId: job.jobId, action: 'analyze', actor: req.actor.id }, { jobId: `${job.jobId}:analyze:instruction:${Date.now()}` });
         return res.status(202).json({ instructions, status: revised.status, nextPlanVersion: revised.nextPlanVersion, message: 'Instruction accepted. Revised analysis queued.' });
@@ -133,18 +136,25 @@ export function createApp(options = {}) {
   app.post('/api/jobs/:jobId/approve-implementation', mutableJobRoute(async (req, res, job) => {
     if (!requireImplementationPermission(req, res, job)) return;
     const { approval, dispatch } = await approveImplementationAtomically(job.jobId, req, sameOrgResolver, req.app.locals.jobStore);
-    await deliverDispatch(dispatch.dispatchKey, enqueue).catch(() => {});
-    res.status(201).json({ approval, dispatchStatus: dispatch.status === 'DISPATCHED' ? 'queued' : 'pending-dispatch' });
+    await deliverDispatch(req.app.locals.jobStore, dispatch.dispatchKey, enqueue).catch(() => {});
+    const reread = await req.app.locals.jobStore.get(job.jobId);
+    const durableDispatch = (reread.dispatches || []).find((item) => item.dispatchKey === dispatch.dispatchKey) || dispatch;
+    res.status(201).json({
+      approval,
+      dispatchId: durableDispatch.dispatchKey,
+      dispatchStatus: durableDispatch.status === 'DELIVERED' ? 'queued' : 'pending-dispatch',
+      dispatch: { id: durableDispatch.dispatchKey, status: durableDispatch.status }
+    });
   }));
   app.post('/api/jobs/:jobId/reject-plan', mutableJobRoute(async (req, res, job) => {
     if (!requireImplementationPermission(req, res, job)) return;
     if (!isAwaitingImplementationApproval(job)) return conflict(res, 'Job is not awaiting plan review.');
     const approval = approvalRecord(job, req, 'IMPLEMENTATION', { decision: 'REJECTED' });
-    await updateJob(job.jobId, {
+    await req.app.locals.jobStore.update(job.jobId, {
       approvals: [...job.approvals, approval],
       workItems: (job.workItems || []).map((item) => [WORK_ITEM_STATUSES.COMPLETED, WORK_ITEM_STATUSES.CANCELLED].includes(item.status) ? item : { ...item, status: WORK_ITEM_STATUSES.CHANGES_REQUIRED, updatedAt: new Date().toISOString() })
     });
-    await transitionJob(job.jobId, JOB_STATES.PLAN_REJECTED, { actor: req.actor.id, reason: 'Plan rejected.', approvalId: approval.approvalId });
+    await req.app.locals.jobStore.transition(job.jobId, JOB_STATES.PLAN_REJECTED, { actor: req.actor.id, reason: 'Plan rejected.', approvalId: approval.approvalId });
     res.status(201).json({ approval });
   }));
   app.post('/api/jobs/:jobId/implement', queueAction('implement', [JOB_STATES.IMPLEMENTING, JOB_STATES.VALIDATION_FAILED], requireImplementationPermission, 'IMPLEMENTATION', { enqueue, sameOrgResolver }));
@@ -155,14 +165,14 @@ export function createApp(options = {}) {
     if (job.status !== JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL) return conflict(res, 'Job is not awaiting deployment approval.');
     if (req.body?.validationId !== job.validation?.validationId) return conflict(res, 'Approval must identify the current validation.');
     const approval = approvalRecord(job, req, 'DEPLOYMENT', { decision: 'APPROVED', validationId: job.validation.validationId, validatedSourceHash: job.validation.sourceHash, gitCommitHash: job.validation.commitHash || '', deploymentPackageHash: job.validation.packageHash, productionSpecificApproval: req.body?.productionSpecificApproval === true });
-    await updateJob(job.jobId, { approvals: [...job.approvals, approval] });
+    await req.app.locals.jobStore.update(job.jobId, { approvals: [...job.approvals, approval] });
     res.status(201).json({ approval });
   }));
   app.post('/api/jobs/:jobId/reject-deployment', mutableJobRoute(async (req, res, job) => {
     if (!requireDeploymentPermission(req, res, job)) return;
     if (job.status !== JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL) return conflict(res, 'Job is not awaiting deployment approval.');
     const approval = approvalRecord(job, req, 'DEPLOYMENT', { decision: 'REJECTED', validationId: job.validation?.validationId });
-    await updateJob(job.jobId, { approvals: [...job.approvals, approval] });
+    await req.app.locals.jobStore.update(job.jobId, { approvals: [...job.approvals, approval] });
     res.status(201).json({ approval });
   }));
   app.post('/api/jobs/:jobId/deploy', mutableJobRoute(async (req, res, job) => {
@@ -171,8 +181,8 @@ export function createApp(options = {}) {
     const orgContext = await trustedOrgContextForJob(job, req.actor, sameOrgResolver);
     const approval = orgBoundApproval(job, 'DEPLOYMENT', { orgContext });
     assertDeploymentApprovalReady(job, approval, orgContext);
-    if (job.source === 'salesforce-chat') await updateJob(job.jobId, { orgContext });
-    await transitionJob(job.jobId, JOB_STATES.DEPLOYING, { actor: req.actor.id, reason: 'Deployment requested after explicit approval.', approvalId: approval.approvalId });
+    if (job.source === 'salesforce-chat') await req.app.locals.jobStore.update(job.jobId, { orgContext });
+    await req.app.locals.jobStore.transition(job.jobId, JOB_STATES.DEPLOYING, { actor: req.actor.id, reason: 'Deployment requested after explicit approval.', approvalId: approval.approvalId });
     await enqueue({ jobId: job.jobId, action: 'deploy', actor: req.actor.id }, { jobId: `${job.jobId}:deploy:${Date.now()}` });
     res.status(202).json({ jobId: job.jobId, message: 'Approved deployment queued.' });
   }));
@@ -191,12 +201,12 @@ async function jiraWebhook(req, res, next) {
     const parsed = parseJiraWebhook(req.body);
     const eventId = String(req.get('x-atlassian-webhook-identifier') || `${parsed.event}:${parsed.issue.key}:${req.body?.timestamp || ''}`);
     if (!(await claimWebhookEvent(eventId))) return res.status(200).json({ accepted: true, duplicate: true });
-    const existing = (await listJobRecords()).find((job) => job.jiraIssueKey === parsed.issue.key);
+    const existing = (await req.app.locals.jobStore.list()).find((job) => job.jiraIssueKey === parsed.issue.key);
     if (existing) {
       await enqueueAgentJob({ jobId: existing.jobId, action: 'sync-jira', actor: 'jira-webhook' }, { jobId: `${existing.jobId}:jira-sync:${Date.now()}` });
       return res.status(202).json({ accepted: true, updateQueued: true, jobId: existing.jobId });
     }
-    const job = await createJobRecord({ jobId: nanoid(), jiraIssueKey: parsed.issue.key, source: 'jira-webhook', prompt: `Analyze Jira issue ${parsed.issue.key}`, userId: 'jira-webhook', context: { jiraProjectKey: parsed.issue.projectKey, jiraComponents: parsed.issue.components, jiraCustomFields: parsed.issue.customFields }, jira: parsed.issue });
+    const job = await req.app.locals.jobStore.create({ jobId: nanoid(), jiraIssueKey: parsed.issue.key, source: 'jira-webhook', prompt: `Analyze Jira issue ${parsed.issue.key}`, userId: 'jira-webhook', context: { jiraProjectKey: parsed.issue.projectKey, jiraComponents: parsed.issue.components, jiraCustomFields: parsed.issue.customFields }, jira: parsed.issue });
     await enqueueAgentJob({ jobId: job.jobId, action: 'analyze', actor: 'jira-webhook' }, { jobId: `${job.jobId}:analyze:1` });
     res.status(202).json({ accepted: true, jobId: job.jobId });
   } catch (error) { next(error); }
@@ -216,7 +226,7 @@ function queueAction(action, states, permission, approvalType = '', dependencies
     if (approvalType) {
       const orgContext = await trustedOrgContextForJob(job, req.actor, dependencies.sameOrgResolver || resolveSameOrg);
       orgBoundApproval(job, approvalType, { orgContext });
-      if (job.source === 'salesforce-chat') await updateJob(job.jobId, { orgContext });
+      if (job.source === 'salesforce-chat') await req.app.locals.jobStore.update(job.jobId, { orgContext });
     }
     await (dependencies.enqueue || enqueueAgentJob)({ jobId: job.jobId, action, actor: req.actor.id }, { jobId: `${job.jobId}:${action}:${Date.now()}` });
     res.status(202).json({ jobId: job.jobId, message: `${action} queued.` });
@@ -280,25 +290,27 @@ async function approveImplementationAtomically(jobId, req, sameOrgResolver, stor
     current.status = JOB_STATES.IMPLEMENTING;
     current.error = '';
     current.updatedAt = now;
+    await store.createDispatch?.(dispatch);
     return { approval, dispatch };
   });
 }
 
-export async function deliverPendingDispatches({ enqueue = enqueueAgentJob } = {}) {
-  for (const item of await listPendingDispatches()) {
-    await deliverDispatch(item.dispatch.dispatchKey, enqueue);
+export async function deliverPendingDispatches({ enqueue = enqueueAgentJob, jobStore = null } = {}) {
+  const store = jobStore || createConfiguredJobStore({ allowMemoryStore: true });
+  for (const item of await store.listClaimableDispatches()) {
+    await deliverDispatch(store, item.dispatch.dispatchKey, enqueue);
   }
 }
 
-async function deliverDispatch(dispatchKey, enqueue) {
-  const claimed = await claimPendingDispatch(dispatchKey);
+async function deliverDispatch(store, dispatchKey, enqueue) {
+  const claimed = await store.claimDispatch(dispatchKey);
   if (!claimed?.dispatch) return null;
   const dispatch = claimed.dispatch;
   try {
-    await enqueue({ jobId: dispatch.jobId, action: dispatch.action, actor: dispatch.actor }, { jobId: dispatch.dispatchKey });
-    await markDispatchDispatched(dispatch.dispatchKey);
+    await enqueue({ jobId: dispatch.jobId, action: dispatch.action, actor: dispatch.actor || dispatch.actorId }, { jobId: dispatch.dispatchKey });
+    await store.markDispatchDelivered(dispatch.dispatchKey);
   } catch (error) {
-    await markDispatchPending(dispatch.dispatchKey, error);
+    await store.markDispatchRetryable(dispatch.dispatchKey, error);
     throw error;
   }
   return dispatch;
@@ -356,21 +368,10 @@ function conversationRepository(store) {
   };
 }
 
-function legacyJobStore() {
-  return {
-    create: createJobRecord,
-    get: getJobRecord,
-    list: listJobRecords,
-    update: updateJob,
-    updateAtomically: updateJobAtomically,
-    appendConversation,
-    appendAudit,
-    transition: transitionJob
-  };
-}
+function legacyJobStore() { return createMemoryJobStore(); }
 
 function createConfiguredJobStore(options = {}) {
-  if (options.pool) return createPostgresJobRecordStore({ pool: options.pool });
+  if (options.pool) return createPostgresJobStore({ pool: options.pool });
   if (options.allowMemoryStore === true || config.nodeEnv === 'test') return legacyJobStore();
   throw new Error('PostgreSQL job persistence pool is required in production.');
 }
@@ -378,15 +379,20 @@ function createConfiguredJobStore(options = {}) {
 export async function startServer(options = {}) {
   const pool = options.pool || databasePool();
   await migrate(pool);
+  await pool.query('SELECT 1');
   const app = createApp({ ...options, pool });
+  app.locals.pool = pool;
+  const dispatcher = options.dispatcher || startOutboxDispatcher({ jobStore: app.locals.jobStore, enqueue: options.enqueue || enqueueAgentJob });
+  app.locals.dispatcher = dispatcher;
   const server = app.listen(config.port, () => {
     logger.info({ port: config.port }, 'Agent middleware listening');
     if (config.jiraEnabled) startJiraPoller();
   });
   server.on('close', () => {
+    dispatcher.stop?.();
     pool.end().catch((error) => logger.warn({ err: error }, 'Failed to close PostgreSQL pool'));
   });
-  return { app, server, pool };
+  return { app, server, pool, dispatcher };
 }
 
 if (process.env.NODE_ENV !== 'test') {
