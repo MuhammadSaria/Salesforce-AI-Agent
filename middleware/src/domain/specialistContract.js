@@ -27,20 +27,23 @@ const approvedComponent = z.object({
   reason: z.string().min(1).max(1000)
 }).strict();
 
-const inspectionEvidence = z.object({
-  evidenceId: z.string().min(1).max(200),
-  kind: z.string().min(1).max(100),
-  metadataType: z.string().max(100).optional(),
-  apiName: z.string().max(255).optional(),
-  sourceOrgId: z.string().min(1).max(30),
-  active: z.boolean().optional(),
-  stale: z.boolean().optional()
-}).passthrough();
+const evidenceCommon = {
+  evidenceId: z.string().min(1).max(200), sourceOrgId: z.string().min(15).max(18),
+  active: z.literal(true), stale: z.literal(false), observedAt: z.string().datetime({ offset: true })
+};
+const inspectionEvidence = z.discriminatedUnion('kind', [
+  z.object({ ...evidenceCommon, kind: z.literal('OBJECT'), componentType: z.literal('CustomObject'), componentApiName: z.string() }).strict(),
+  z.object({ ...evidenceCommon, kind: z.literal('FIELD'), objectApiName: z.string(), fieldApiName: z.string(), componentType: z.literal('CustomField'), componentApiName: z.string() }).strict(),
+  z.object({ ...evidenceCommon, kind: z.literal('RELATIONSHIP'), objectApiName: z.string(), fieldApiName: z.string(), targetObjectApiName: z.string(), componentType: z.literal('CustomField'), componentApiName: z.string() }).strict(),
+  z.object({ ...evidenceCommon, kind: z.literal('STATUS_VALUE'), objectApiName: z.string(), fieldApiName: z.string(), value: z.string(), componentType: z.literal('CustomField'), componentApiName: z.string() }).strict(),
+  z.object({ ...evidenceCommon, kind: z.literal('RETRIEVED_COMPONENT'), componentType: z.string(), componentApiName: z.string(), retrievedSource: z.string().max(500000) }).strict()
+]);
 
 export const SPECIALIST_REQUEST_SCHEMA = z.object({
   specialistId,
   jobId: z.string().min(1).max(100),
   planVersion: z.number().int().positive(),
+  sourceOrgId: z.string().min(15).max(18),
   workspace: z.object({
     workspacePath: z.string().min(1).max(500),
     planVersion: z.number().int().positive().optional()

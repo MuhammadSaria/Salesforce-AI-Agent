@@ -23,13 +23,17 @@ const inspection = {
   hash: 'inspection-hash',
   sourceOrgId: '00D000000000001AAA',
   evidence: [
-    { evidenceId: 'field:GiftTransaction.Installment_Number__c', kind: 'FIELD', metadataType: 'CustomField', apiName: 'GiftTransaction.Installment_Number__c', sourceOrgId: '00D000000000001AAA', active: true },
-    { evidenceId: 'permissionSet:Gift_Operations', kind: 'PERMISSION_SET', metadataType: 'PermissionSet', apiName: 'Gift_Operations', sourceOrgId: '00D000000000001AAA', active: true },
-    { evidenceId: 'flow:Assign_Installment', kind: 'FLOW', metadataType: 'Flow', apiName: 'Assign_Installment', sourceOrgId: '00D000000000001AAA', active: true },
-    { evidenceId: 'flow:Unrelated', kind: 'FLOW', componentType: 'Flow', componentApiName: 'Unrelated', sourceOrgId: '00D000000000001AAA', active: true },
-    { evidenceId: 'apex:Unrelated', kind: 'APEX_AUTOMATION', componentType: 'ApexClass', componentApiName: 'UnrelatedApex', sourceOrgId: '00D000000000001AAA', active: true }
+    evidence('field:GiftTransaction.Installment_Number__c', 'FIELD', { objectApiName: 'GiftTransaction', fieldApiName: 'Installment_Number__c', componentType: 'CustomField', componentApiName: 'GiftTransaction.Installment_Number__c' }),
+    evidence('permissionSet:Gift_Operations', 'RETRIEVED_COMPONENT', { componentType: 'PermissionSet', componentApiName: 'Gift_Operations', retrievedSource: '<PermissionSet/>' }),
+    evidence('flow:Assign_Installment', 'RETRIEVED_COMPONENT', { componentType: 'Flow', componentApiName: 'Assign_Installment', retrievedSource: '<Flow/>' }),
+    evidence('flow:Unrelated', 'RETRIEVED_COMPONENT', { componentType: 'Flow', componentApiName: 'Unrelated', retrievedSource: '<Flow/>' }),
+    evidence('apex:Unrelated', 'RETRIEVED_COMPONENT', { componentType: 'Flow', componentApiName: 'UnrelatedApex', retrievedSource: '<Flow/>' })
   ]
 };
+
+function evidence(evidenceId, kind, fields) {
+  return { evidenceId, kind, ...fields, sourceOrgId: '00D000000000001AAA', active: true, stale: false, observedAt: new Date().toISOString() };
+}
 
 test('runs Object/Field, Security, then Flow and isolates approved components by owner', async () => {
   const runners = {
@@ -56,7 +60,7 @@ test('runs Object/Field, Security, then Flow and isolates approved components by
     ['OBJECT_FIELD', 'SECURITY_PERMISSIONS']
   );
   assert.equal(runners.FLOW.calls[0].inspectionEvidence.some((evidence) => evidence.componentApiName === 'Unrelated'), false);
-  assert.equal(runners.FLOW.calls[0].inspectionEvidence.some((evidence) => evidence.componentType === 'ApexClass'), false);
+  assert.equal(runners.FLOW.calls[0].inspectionEvidence.some((item) => item.componentApiName === 'UnrelatedApex'), false);
   assert.deepEqual(Object.keys(result.resultsBySpecialist), ['OBJECT_FIELD', 'SECURITY_PERMISSIONS', 'FLOW']);
 });
 
@@ -240,6 +244,17 @@ test('persists specialist results separately through the unified JobStore abstra
     ['OBJECT_FIELD', 'SECURITY_PERMISSIONS', 'FLOW']
   );
   assert.equal(updates[2].patch.specialistResults.FLOW.specialistId, 'FLOW');
+});
+
+test('current inspection evidence without a stored stale flag is normalized at the specialist boundary', async () => {
+  const withoutStoredStale = { ...inspection, evidence: inspection.evidence.map(({ stale: _stale, ...item }) => item) };
+  const calls = [];
+  await runSpecialists({ job, plan: flowVerticalPlan(), inspection: withoutStoredStale, workspace }, { runners: {
+    OBJECT_FIELD: fakeRunner('OBJECT_FIELD', calls),
+    SECURITY_PERMISSIONS: fakeRunner('SECURITY_PERMISSIONS', calls),
+    FLOW: fakeRunner('FLOW', calls)
+  } });
+  assert.ok(calls.every((call) => call.inspectionEvidence.every((item) => item.stale === false)));
 });
 
 function flowVerticalPlan() {

@@ -88,6 +88,7 @@ test('two dispatcher instances racing deliver one queue job and graceful shutdow
     const dispatcherA = startOutboxDispatcher({ jobStore: storeA, intervalMs: 100, enqueue: async () => accepted.push('a') });
     const dispatcherB = startOutboxDispatcher({ jobStore: storeB, intervalMs: 100, enqueue: async () => accepted.push('b') });
     await waitFor(async () => accepted.length === 1);
+    await waitFor(async () => (await storeA.get('job-race'))?.dispatches[0]?.status === 'DELIVERED');
     dispatcherA.stop();
     dispatcherB.stop();
     await new Promise((resolve) => setTimeout(resolve, 160));

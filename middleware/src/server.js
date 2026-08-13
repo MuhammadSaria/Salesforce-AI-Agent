@@ -135,7 +135,7 @@ export function createApp(options = {}) {
 
   app.post('/api/jobs/:jobId/approve-implementation', mutableJobRoute(async (req, res, job) => {
     if (!requireImplementationPermission(req, res, job)) return;
-    const { approval, dispatch } = await approveImplementationAtomically(job.jobId, req, sameOrgResolver, req.app.locals.jobStore);
+    const { approval, dispatch } = await approveImplementationAtomically(job, req, sameOrgResolver, req.app.locals.jobStore);
     await deliverDispatch(req.app.locals.jobStore, dispatch.dispatchKey, enqueue).catch(() => {});
     const reread = await req.app.locals.jobStore.get(job.jobId);
     const durableDispatch = (reread.dispatches || []).find((item) => item.dispatchKey === dispatch.dispatchKey) || dispatch;
@@ -251,11 +251,11 @@ function jobRoute(handler) { return asyncRoute(async (req, res) => { const job =
 function mutableJobRoute(handler) { return jobRoute((req, res, job) => isJiraSource(job) && !config.jiraEnabled ? jiraDisabled(res) : handler(req, res, job)); }
 function asyncRoute(handler) { return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next); }
 function approvalRecord(job, req, type, extra) { return { approvalId: nanoid(), jobId: job.jobId, jiraIssueKey: job.jiraIssueKey, approvalType: type, planVersion: job.plan?.planVersion, planHash: job.plan?.planHash, materialChangeHash: job.plan?.materialChangeHash || '', metadataScopeHash: job.metadataScope?.hash, orgRegistryId: job.orgContext?.orgRegistryId, salesforceOrganizationId: isSalesforceChat(job) ? req.actor?.orgId : job.orgContext?.expectedOrgId, environment: job.orgContext?.environment, approverIdentity: req.actor.id, comments: sanitizeUntrustedText(req.body?.comments, 1000), approvalTimestamp: new Date().toISOString(), ...extra }; }
-async function approveImplementationAtomically(jobId, req, sameOrgResolver, store = legacyJobStore()) {
-  return store.updateAtomically(jobId, async (current) => {
+async function approveImplementationAtomically(job, req, sameOrgResolver, store = legacyJobStore()) {
+  const orgContext = await trustedOrgContextForJob(job, req.actor, sameOrgResolver);
+  return store.approveImplementationAtomically(job.jobId, job.revision, async (current) => {
     if (!hasImplementationPermission(req.actor, current)) throw Object.assign(new Error('This action is not permitted.'), { statusCode: 403, code: 'FORBIDDEN' });
     if (!isAwaitingImplementationApproval(current)) throw Object.assign(new Error('Job is not awaiting implementation approval.'), { statusCode: 409 });
-    const orgContext = await trustedOrgContextForJob(current, req.actor, sameOrgResolver);
     assertArchitecturePlanActionable(current.plan);
     const hashes = assertCurrentImplementationApprovalBinding(current, req.body, orgContext);
     assertTransition(current.status, JOB_STATES.IMPLEMENTING, current);
@@ -274,9 +274,6 @@ async function approveImplementationAtomically(jobId, req, sameOrgResolver, stor
     };
     current.orgContext = current.source === 'salesforce-chat' ? orgContext : current.orgContext;
     current.approvals = [...(current.approvals || []), approval];
-    current.dispatches = (current.dispatches || []).some((item) => item.dispatchKey === dispatchKey)
-      ? current.dispatches
-      : [...(current.dispatches || []), dispatch];
     current.workItems = approveSpecialistWorkItems(current.workItems || [], approval.approvalId);
     current.stateHistory.push({
       previousState: current.status,
@@ -290,8 +287,7 @@ async function approveImplementationAtomically(jobId, req, sameOrgResolver, stor
     current.status = JOB_STATES.IMPLEMENTING;
     current.error = '';
     current.updatedAt = now;
-    await store.createDispatch?.(dispatch);
-    return { approval, dispatch };
+    return { result: { approval, dispatch }, dispatch };
   });
 }
 
@@ -363,6 +359,10 @@ function conversationRepository(store) {
   return {
     create: store.create,
     appendConversation: store.appendConversation,
+    appendConversationAtomically: store.appendConversationAtomically,
+    claimDispatch: store.claimDispatch,
+    markDispatchDelivered: store.markDispatchDelivered,
+    markDispatchRetryable: store.markDispatchRetryable,
     appendAudit: store.appendAudit,
     transition: store.transition
   };

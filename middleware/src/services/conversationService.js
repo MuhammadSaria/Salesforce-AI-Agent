@@ -1,6 +1,7 @@
 import { nanoid } from 'nanoid';
 import { JOB_STATES } from '../domain/jobState.js';
 import { canonicalInspectionHash } from '../domain/inspection.js';
+import { sameSalesforceId } from '../utils/salesforceId.js';
 
 export function conversationService({ repository, enqueue }) {
   return {
@@ -38,6 +39,37 @@ export function conversationService({ repository, enqueue }) {
       const messageId = nanoid();
       const clarification = currentClarificationBinding(job, actor);
       const kind = clarification ? 'clarification-response' : 'message';
+      if (clarification) {
+        const dispatch = { dispatchKey: `${job.jobId}:understand:${clarification.ambiguityId}:${job.revision}`, jobId: job.jobId, action: 'understand', actor: actor.id, status: 'PENDING', attempts: 0 };
+        const outcome = await repository.appendConversationAtomically(job.jobId, job.revision, (current) => {
+          const trusted = currentClarificationBinding(current, actor);
+          if (trusted.ambiguityId !== clarification.ambiguityId) throw staleClarification();
+          const open = current.clarifications.filter((item) => item.status === 'OPEN');
+          const ambiguity = open[0];
+          if (ambiguity.sourceOrgId && !sameOrg(ambiguity.sourceOrgId, current.orgId)) throw staleClarification();
+          if (ambiguity.planHash && current.plan && ambiguity.planHash !== current.plan.planHash) throw staleClarification();
+          if (ambiguity.scopeHash && current.plan && ambiguity.scopeHash !== current.plan.scopeHash) throw staleClarification();
+          current.conversation.push({ conversationId: messageId, role: 'user', kind, source: 'salesforce-chat', text: String(text).slice(0, 4000), actor: actor.id, timestamp: new Date().toISOString(), responseToMessageId: '', ...trusted });
+          ambiguity.status = 'RESOLVED';
+          ambiguity.resolvedAt = new Date().toISOString();
+          ambiguity.resolvedBy = actor.id;
+          current.audit.push({ timestamp: new Date().toISOString(), actor: actor.id, action: 'CLARIFICATION_ACCEPTED', result: 'accepted', safeMetadata: { ambiguityId: ambiguity.ambiguityId } });
+          const previousState = current.status;
+          current.status = JOB_STATES.UNDERSTANDING;
+          current.stateHistory.push({ previousState, newState: JOB_STATES.UNDERSTANDING, timestamp: new Date().toISOString(), actor: actor.id, reason: 'Trusted clarification accepted.', approvalId: '', orgId: current.orgContext?.expectedOrgId || current.orgId || '' });
+          return { result: { jobId: job.jobId, status: JOB_STATES.UNDERSTANDING, messageId, message: 'Clarification accepted.', dispatch }, dispatch };
+        });
+        const claimed = await repository.claimDispatch(dispatch.dispatchKey);
+        if (claimed?.dispatch) {
+          try {
+            await enqueue({ jobId: dispatch.jobId, action: dispatch.action, actor: dispatch.actor }, { jobId: dispatch.dispatchKey });
+            await repository.markDispatchDelivered(dispatch.dispatchKey);
+          } catch (error) {
+            await repository.markDispatchRetryable(dispatch.dispatchKey, error);
+          }
+        }
+        return outcome;
+      }
       await repository.appendConversation(job.jobId, {
         conversationId: messageId,
         role: 'user',
@@ -94,4 +126,12 @@ function currentClarificationBinding(job, actor) {
     responseToInspectionHash: inspectionHash,
     responseToPlanVersion: Number(clarification.planVersion)
   };
+}
+
+function sameOrg(left, right) {
+  return sameSalesforceId(left, right);
+}
+
+function staleClarification() {
+  return Object.assign(new Error('The clarification question is stale.'), { statusCode: 409, code: 'CLARIFICATION_CONTEXT_STALE' });
 }

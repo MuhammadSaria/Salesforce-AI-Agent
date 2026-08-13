@@ -86,7 +86,7 @@ test('direct clarification response resolves paid ambiguity without reusing orig
       ...inspection(),
       evidence: [
         ...inspection().evidence,
-        { evidenceId: 'evidence:status-paid', kind: 'STATUS_VALUE', objectApiName: 'GiftTransaction', fieldApiName: 'Status', value: 'Paid', sourceOrgId: '00Dg500000E07e9EAB', active: true, observedAt: '2026-08-12T00:00:00.000Z' }
+        { evidenceId: 'evidence:status-paid', kind: 'STATUS_VALUE', objectApiName: 'GiftTransaction', fieldApiName: 'Status', value: 'Paid', componentType: 'CustomField', componentApiName: 'GiftTransaction.Status', sourceOrgId: '00Dg500000E07e9EAB', active: true, stale: false, observedAt: '2026-08-12T00:00:00.000Z' }
       ],
       statusCandidates: [{ objectApiName: 'GiftTransaction', fieldApiName: 'Status', values: ['Paid', 'Completed'] }]
     }),
@@ -296,6 +296,44 @@ test('direct implementation selects real Task 8 generators, persists results, an
   assert.deepEqual(updated.commands, []);
 });
 
+for (const scenario of [
+  { name: 'model unavailable', run: async () => { throw Object.assign(new Error('secret prompt and C:\\private\\model.log'), { code: 'SPECIALIST_MODEL_UNAVAILABLE' }); } },
+  { name: 'timeout', run: async () => { throw Object.assign(new Error('provider timeout with secret token'), { code: 'SPECIALIST_MODEL_TIMEOUT' }); } },
+  { name: 'malformed JSON', run: async () => '{not-json' },
+  { name: 'schema violation', run: async () => ({ status: 'COMPLETED', operations: [], unexpected: true }) },
+  { name: 'malformed XML', run: async () => ({ ...completedSpecialistResult('OBJECT_FIELD'), operations: [{ ...completedSpecialistResult('OBJECT_FIELD').operations[0], content: '<?xml version="1.0"?><CustomField>' }] }) },
+  { name: 'ownership violation', run: async () => completedSpecialistResult('FLOW') },
+  { name: 'scope violation', run: async () => ({ ...completedSpecialistResult('OBJECT_FIELD'), operations: [{ ...completedSpecialistResult('OBJECT_FIELD').operations[0], apiName: 'GiftTransaction.Unapproved__c', path: 'force-app/main/default/objects/GiftTransaction/fields/Unapproved__c.field-meta.xml' }] }) },
+  { name: 'path violation', run: async () => ({ ...completedSpecialistResult('OBJECT_FIELD'), operations: [{ ...completedSpecialistResult('OBJECT_FIELD').operations[0], path: 'force-app/main/default/objects/GiftTransaction/fields/../Unapproved.field-meta.xml' }] }) }
+]) {
+  test(`specialist ${scenario.name} fails safely without clarification or downstream side effects`, async () => {
+    const jobId = `specialist-failure-${scenario.name.replace(/\W/g, '-')}-${Date.now()}`;
+    const currentInspection = inspection();
+    const currentPlan = actionPlan(currentInspection, {
+      components: [{ operation: 'create', metadataType: 'CustomField', apiName: 'GiftTransaction.Installment_Number__c', owner: 'object-field-specialist', reason: 'Store installment sequence.' }]
+    });
+    await createJobRecord({ jobId, userId: '005g5000009ImIkAAK', orgId: '00Dg500000E07e9EAB', source: 'salesforce-chat', prompt: 'Create a field.' });
+    await updateJob(jobId, {
+      status: 'IMPLEMENTING', inspection: currentInspection, plan: currentPlan,
+      metadataScope: { hash: currentPlan.scopeHash, source: 'architecture-plan', components: currentPlan.components },
+      orgContext: orgContext(), approvals: [implementationApproval(currentPlan)]
+    });
+    setDirectSpecialistModelRunnerForTest(scenario.run);
+
+    const result = await processAgentJob({ jobId, action: 'implement', actor: '005g5000009ImIkAAK' });
+    const updated = await getJobRecord(jobId);
+    assert.equal(result.status, 'FAILED');
+    assert.equal(updated.status, 'FAILED');
+    assert.match(updated.error, /Specialist source generation failed safely/);
+    assert.doesNotMatch(updated.error, /secret|private|token|<CustomField/i);
+    assert.deepEqual(updated.clarifications, []);
+    assert.deepEqual(updated.commands, []);
+    assert.equal(Boolean(updated.implementation), false);
+    assert.equal(Boolean(updated.validation), false);
+    assert.equal(Boolean(updated.deployment), false);
+  });
+}
+
 test('specialist clarification response replans and clears stale implementation approval', async (t) => {
   const jobId = `specialist-blocked-replan-${Date.now()}`;
   const currentInspection = inspection();
@@ -386,6 +424,7 @@ function inspection() {
       componentApiName: 'GiftTransaction.GiftCommitmentId',
       sourceOrgId: '00Dg500000E07e9EAB',
       active: true,
+      stale: false,
       observedAt: new Date().toISOString()
     }, {
       evidenceId: 'evidence:status-completed',
@@ -397,6 +436,7 @@ function inspection() {
       componentApiName: 'GiftTransaction.Status',
       sourceOrgId: '00Dg500000E07e9EAB',
       active: true,
+      stale: false,
       observedAt: new Date().toISOString()
     }],
     objects: [{ apiName: 'GiftTransaction' }],

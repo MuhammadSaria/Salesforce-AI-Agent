@@ -17,6 +17,20 @@
 
 ## Completed Tasks
 
+- Phase 1 Tasks 6-8 consolidated persistence, boundary, evidence, XML, and Flow correction
+  - Verification date: 2026-08-13
+  - RED verification reproduced canonical-path traversal, untrusted/stale/mixed evidence, malformed and entity-bearing XML, disconnected Flow graphs, specialist model failures, incomplete PostgreSQL JobStore methods, non-atomic approval/clarification, immediate unbounded outbox retry, and missing two-instance production behavior.
+  - Canonical Salesforce metadata paths are now derived from trusted type/API identity and exact-matched; traversal, absolute/drive/UNC/URL, encoded, duplicate-separator, case/Unicode, filename, and object/field mismatches fail closed.
+  - Strict discriminated specialist evidence is source-org, freshness, active-state, uniqueness, component, per-document, and aggregate-size bound immediately before each model call; only relevant fields and dependencies reach each specialist.
+  - Complete Salesforce XML is parsed with bounded depth/size and rejects DTDs, entities, multiple roots/documents, spoofing nodes, wrong roots/namespaces, malformed/truncated source, Markdown, and placeholders.
+  - Flow validation uses a parsed connected graph: exact verified start/status/non-overwrite criteria, same-parent descending single-record lookup, reachable decision and 1/N+1 assignments, no orphan/history/reversal overwrite paths, and exactly one Draft status. Strict concurrent uniqueness blocks without calling the model or generating Apex.
+  - Specialist infrastructure/schema/XML/ownership/scope/path failures persist sanitized failed state with zero source, Salesforce command, validation, deployment, or clarification side effects.
+  - Memory and PostgreSQL stores satisfy one explicit required-method contract. PostgreSQL approval plus dispatch and clarification plus understand-dispatch use checked-row revision CAS, one checked-out client, one revision increment, and rollback-safe transactions.
+  - Migration `003_task6_dispatch_retry.sql` adds due-time retry scheduling and terminal fields; retries use bounded exponential backoff, maximum attempts, recoverable leases, deterministic dispatch keys, and no Redis inline fallback.
+  - Separate API and worker PostgreSQL JobStore instances complete the direct HTTP through Task 8 persisted-specialist-result path; Redis failure remains durably retryable and produces no inline, source, Salesforce, validation, or deployment side effects.
+  - Verification: lint PASS; non-DB aggregate PASS (285 tests, 0 skipped); `conversationApi` PASS (19), JobStore contract PASS (3), PostgreSQL repository PASS (11), atomic mutations PASS (3), migration/retry PASS (2), outbox PASS (4), and two-instance production PASS (1), all with 0 skipped. The monolithic `npm.cmd run check` ran lint and 331 tests but exposed the known shared-schema reset interference between parallel DB-heavy files (329 pass, 2 interference failures); every affected suite passed individually. `git diff --check` PASS.
+  - Task 9 remains not started; no generated source was written and no Salesforce validation, deployment, Flow activation, Apex generation, production deployment, or main merge occurred.
+
 - Phase 1 Task 8: Implement field, security, and inactive Flow specialists
   - Verification date: 2026-08-13
   - Verification:

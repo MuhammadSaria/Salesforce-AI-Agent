@@ -54,6 +54,7 @@ export async function createJobRecord(input) {
     stateHistory: [{ previousState: null, newState: JOB_STATES.RECEIVED, timestamp: now, actor: input.userId || 'system', reason: 'Job created', approvalId: '', orgId: '' }],
     audit: [],
     error: '',
+    revision: 1,
     createdAt: now,
     updatedAt: now
   };
@@ -98,7 +99,7 @@ export async function listJobRecords() {
 export async function updateJob(jobId, patch) {
   return withJobLock(jobId, async () => {
     const record = await requiredJob(jobId);
-    Object.assign(record, patch, { updatedAt: new Date().toISOString() });
+    Object.assign(record, patch, { updatedAt: new Date().toISOString(), revision: Number(record.revision || 0) + 1 });
     await save(record);
     return record;
   });
@@ -109,6 +110,7 @@ export async function updateJobAtomically(jobId, operation) {
     const record = await requiredJob(jobId);
     const result = await operation(record);
     record.updatedAt = new Date().toISOString();
+    record.revision = Number(record.revision || 0) + 1;
     await save(record);
     return result ?? record;
   });
@@ -130,6 +132,7 @@ export async function transitionJob(jobId, newState, details = {}) {
     record.status = newState;
     record.stateHistory.push(event);
     record.updatedAt = event.timestamp;
+    record.revision = Number(record.revision || 0) + 1;
     if (details.error) {
       record.error = details.error;
     } else if (![JOB_STATES.FAILED, JOB_STATES.VALIDATION_FAILED, JOB_STATES.ORG_VERIFICATION_FAILED].includes(newState)) {

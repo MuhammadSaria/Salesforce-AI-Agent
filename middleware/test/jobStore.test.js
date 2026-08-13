@@ -44,6 +44,13 @@ test('successful progress clears a stale job error', async () => {
   }
 });
 
+test('memory JobStore state transitions increment durable revision', async () => {
+  const jobId = `revision-transition-${Date.now()}`;
+  const created = await createJobRecord({ jobId, userId: 'test-user', source: 'salesforce-chat' });
+  await transitionJob(jobId, JOB_STATES.UNDERSTANDING, { actor: 'test' });
+  assert.equal((await getJobRecord(jobId)).revision, created.revision + 1);
+});
+
 test('transitionJob persists the direct-chat planning lifecycle and approval gate', async () => {
   const originalRoot = config.workspaceRoot;
   const workspace = await mkdtemp(join(tmpdir(), 'agent-job-store-'));

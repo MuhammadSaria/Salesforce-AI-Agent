@@ -17,7 +17,7 @@ export function startOutboxDispatcher({ jobStore, enqueue = enqueueAgentJob, int
     running = true;
     try {
       for (let index = 0; index < maxPerScan; index += 1) {
-        const dispatch = await jobStore.claimNextDispatch?.();
+        const dispatch = await jobStore.claimNextDispatch();
         if (!dispatch) break;
         try {
           await enqueue({ jobId: dispatch.jobId, action: dispatch.action, actor: dispatch.actor || dispatch.actorId }, { jobId: dispatch.dispatchKey });

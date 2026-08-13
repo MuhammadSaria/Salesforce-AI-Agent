@@ -1,7 +1,8 @@
 import { nanoid } from 'nanoid';
 import { JOB_STATES, assertTransition } from '../domain/jobState.js';
+import { assertWorkItemTransition } from '../domain/specialistAgents.js';
 
-export function createPostgresJobRecordStore({ pool, dispatchLeaseMs = 30000, claimantId = `dispatcher-${process.pid}` }) {
+export function createPostgresJobRecordStore({ pool, dispatchLeaseMs = 30000, claimantId = `dispatcher-${process.pid}`, dispatchRetryBaseMs = 1000, dispatchMaxAttempts = 5 }) {
   return {
     async create(input) {
       const record = newJobRecord(input);
@@ -10,16 +11,16 @@ export function createPostgresJobRecordStore({ pool, dispatchLeaseMs = 30000, cl
          VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $8)`,
         [record.jobId, record.userId, record.orgId, record.prompt, record.status, record.nextPlanVersion || 1, JSON.stringify(record), record.createdAt]
       );
-      return record;
+      return { ...record, revision: 1 };
     },
     async get(jobId) {
-      const result = await pool.query('SELECT record FROM development_jobs WHERE job_id = $1', [jobId]);
+      const result = await pool.query('SELECT record, revision FROM development_jobs WHERE job_id = $1', [jobId]);
       const record = result.rows[0]?.record || null;
-      return record ? hydrateDispatches(pool, record) : null;
+      return record ? hydrateDispatches(pool, { ...record, revision: Number(result.rows[0].revision) }) : null;
     },
     async list() {
-      const result = await pool.query('SELECT record FROM development_jobs ORDER BY created_at DESC, job_id DESC');
-      return Promise.all(result.rows.map((row) => row.record).filter(Boolean).map((record) => hydrateDispatches(pool, record)));
+      const result = await pool.query('SELECT record, revision FROM development_jobs ORDER BY created_at DESC, job_id DESC');
+      return Promise.all(result.rows.filter((row) => row.record).map((row) => hydrateDispatches(pool, { ...row.record, revision: Number(row.revision) })));
     },
     async update(jobId, patch) {
       return updateRecord(pool, jobId, (record) => Object.assign(record, patch));
@@ -58,6 +59,39 @@ export function createPostgresJobRecordStore({ pool, dispatchLeaseMs = 30000, cl
         record.audit = [...(record.audit || []), { timestamp: new Date().toISOString(), ...event }];
       });
     },
+    async appendLog(jobId, level, message) {
+      return updateRecord(pool, jobId, (record) => { record.logs = [...(record.logs || []), { timestamp: new Date().toISOString(), level, message: String(message).slice(0, 4000) }]; });
+    },
+    async appendCommand(jobId, commandLog) {
+      return updateRecord(pool, jobId, (record) => { record.commands = [...(record.commands || []), { timestamp: new Date().toISOString(), ...commandLog, stdout: String(commandLog.stdout || '').slice(0, 100000), stderr: String(commandLog.stderr || '').slice(0, 20000) }]; });
+    },
+    async transitionWorkItem(jobId, workItemId, newStatus, details = {}) {
+      return updateRecord(pool, jobId, (record) => {
+        const index = (record.workItems || []).findIndex((item) => item.workItemId === workItemId);
+        if (index < 0) throw Object.assign(new Error('Specialist work item not found.'), { code: 'WORK_ITEM_NOT_FOUND', statusCode: 404 });
+        assertWorkItemTransition(record.workItems[index].status, newStatus);
+        record.workItems[index] = { ...record.workItems[index], ...details, status: newStatus, updatedAt: new Date().toISOString() };
+      });
+    },
+    async claimFileOwnership(jobId, path, workItemId, owningAgent, baselineHash) {
+      return updateRecord(pool, jobId, (record) => {
+        const item = (record.fileOwnership || []).find((entry) => entry.path === path);
+        if (!item || item.workItemId !== workItemId || item.owningAgent !== owningAgent || item.lockStatus === 'LOCKED') throw Object.assign(new Error('File ownership conflict.'), { code: 'FILE_OWNERSHIP_CONFLICT', statusCode: 409 });
+        Object.assign(item, { lockStatus: 'LOCKED', baselineHash, currentHash: '', updatedAt: new Date().toISOString() });
+      });
+    },
+    async releaseFileOwnership(jobId, path, workItemId, currentHash) {
+      return updateRecord(pool, jobId, (record) => {
+        const item = (record.fileOwnership || []).find((entry) => entry.path === path && entry.workItemId === workItemId && entry.lockStatus === 'LOCKED');
+        if (!item) throw Object.assign(new Error('File ownership conflict.'), { code: 'FILE_OWNERSHIP_CONFLICT', statusCode: 409 });
+        Object.assign(item, { lockStatus: 'RELEASED', currentHash, updatedAt: new Date().toISOString() });
+      });
+    },
+    async invalidateForOrgChange(jobId, selection, actor) { return invalidateRecord(pool, jobId, selection, actor, true); },
+    async invalidateForPlanChange(jobId, actor) {
+      const current = await this.get(jobId);
+      return invalidateRecord(pool, jobId, current?.orgContext?.orgRegistryId || '', actor, false);
+    },
     async transition(jobId, newState, details = {}) {
       return updateRecord(pool, jobId, (record) => {
         assertTransition(record.status, newState, record);
@@ -77,8 +111,8 @@ export function createPostgresJobRecordStore({ pool, dispatchLeaseMs = 30000, cl
     },
     async createDispatch(dispatch) {
       await pool.query(
-        `INSERT INTO job_dispatches (dispatch_key, job_id, action, actor_id, status, attempts, last_error)
-         VALUES ($1, $2, $3, $4, $5, 0, '')
+        `INSERT INTO job_dispatches (dispatch_key, job_id, action, actor_id, status, attempts, last_error, next_attempt_at)
+         VALUES ($1, $2, $3, $4, $5, 0, '', now())
          ON CONFLICT (dispatch_key) DO NOTHING`,
         [dispatch.dispatchKey, dispatch.jobId, dispatch.action, dispatch.actor || dispatch.actorId || 'system', dispatch.status || 'PENDING']
       );
@@ -94,9 +128,10 @@ export function createPostgresJobRecordStore({ pool, dispatchLeaseMs = 30000, cl
              claimant_id = $3,
              updated_at = now()
          WHERE dispatch_key = $1
-           AND (status IN ('PENDING', 'RETRYABLE') OR (status = 'DISPATCHING' AND lease_expires_at <= now()))
-         RETURNING dispatch_key, job_id, action, actor_id, status, attempts, last_error, claimed_at, lease_expires_at, claimant_id, created_at, updated_at, dispatched_at`,
-        [dispatchKey, dispatchLeaseMs, claimantId]
+           AND attempts < $4
+           AND ((status = 'PENDING') OR (status = 'RETRYABLE' AND next_attempt_at <= now()) OR (status = 'DISPATCHING' AND lease_expires_at <= now()))
+         RETURNING dispatch_key, job_id, action, actor_id, status, attempts, last_error, claimed_at, lease_expires_at, claimant_id, created_at, updated_at, dispatched_at, next_attempt_at, terminal_at, terminal_reason`,
+        [dispatchKey, dispatchLeaseMs, claimantId, dispatchMaxAttempts]
       );
       if (!result.rowCount) return null;
       const dispatch = dispatchFromRow(result.rows[0]);
@@ -107,7 +142,8 @@ export function createPostgresJobRecordStore({ pool, dispatchLeaseMs = 30000, cl
         `WITH next_dispatch AS (
            SELECT dispatch_key
            FROM job_dispatches
-           WHERE status IN ('PENDING', 'RETRYABLE') OR (status = 'DISPATCHING' AND lease_expires_at <= now())
+           WHERE attempts < $3
+             AND ((status = 'PENDING') OR (status = 'RETRYABLE' AND next_attempt_at <= now()) OR (status = 'DISPATCHING' AND lease_expires_at <= now()))
            ORDER BY created_at, dispatch_key
            FOR UPDATE SKIP LOCKED
            LIMIT 1
@@ -121,8 +157,8 @@ export function createPostgresJobRecordStore({ pool, dispatchLeaseMs = 30000, cl
              updated_at = now()
          FROM next_dispatch
          WHERE d.dispatch_key = next_dispatch.dispatch_key
-         RETURNING d.dispatch_key, d.job_id, d.action, d.actor_id, d.status, d.attempts, d.last_error, d.claimed_at, d.lease_expires_at, d.claimant_id, d.created_at, d.updated_at, d.dispatched_at`,
-        [dispatchLeaseMs, claimantId]
+         RETURNING d.dispatch_key, d.job_id, d.action, d.actor_id, d.status, d.attempts, d.last_error, d.claimed_at, d.lease_expires_at, d.claimant_id, d.created_at, d.updated_at, d.dispatched_at, d.next_attempt_at, d.terminal_at, d.terminal_reason`,
+        [dispatchLeaseMs, claimantId, dispatchMaxAttempts]
       );
       if (!result.rowCount) return null;
       return dispatchFromRow(result.rows[0]);
@@ -143,35 +179,76 @@ export function createPostgresJobRecordStore({ pool, dispatchLeaseMs = 30000, cl
     async markDispatchRetryable(dispatchKey, error) {
       await pool.query(
         `UPDATE job_dispatches
-         SET status = 'RETRYABLE',
+         SET status = CASE WHEN attempts >= $3 THEN 'TERMINAL' ELSE 'RETRYABLE' END,
              last_error = $2,
+             next_attempt_at = CASE WHEN attempts >= $3 THEN next_attempt_at ELSE now() + (($4::int * power(2, greatest(attempts - 1, 0)))::text || ' milliseconds')::interval END,
+             terminal_at = CASE WHEN attempts >= $3 THEN now() ELSE NULL END,
+             terminal_reason = CASE WHEN attempts >= $3 THEN 'MAX_ATTEMPTS_EXCEEDED' ELSE '' END,
              claimed_at = NULL,
              lease_expires_at = NULL,
              claimant_id = '',
              updated_at = now()
          WHERE dispatch_key = $1`,
-        [dispatchKey, sanitizeDispatchError(error)]
+        [dispatchKey, sanitizeDispatchError(error), dispatchMaxAttempts, dispatchRetryBaseMs]
       );
     },
     async listClaimableDispatches() {
       const result = await pool.query(
-        `SELECT dispatch_key, job_id, action, actor_id, status, attempts, last_error, claimed_at, lease_expires_at, claimant_id, created_at, updated_at, dispatched_at
+        `SELECT dispatch_key, job_id, action, actor_id, status, attempts, last_error, claimed_at, lease_expires_at, claimant_id, created_at, updated_at, dispatched_at, next_attempt_at, terminal_at, terminal_reason
          FROM job_dispatches
-         WHERE status IN ('PENDING', 'RETRYABLE') OR (status = 'DISPATCHING' AND lease_expires_at <= now())
+         WHERE attempts < $1 AND ((status = 'PENDING') OR (status = 'RETRYABLE' AND next_attempt_at <= now()) OR (status = 'DISPATCHING' AND lease_expires_at <= now()))
          ORDER BY created_at, dispatch_key`
+        , [dispatchMaxAttempts]
       );
       return result.rows.map((row) => ({ jobId: row.job_id, dispatch: dispatchFromRow(row) }));
     },
     async savePlanWithCompareAndSet(jobId, expectedRevision, planPatch) {
       return updateRecordWithRevision(pool, jobId, expectedRevision, (record) => Object.assign(record, planPatch));
     },
-    async appendConversationAtomically(jobId, entry) {
-      return this.appendConversation(jobId, entry);
+    async appendConversationAtomically(jobId, expectedRevision, operation) {
+      if (typeof operation !== 'function') return this.appendConversation(jobId, expectedRevision);
+      return atomicMutationWithDispatch(pool, jobId, expectedRevision, operation);
     },
-    async approveImplementationAtomically(jobId, operation) {
-      return this.updateAtomically(jobId, operation);
+    async approveImplementationAtomically(jobId, expectedRevision, operation) {
+      return atomicMutationWithDispatch(pool, jobId, expectedRevision, operation);
     }
   };
+}
+
+async function atomicMutationWithDispatch(pool, jobId, expectedRevision, operation) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const selected = await client.query('SELECT record, revision FROM development_jobs WHERE job_id = $1 FOR UPDATE', [jobId]);
+    if (!selected.rowCount) throw notFound();
+    const revision = Number(selected.rows[0].revision);
+    if (revision !== Number(expectedRevision)) throw Object.assign(new Error('Job revision is stale.'), { statusCode: 409, code: 'STALE_REVISION' });
+    const record = selected.rows[0].record;
+    const outcome = await operation(record);
+    if (!outcome || typeof outcome !== 'object' || !outcome.dispatch || !outcome.result) throw Object.assign(new Error('Atomic mutation must provide one durable dispatch.'), { code: 'ATOMIC_MUTATION_INVALID' });
+    const dispatch = outcome.dispatch;
+    const allowed = ['dispatchKey', 'jobId', 'action', 'actor', 'actorId', 'status', 'attempts', 'createdAt', 'updatedAt'];
+    if (Object.keys(dispatch).some((key) => !allowed.includes(key)) || dispatch.jobId !== jobId || !dispatch.dispatchKey || !dispatch.action) {
+      throw Object.assign(new Error('Atomic dispatch is invalid.'), { code: 'ATOMIC_DISPATCH_INVALID' });
+    }
+    const inserted = await client.query(
+      `INSERT INTO job_dispatches (dispatch_key, job_id, action, actor_id, status, attempts, last_error, next_attempt_at)
+       VALUES ($1, $2, $3, $4, 'PENDING', 0, '', now())
+       ON CONFLICT (dispatch_key) DO NOTHING RETURNING dispatch_key`,
+      [dispatch.dispatchKey, jobId, dispatch.action, dispatch.actor || dispatch.actorId || 'system']
+    );
+    if (!inserted.rowCount) throw Object.assign(new Error('Atomic dispatch conflicts with existing work.'), { statusCode: 409, code: 'DISPATCH_CONFLICT' });
+    record.updatedAt = new Date().toISOString();
+    await client.query(
+      `UPDATE development_jobs SET status=$2, current_plan_version=$3, record=$4::jsonb, revision=revision+1, updated_at=now() WHERE job_id=$1`,
+      [jobId, record.status, Number(record.nextPlanVersion || record.iteration || record.plan?.planVersion || 1), JSON.stringify(record)]
+    );
+    await client.query('COMMIT');
+    return outcome.result;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
 }
 
 async function updateRecord(pool, jobId, mutate) {
@@ -225,6 +302,17 @@ async function updateRecordWithRevision(pool, jobId, expectedRevision, mutate) {
   } finally {
     client.release();
   }
+}
+
+async function invalidateRecord(pool, jobId, selection, actor, orgChanged) {
+  return updateRecord(pool, jobId, (record) => {
+    if ([JOB_STATES.CANCELLED, JOB_STATES.DEPLOYING].includes(record.status)) throw Object.assign(new Error('This job cannot be revised in its current state.'), { statusCode: 409 });
+    const now = new Date().toISOString();
+    const currentPlanVersion = Number(record.plan?.planVersion || record.nextPlanVersion || 0);
+    record.revisions = [...(record.revisions || []), ...(record.plan ? [{ revisionNumber: currentPlanVersion, invalidatedAt: now, invalidatedBy: actor, plan: record.plan, approvals: record.approvals, orgContext: record.orgContext }] : [])];
+    record.stateHistory.push({ previousState: record.status, newState: JOB_STATES.RECEIVED, timestamp: now, actor, reason: orgChanged ? 'Target org changed; artifacts invalidated.' : 'Requirements changed; artifacts invalidated.', approvalId: '', orgId: '' });
+    Object.assign(record, { status: JOB_STATES.RECEIVED, context: { ...record.context, selectedOrgRegistryId: selection }, orgContext: null, metadataScope: null, plan: null, nextPlanVersion: Math.max(1, currentPlanVersion + 1), iteration: Math.max(1, currentPlanVersion + 1), orchestration: null, workItems: [], specialistMessages: [], fileOwnership: [], revisionContext: null, approvals: [], validation: null, deployment: null, implementation: null, diff: '', error: '' });
+  });
 }
 
 function newJobRecord(input) {
@@ -297,7 +385,7 @@ function notFound() {
 
 async function hydrateDispatches(pool, record) {
   const result = await pool.query(
-    `SELECT dispatch_key, job_id, action, actor_id, status, attempts, last_error, claimed_at, lease_expires_at, claimant_id, created_at, updated_at, dispatched_at
+    `SELECT dispatch_key, job_id, action, actor_id, status, attempts, last_error, claimed_at, lease_expires_at, claimant_id, created_at, updated_at, dispatched_at, next_attempt_at, terminal_at, terminal_reason
      FROM job_dispatches
      WHERE job_id = $1
      ORDER BY created_at, dispatch_key`,
@@ -322,6 +410,9 @@ function dispatchFromRow(row) {
     createdAt: row.created_at?.toISOString() || '',
     updatedAt: row.updated_at?.toISOString() || '',
     dispatchedAt: row.dispatched_at?.toISOString() || ''
+    ,nextAttemptAt: row.next_attempt_at?.toISOString() || '',
+    terminalAt: row.terminal_at?.toISOString() || '',
+    terminalReason: row.terminal_reason || ''
   };
 }
 

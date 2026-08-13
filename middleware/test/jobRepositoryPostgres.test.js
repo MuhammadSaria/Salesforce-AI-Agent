@@ -191,7 +191,7 @@ test('migration 002 upgrades a database that already recorded released 001', asy
     const migrations = await pool.query('SELECT filename FROM schema_migrations ORDER BY filename');
 
     assert.equal(dispatchTable.rows[0].table_name, 'job_dispatches');
-    assert.deepEqual(migrations.rows.map((row) => row.filename), ['001_phase1_jobs.sql', '002_task6_job_dispatches.sql']);
+    assert.deepEqual(migrations.rows.map((row) => row.filename), ['001_phase1_jobs.sql', '002_task6_job_dispatches.sql', '003_task6_dispatch_retry.sql']);
     assert.ok(indexes.rows.some((row) => row.indexname === 'job_dispatches_claimable_idx'));
     assert.ok(indexes.rows.some((row) => row.indexname === 'job_dispatches_job_id_created_at_idx'));
 
@@ -199,7 +199,8 @@ test('migration 002 upgrades a database that already recorded released 001', asy
     const repeated = await pool.query('SELECT filename, count(*)::int AS count FROM schema_migrations GROUP BY filename ORDER BY filename');
     assert.deepEqual(repeated.rows, [
       { filename: '001_phase1_jobs.sql', count: 1 },
-      { filename: '002_task6_job_dispatches.sql', count: 1 }
+      { filename: '002_task6_job_dispatches.sql', count: 1 },
+      { filename: '003_task6_dispatch_retry.sql', count: 1 }
     ]);
   } finally {
     await pool.end();
@@ -300,7 +301,8 @@ test('serializes concurrent migration runners and records each filename once', a
 
     assert.deepEqual(result.rows, [
       { filename: '001_phase1_jobs.sql', count: 1 },
-      { filename: '002_task6_job_dispatches.sql', count: 1 }
+      { filename: '002_task6_job_dispatches.sql', count: 1 },
+      { filename: '003_task6_dispatch_retry.sql', count: 1 }
     ]);
   } finally {
     await pool.end();
@@ -316,7 +318,7 @@ test('migration execution is idempotent after the first successful run', async (
     await migrate(pool);
 
     const result = await pool.query('SELECT count(*)::int AS count FROM schema_migrations');
-    assert.equal(result.rows[0].count, 2);
+    assert.equal(result.rows[0].count, 3);
   } finally {
     await pool.end();
   }

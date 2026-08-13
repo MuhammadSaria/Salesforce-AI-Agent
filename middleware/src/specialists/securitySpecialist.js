@@ -12,7 +12,7 @@ export function generateSecuritySource(request, { modelRunner } = {}) {
     ],
     validateOperation(operation, parsedRequest) {
       const root = operation.metadataType;
-      assertCompleteMetadataDocument(operation.content, root);
+      const xml = assertCompleteMetadataDocument(operation.content, root);
       if (/<(?:Flow|CustomField|ApexClass)\b/.test(operation.content)) throw specialistError('SPECIALIST_OWNERSHIP_VIOLATION', 'Security source contains cross-owner metadata.');
       if (/<(?:objectPermissions|userPermissions|classAccesses|applicationVisibilities|flowAccesses)>/.test(operation.content)) {
         throw specialistError('SPECIALIST_SCOPE_VIOLATION', 'Security source expands permissions beyond approved field access.');
@@ -22,11 +22,11 @@ export function generateSecuritySource(request, { modelRunner } = {}) {
         .flatMap((dependency) => dependency.operations)
         .filter((item) => item.metadataType === 'CustomField')
         .map((item) => item.apiName));
-      const generatedFields = [...operation.content.matchAll(/<field>([^<]+)<\/field>/g)].map((match) => match[1]);
+      const generatedFields = xml.children(xml.root, 'fieldPermissions').map((node) => xml.text(node, 'field'));
       if (!generatedFields.length || generatedFields.some((field) => !approvedFields.has(field))) {
         throw specialistError('SPECIALIST_SCOPE_VIOLATION', 'Security source contains missing or unapproved field access.');
       }
-      if (!/<readable>true<\/readable>/.test(operation.content) || !/<editable>(?:true|false)<\/editable>/.test(operation.content)) {
+      if (xml.children(xml.root, 'fieldPermissions').some((node) => xml.text(node, 'readable') !== 'true' || !['true', 'false'].includes(xml.text(node, 'editable')))) {
         throw specialistError('SPECIALIST_SOURCE_INCOMPLETE', 'Security field access must explicitly declare readable and approved editability values.');
       }
     }

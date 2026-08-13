@@ -184,18 +184,26 @@ async function implement(job, actor) {
   const approval = validApproval(job, 'IMPLEMENTATION', { orgContext: trustedOrgContext });
   await persistSafeDirectOrgContext(job, trustedOrgContext);
   if (isSourceFreeDirectPlan(job)) {
-    const result = await executeBoundedSpecialists({
-      job,
-      plan: job.plan,
-      inspection: job.inspection,
-      workspace: {
-        workspacePath: `implementation/plan-v${job.plan.planVersion}/project`,
-        planVersion: Number(job.plan.planVersion || 1)
-      }
-    }, {
-      runners: productionSpecialistRunners(directSpecialistModelRunner),
-      jobStore: currentJobStore()
-    });
+    let result;
+    try {
+      result = await executeBoundedSpecialists({
+        job,
+        plan: job.plan,
+        inspection: job.inspection,
+        workspace: {
+          workspacePath: `implementation/plan-v${job.plan.planVersion}/project`,
+          planVersion: Number(job.plan.planVersion || 1)
+        }
+      }, {
+        runners: productionSpecialistRunners(directSpecialistModelRunner),
+        jobStore: currentJobStore()
+      });
+    } catch (error) {
+      const safeMessage = 'Specialist source generation failed safely. Retry after the model or generated metadata issue is corrected.';
+      await appendLog(job.jobId, 'error', `${safeMessage} Code: ${safeSpecialistFailureCode(error)}.`);
+      await transitionJob(job.jobId, JOB_STATES.FAILED, { actor, reason: safeMessage, error: safeMessage });
+      return { jobId: job.jobId, status: JOB_STATES.FAILED };
+    }
     if (result.status === 'BLOCKED') {
       const blocked = Object.values(result.resultsBySpecialist).find((item) => item.status === 'BLOCKED');
       const message = compactText(blocked?.materialQuestion || 'A specialist needs material clarification before source generation can continue.');
@@ -414,6 +422,11 @@ function validApproval(job, type, options = {}) {
   return orgBoundApproval(job, type, options);
 }
 
+function safeSpecialistFailureCode(error) {
+  const code = String(error?.code || 'SPECIALIST_GENERATION_FAILED');
+  return /^SPECIALIST_[A-Z0-9_]+$/.test(code) ? code : 'SPECIALIST_GENERATION_FAILED';
+}
+
 function isSourceFreeDirectPlan(job) {
   return job.source === 'salesforce-chat'
     && Array.isArray(job.plan?.components)
@@ -497,7 +510,7 @@ async function analyzeDirectSalesforceChat(job, actor) {
 
 function clarificationAnswers(job, inspection) {
   const open = new Map((job.clarifications || [])
-    .filter((item) => item.status !== 'RESOLVED' && item.inspectionHash === inspection.hash)
+    .filter((item) => ['OPEN', 'RESOLVED'].includes(item.status) && item.inspectionHash === inspection.hash)
     .map((item) => [item.ambiguityId, item]));
   return (job.conversation || [])
     .filter((entry) => entry.role === 'user' && entry.kind === 'clarification-response')

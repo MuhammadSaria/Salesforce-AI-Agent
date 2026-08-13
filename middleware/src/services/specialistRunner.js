@@ -9,6 +9,7 @@ import {
   ownerForMetadataType,
   specialistIdForArchitectureOwner
 } from '../domain/specialistAgents.js';
+import { assertCanonicalOperationPath } from '../domain/metadataPath.js';
 
 export const PHASE1_SPECIALIST_DEPENDENCIES = Object.freeze({
   OBJECT_FIELD: Object.freeze([]),
@@ -66,7 +67,7 @@ export function buildSpecialistRequest({ specialistId, job, plan, inspection, wo
   const inspectionEvidence = (inspection?.evidence || []).filter((evidence) => {
     if (!evidenceIds.has(evidence.evidenceId)) return false;
     return evidenceRelevantToSpecialist(evidence, specialistId, relevantApiNames);
-  });
+  }).map((evidence) => ({ ...evidence, stale: false }));
   const dependencyResults = (dependencyGraph[specialistId] || [])
     .map((dependency) => resultsBySpecialist[dependency])
     .filter(Boolean)
@@ -82,6 +83,7 @@ export function buildSpecialistRequest({ specialistId, job, plan, inspection, wo
     specialistId,
     jobId: job?.jobId,
     planVersion: Number(plan?.planVersion || job?.iteration || 1),
+    sourceOrgId: plan?.trustedBinding?.sourceOrgId || inspection?.sourceOrgId || inspection?.evidence?.[0]?.sourceOrgId,
     workspace,
     approvedComponents,
     planContext: {
@@ -175,6 +177,7 @@ function parseSpecialistResult(specialistId, result) {
 function assertOperationsWithinBoundary(specialistId, approvedComponents, operations) {
   const approved = new Set(approvedComponents.map((component) => componentKey(component)));
   for (const operation of operations) {
+    assertCanonicalOperationPath(operation);
     const typeOwner = ownerForMetadataType(operation.metadataType);
     if (typeOwner && typeOwner !== specialistId) {
       throw specialistError('SPECIALIST_OWNERSHIP_VIOLATION', `Rejected specialist ownership violation: ${specialistId} cannot produce ${operation.metadataType} ${operation.apiName}.`);

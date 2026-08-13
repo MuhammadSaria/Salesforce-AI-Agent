@@ -11,17 +11,13 @@ export function generateObjectFieldSource(request, { modelRunner } = {}) {
       'Do not generate PermissionSet, Flow, Apex, or any unapproved metadata.'
     ],
     validateOperation(operation) {
-      assertCompleteMetadataDocument(operation.content, 'CustomField');
-      if (!/<type>Number<\/type>/.test(operation.content)) throw specialistError('SPECIALIST_SOURCE_INCOMPLETE', 'The installment field must be a Number CustomField.');
+      const xml = assertCompleteMetadataDocument(operation.content, 'CustomField');
+      if (xml.text(xml.root, 'type') !== 'Number') throw specialistError('SPECIALIST_SOURCE_INCOMPLETE', 'The installment field must be a Number CustomField.');
       const fieldName = operation.apiName.split('.').at(-1);
-      if (!new RegExp(`<fullName>${escapeRegex(fieldName)}<\\/fullName>`).test(operation.content)) {
+      if (xml.text(xml.root, 'fullName') !== fieldName) {
         throw specialistError('SPECIALIST_SCOPE_VIOLATION', 'CustomField source must use the exact approved API name.');
       }
       if (/<(?:PermissionSet|Flow|ApexClass)\b/.test(operation.content)) throw specialistError('SPECIALIST_OWNERSHIP_VIOLATION', 'Object/Field source contains cross-owner metadata.');
     }
   });
-}
-
-function escapeRegex(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

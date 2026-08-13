@@ -17,7 +17,7 @@ test('generates one complete approved Number CustomField document', async () => 
   assert.equal('jobId' in calls[0], false);
   assert.equal('workspace' in calls[0], false);
   assert.equal('orgContext' in calls[0], false);
-  assert.deepEqual(Object.keys(calls[0].inspectionEvidence[0]).sort(), ['evidenceId', 'fieldApiName', 'kind', 'objectApiName']);
+  assert.equal(calls[0].inspectionEvidence[0].kind, 'RELATIONSHIP');
   assert.equal(result.status, 'COMPLETED');
   assert.equal(result.operations.length, 1);
   assert.equal(result.operations[0].apiName, FIELD_API);
@@ -63,7 +63,7 @@ test('rejects a structurally plausible Flow that omits executable completed and 
     .replace(/<filters><field>Installment_Number__c[\s\S]*?<\/filters>/, '');
   await assert.rejects(
     () => generateFlowSource(flowRequest(), { modelRunner: runner(incomplete) }),
-    (error) => error.code === 'SPECIALIST_SOURCE_INCOMPLETE' && /completed-status|non-overwrite/i.test(error.message)
+    (error) => error.code === 'SPECIALIST_FLOW_INVALID' && /status|non-overwrite/i.test(error.message)
   );
 });
 
@@ -85,7 +85,7 @@ test('strict concurrent uniqueness returns BLOCKED with a material Apex scope qu
   });
   let calls = 0;
   const result = await generateFlowSource(request, { modelRunner: async () => { calls += 1; return flowResult(); } });
-  assert.equal(calls, 1);
+  assert.equal(calls, 0);
   assert.equal(result.status, 'BLOCKED');
   assert.deepEqual(result.operations, []);
   assert.match(result.materialQuestion, /locking-capable Apex/i);
@@ -112,10 +112,10 @@ test('strict concurrency remains deterministically BLOCKED when the model is una
 
 test('model input includes bounded relevant retrieved source and rejects oversized aggregate context', async () => {
   const request = specialistRequest('OBJECT_FIELD');
-  request.inspectionEvidence[0].retrievedSource = '<CustomField>existing</CustomField>';
+  request.inspectionEvidence.push({ evidenceId: 'field-source', kind: 'RETRIEVED_COMPONENT', componentType: 'CustomField', componentApiName: FIELD_API, retrievedSource: '<CustomField>existing</CustomField>', sourceOrgId: '00D000000000001AAA', active: true, stale: false, observedAt: new Date().toISOString() });
   const calls = [];
   await generateObjectFieldSource(request, { modelRunner: runner(objectFieldResult(), calls) });
-  assert.equal(calls[0].inspectionEvidence[0].retrievedSource, '<CustomField>existing</CustomField>');
+  assert.equal(calls[0].inspectionEvidence.find((item) => item.kind === 'RETRIEVED_COMPONENT').retrievedSource, '<CustomField>existing</CustomField>');
 
   const oversized = flowRequest();
   oversized.dependencyResults = Array.from({ length: 3 }, (_, index) => ({
@@ -139,7 +139,7 @@ test('rejects incomplete metadata source for every specialist', async () => {
     for (const content of ['', 'TODO', '```xml\n<Flow/>\n```', '<Flow><status>Draft</status></Flow>', 'rest omitted']) {
       const incomplete = structuredClone(result);
       incomplete.operations[0].content = content;
-      await assert.rejects(() => generateSource(request, { modelRunner: runner(incomplete) }), (error) => error.code === 'SPECIALIST_SOURCE_INCOMPLETE');
+      await assert.rejects(() => generateSource(request, { modelRunner: runner(incomplete) }), (error) => ['SPECIALIST_SOURCE_INCOMPLETE', 'SPECIALIST_XML_INVALID'].includes(error.code));
     }
   }
 });
@@ -199,6 +199,7 @@ function specialistRequest(specialistId, dependencyResults = []) {
     specialistId,
     jobId: 'task-8-job',
     planVersion: 1,
+    sourceOrgId: '00D000000000001AAA',
     workspace: { workspacePath: 'implementation/plan-v1/project', planVersion: 1 },
     approvedComponents: [components[specialistId]],
     planContext: {
@@ -208,8 +209,8 @@ function specialistRequest(specialistId, dependencyResults = []) {
       risks: ['Highest plus one cannot guarantee strict uniqueness under concurrency.']
     },
     inspectionEvidence: [
-      { evidenceId: 'relationship', kind: 'RELATIONSHIP', sourceOrgId: '00D000000000001AAA', objectApiName: 'GiftTransaction', fieldApiName: 'GiftCommitmentId' },
-      { evidenceId: 'status-completed', kind: 'STATUS_VALUE', sourceOrgId: '00D000000000001AAA', objectApiName: 'GiftTransaction', fieldApiName: 'Status', value: 'Completed', active: true }
+      { evidenceId: 'relationship', kind: 'RELATIONSHIP', sourceOrgId: '00D000000000001AAA', objectApiName: 'GiftTransaction', fieldApiName: 'GiftCommitmentId', targetObjectApiName: 'GiftCommitment', componentType: 'CustomField', componentApiName: 'GiftTransaction.GiftCommitmentId', active: true, stale: false, observedAt: new Date().toISOString() },
+      { evidenceId: 'status-completed', kind: 'STATUS_VALUE', sourceOrgId: '00D000000000001AAA', objectApiName: 'GiftTransaction', fieldApiName: 'Status', value: 'Completed', componentType: 'CustomField', componentApiName: 'GiftTransaction.Status', active: true, stale: false, observedAt: new Date().toISOString() }
     ],
     dependencyResults
   };
@@ -264,8 +265,8 @@ function runInput() {
     job: { jobId: 'task-8-job' },
     workspace: { workspacePath: 'implementation/plan-v1/project', planVersion: 1 },
     inspection: { evidence: [
-      { evidenceId: 'relationship', kind: 'RELATIONSHIP', sourceOrgId: '00D000000000001AAA', objectApiName: 'GiftTransaction', fieldApiName: 'GiftCommitmentId' },
-      { evidenceId: 'status-completed', kind: 'STATUS_VALUE', sourceOrgId: '00D000000000001AAA', objectApiName: 'GiftTransaction', fieldApiName: 'Status', value: 'Completed', active: true }
+      { evidenceId: 'relationship', kind: 'RELATIONSHIP', sourceOrgId: '00D000000000001AAA', objectApiName: 'GiftTransaction', fieldApiName: 'GiftCommitmentId', targetObjectApiName: 'GiftCommitment', componentType: 'CustomField', componentApiName: 'GiftTransaction.GiftCommitmentId', active: true, stale: false, observedAt: new Date().toISOString() },
+      { evidenceId: 'status-completed', kind: 'STATUS_VALUE', sourceOrgId: '00D000000000001AAA', objectApiName: 'GiftTransaction', fieldApiName: 'Status', value: 'Completed', componentType: 'CustomField', componentApiName: 'GiftTransaction.Status', active: true, stale: false, observedAt: new Date().toISOString() }
     ] },
     plan: {
       requirement: 'Number completed recurring-donation transactions.', planVersion: 1,

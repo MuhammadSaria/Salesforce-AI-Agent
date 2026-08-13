@@ -1,5 +1,8 @@
 import { SPECIALIST_REQUEST_SCHEMA, SPECIALIST_RESULT_SCHEMA } from '../domain/specialistContract.js';
 import { config } from '../config.js';
+import { assertCanonicalOperationPath, canonicalMetadataPath } from '../domain/metadataPath.js';
+import { validateSpecialistEvidence } from '../domain/specialistEvidence.js';
+import { parseMetadataXml } from './metadataXml.js';
 
 const MAX_SPECIALIST_MODEL_INPUT_BYTES = 1000000;
 
@@ -8,10 +11,19 @@ export async function generateSpecialistSource(request, options) {
   if (parsedRequest.specialistId !== options.specialistId) {
     throw specialistError('SPECIALIST_REQUEST_MISMATCH', `${options.specialistId} cannot execute a ${parsedRequest.specialistId} request.`);
   }
+  const validatedEvidence = validateSpecialistEvidence(parsedRequest.inspectionEvidence, {
+    sourceOrgId: parsedRequest.sourceOrgId,
+    approvedComponents: parsedRequest.approvedComponents,
+    dependencyResults: parsedRequest.dependencyResults,
+    specialistId: parsedRequest.specialistId,
+    now: options.now
+  });
+  const trustedRequest = { ...parsedRequest, inspectionEvidence: validatedEvidence };
+  if (options.blockedResult) return options.blockedResult;
   if (typeof options.modelRunner !== 'function') {
     throw specialistError('SPECIALIST_MODEL_UNAVAILABLE', `No structured model runner is configured for ${options.specialistId}.`);
   }
-  const modelInput = boundedModelInput(parsedRequest, options);
+  const modelInput = boundedModelInput(trustedRequest, options);
   const modelInputBytes = Buffer.byteLength(JSON.stringify(modelInput), 'utf8');
   if (modelInputBytes > Math.min(config.maxMetadataSizeBytes, MAX_SPECIALIST_MODEL_INPUT_BYTES)) {
     throw specialistError('SPECIALIST_MODEL_INPUT_TOO_LARGE', 'Bounded specialist model input exceeds the configured aggregate size limit.');
@@ -20,10 +32,8 @@ export async function generateSpecialistSource(request, options) {
   try {
     rawResult = await options.modelRunner(modelInput);
   } catch (error) {
-    if (options.blockedResult) return options.blockedResult;
     throw error;
   }
-  if (options.blockedResult) return options.blockedResult;
   let result;
   try {
     result = SPECIALIST_RESULT_SCHEMA.parse(rawResult);
@@ -31,18 +41,12 @@ export async function generateSpecialistSource(request, options) {
     throw Object.assign(specialistError('SPECIALIST_RESULT_SCHEMA_INVALID', `Invalid ${options.specialistId} specialist result.`), { cause });
   }
   if (result.status === 'BLOCKED') return result;
-  assertOperationsMatchApproval(parsedRequest, result, options);
+  assertOperationsMatchApproval(trustedRequest, result, options);
   return result;
 }
 
 export function assertCompleteMetadataDocument(content, rootElement) {
-  const text = String(content || '').trim();
-  const unsafe = !text
-    || /```|\bTODO\b|rest omitted|placeholder/i.test(text)
-    || !/^<\?xml\s+version=["']1\.0["'][^>]*>/.test(text)
-    || !new RegExp(`<${rootElement}\\s+xmlns=["']http:\\/\\/soap\\.sforce\\.com\\/2006\\/04\\/metadata["'][^>]*>`).test(text)
-    || !new RegExp(`</${rootElement}>\\s*$`).test(text);
-  if (unsafe) throw specialistError('SPECIALIST_SOURCE_INCOMPLETE', `The ${rootElement} source must be one complete raw Salesforce metadata document.`);
+  return parseMetadataXml(content, rootElement);
 }
 
 export function specialistError(code, message) {
@@ -84,6 +88,8 @@ function assertOperationsMatchApproval(request, result, options) {
     if (!approved.has(componentKey(operation))) {
       throw specialistError('SPECIALIST_SCOPE_VIOLATION', `${options.specialistId} returned unapproved ${operation.metadataType} ${operation.apiName}.`);
     }
+    assertCanonicalOperationPath(operation);
+    operation.path = canonicalMetadataPath(operation.metadataType, operation.apiName);
     options.validateOperation(operation, request);
   }
 }
