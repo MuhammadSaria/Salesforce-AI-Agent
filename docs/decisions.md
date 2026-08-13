@@ -36,3 +36,9 @@ This is an append-only record. Add a new dated entry when a decision changes; do
 
 **Decision:** Each implementation chat handles one numbered Phase 1 task unless two inseparable steps share one verification boundary.  
 **Consequence:** New chats resume from `AGENTS.md`, `docs/progress.md`, the Git branch, and the selected task rather than old transcripts.
+
+## 2026-08-13 — Task 8 Generators Must Be Reachable Through the Bounded Runner
+
+**Decision:** Task 8 replaces the direct Salesforce-chat placeholder runners with the Object/Field, Security, and inactive Flow generators through the existing bounded specialist runner. The Flow specialist receives strict dependency results from both Object/Field and Security; production generator selection is explicit, while tests may inject deterministic runners.
+
+**Consequence:** Task 8 includes the narrow runner dependency, `agent.js` wiring, and regression coverage needed to prove the generators are reachable with the required upstream context. It does not grant generators authority to select an org, approve work, write source, validate, deploy, or bypass the strict Task 7 request/result contracts.

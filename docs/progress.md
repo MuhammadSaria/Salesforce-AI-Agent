@@ -18,7 +18,7 @@
 ## Completed Tasks
 
 - Phase 1 Task 7 first correction: Fix bounded specialist BLOCKED lifecycle handling
-  - Implementation commit: this correction commit
+  - Implementation commit: f9e73f89e4a9638e0832e9eb6e07396fa977aa97
   - Verification date: 2026-08-13
   - Verification:
     - `cd middleware && node --import ./test/setup.js --test test/agentClarificationEvidence.test.js` - RED first, 5 passed and 2 failed because valid bounded specialist `BLOCKED` incorrectly transitioned the job to `FAILED` instead of `AWAITING_CLARIFICATION`.
@@ -39,7 +39,7 @@
     - Ownership violations, scope violations, malformed specialist output, and other invalid specialist results remain fail-closed rejections rather than clarification prompts.
 
 - Phase 1 Task 7: Define and execute real bounded specialist contracts
-  - Implementation commit: this Task 7 completion commit
+  - Implementation commit: 7b8789dedd40564d5f19d5cbd493e0b1faa6d9d7
   - Verification date: 2026-08-13
   - Verification:
     - `cd middleware && node --import ./test/setup.js --test test/specialistRunner.test.js` - RED first, failed for expected missing `middleware/src/domain/specialistContract.js`; then PASS, 10 tests, 0 skipped.
@@ -349,7 +349,7 @@
 
 ## Next Task
 
-Phase 1 Task 7: Not started.
+Phase 1 Task 8: Implement field, security, and inactive Flow specialists. Not started.
 
 ## Update Rules
 

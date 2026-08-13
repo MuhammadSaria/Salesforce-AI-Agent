@@ -588,18 +588,34 @@ git commit -m "feat: execute bounded Salesforce specialists"
 - Create: `middleware/src/specialists/flowSpecialist.js`
 - Create: `middleware/test/flowVerticalSpecialists.test.js`
 - Modify: `middleware/src/services/modelExecutor.js`
+- Modify: `middleware/src/services/specialistRunner.js`
+- Modify: `middleware/src/services/agent.js`
+- Modify: `middleware/test/specialistRunner.test.js`
+- Modify: `middleware/test/agentClarificationEvidence.test.js`
 
 **Interfaces:**
 - Produces: `generateObjectFieldSource(request)`, `generateSecuritySource(request)`, `generateFlowSource(request)`.
 - All return `SPECIALIST_RESULT_SCHEMA` values.
+- The direct Salesforce-chat implementation path injects these generators into the existing bounded specialist runner instead of `defaultBlockedSpecialistRunners()`.
+- The Flow request receives strict `dependencyResults` for both `OBJECT_FIELD` and `SECURITY_PERMISSIONS`; no unvalidated or unrelated specialist output is included.
+- Tests may inject deterministic specialist runners; production wiring uses only the three Task 8 generators and preserves the Task 7 request/result boundary.
 
 - [ ] **Step 1: Write failing recurring-donation generation tests**
 
 ```js
 test('generates a number field, permission access, and inactive record-triggered Flow', async () => {
-  const field = await generateObjectFieldSource(request, { modelRunner });
-  const security = await generateSecuritySource({ ...request, dependencies: field.operations }, { modelRunner });
-  const flow = await generateFlowSource({ ...request, dependencies: [...field.operations, ...security.operations] }, { modelRunner });
+  const field = await generateObjectFieldSource(specialistRequestFixture('OBJECT_FIELD'), { modelRunner });
+  const security = await generateSecuritySource({
+    ...specialistRequestFixture('SECURITY_PERMISSIONS'),
+    dependencyResults: [dependencyResultFixture('OBJECT_FIELD', field)]
+  }, { modelRunner });
+  const flow = await generateFlowSource({
+    ...specialistRequestFixture('FLOW'),
+    dependencyResults: [
+      dependencyResultFixture('OBJECT_FIELD', field),
+      dependencyResultFixture('SECURITY_PERMISSIONS', security)
+    ]
+  }, { modelRunner });
   assert.match(field.operations[0].content, /<type>Number<\/type>/);
   assert.match(security.operations[0].content, /<readable>true<\/readable>/);
   assert.match(flow.operations[0].content, /<status>Draft<\/status>/);
@@ -609,30 +625,44 @@ test('generates a number field, permission access, and inactive record-triggered
 
 - [ ] **Step 2: Verify failure**
 
-Run: `cd middleware && node --import ./test/setup.js --test test/flowVerticalSpecialists.test.js`  
-Expected: FAIL because specialist modules do not exist.
+Run: `cd middleware && node --import ./test/setup.js --test test/flowVerticalSpecialists.test.js test/specialistRunner.test.js test/agentClarificationEvidence.test.js`
+
+Expected: FAIL because specialist modules do not exist and the direct implementation path still selects blocked placeholders.
 
 - [ ] **Step 3: Implement one structured model call per specialist**
 
 Each prompt must contain the approved component intents, relevant retrieved source, confirmed API names, and dependent operations. Require complete source documents. Reject paths or component names not present in the approved scope.
 
-- [ ] **Step 4: Enforce recurring-donation semantics before accepting the Flow result**
+- [ ] **Step 4: Supply both permitted upstream results to the Flow specialist**
+
+Update the bounded dependency graph so `FLOW` depends explicitly on `OBJECT_FIELD` and `SECURITY_PERMISSIONS`. Preserve topological execution, suppression after any upstream `BLOCKED` result, strict request parsing, and exclusion of all unrelated specialist outputs.
+
+- [ ] **Step 5: Wire production generators into the bounded direct-chat path**
+
+Replace the Task 7 placeholder runner selection in `agent.js` with the three Task 8 generators. Keep runner dependencies injectable for tests, pass every request through `executeBoundedSpecialists`, and do not let a generator select an org, approve work, write source, validate, or deploy.
+
+- [ ] **Step 6: Enforce recurring-donation semantics before accepting the Flow result**
 
 The Flow must handle create-as-completed and transition-to-completed, ignore already numbered records, scope the highest-number query to the same parent, assign 1 when none exists, and retain numbers after reversal. It must not renumber historical records.
 
-- [ ] **Step 5: Record the concurrency limitation in the plan and report**
+- [ ] **Step 7: Record the concurrency limitation in the plan and report**
 
 If strict uniqueness is requested, return a material scope-change question proposing locking-capable Apex; do not silently claim Flow guarantees concurrency uniqueness.
 
-- [ ] **Step 6: Run tests**
+- [ ] **Step 8: Run focused and completion tests**
 
-Run: `cd middleware && node --import ./test/setup.js --test test/flowVerticalSpecialists.test.js test/modelExecutor.test.js`  
-Expected: all tests PASS.
+Run: `cd middleware && node --import ./test/setup.js --test test/flowVerticalSpecialists.test.js test/modelExecutor.test.js test/specialistRunner.test.js test/agentClarificationEvidence.test.js`
 
-- [ ] **Step 7: Commit**
+Expected: all focused tests PASS, including proof that the direct path selects the real bounded generators and retains structured `BLOCKED` handling for material questions.
+
+Run: `cd middleware && npm run check`
+
+Expected: lint and all middleware tests PASS.
+
+- [ ] **Step 9: Commit**
 
 ```bash
-git add middleware/src/specialists middleware/src/services/modelExecutor.js middleware/test/flowVerticalSpecialists.test.js
+git add middleware/src/specialists middleware/src/services/modelExecutor.js middleware/src/services/specialistRunner.js middleware/src/services/agent.js middleware/test/flowVerticalSpecialists.test.js middleware/test/specialistRunner.test.js middleware/test/agentClarificationEvidence.test.js docs/progress.md
 git commit -m "feat: generate bounded inactive Flow solutions"
 ```
 
