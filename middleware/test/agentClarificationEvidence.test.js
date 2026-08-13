@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { architecturePlanHashes } from '../src/domain/architecturePlan.js';
 import { canonicalInspectionHash } from '../src/domain/inspection.js';
 import { processAgentJob, setDirectAnalysisDependenciesForTest, setSameOrgResolverForTest } from '../src/services/agent.js';
 import { appendConversation, createJobRecord, getJobRecord, updateJob } from '../src/services/jobStore.js';
@@ -199,6 +200,118 @@ test('legacy Jira analysis remains isolated from direct architecture planner', a
   assert.equal(plannerCalled, false);
 });
 
+test('blocked bounded specialist records trusted clarification instead of failing or writing source', async () => {
+  const jobId = `specialist-blocked-${Date.now()}`;
+  const currentInspection = inspection();
+  const currentPlan = actionPlan(currentInspection);
+  await createJobRecord({
+    jobId,
+    userId: '005g5000009ImIkAAK',
+    orgId: '00Dg500000E07e9EAB',
+    source: 'salesforce-chat',
+    prompt: 'Create a recurring donation installment Flow.'
+  });
+  await updateJob(jobId, {
+    status: 'IMPLEMENTING',
+    inspection: currentInspection,
+    plan: currentPlan,
+    metadataScope: { hash: currentPlan.scopeHash, source: 'architecture-plan', components: currentPlan.components },
+    orgContext: orgContext(),
+    approvals: [implementationApproval(currentPlan)]
+  });
+
+  const result = await processAgentJob({ jobId, action: 'implement', actor: '005g5000009ImIkAAK' });
+  const updated = await getJobRecord(jobId);
+
+  assert.equal(result.status, 'AWAITING_CLARIFICATION');
+  assert.equal(result.specialistStatus, 'BLOCKED');
+  assert.equal(updated.status, 'AWAITING_CLARIFICATION');
+  assert.equal(updated.error, '');
+  assert.equal(Boolean(updated.implementation), false);
+  assert.equal(Boolean(updated.validation), false);
+  assert.equal(Boolean(updated.deployment), false);
+  assert.deepEqual(updated.commands, []);
+  assert.equal(updated.specialistResults.FLOW.status, 'BLOCKED');
+  assert.deepEqual(updated.specialistResults.FLOW.operations, []);
+  assert.equal(updated.clarifications.length, 1);
+  const clarification = updated.clarifications[0];
+  assert.equal(clarification.ambiguityId, 'specialist:FLOW:blocked:v1');
+  assert.equal(clarification.specialistId, 'FLOW');
+  assert.equal(clarification.question, 'FLOW source generation is not available until Phase 1 Task 8.');
+  assert.equal(clarification.inspectionHash, currentInspection.hash);
+  assert.equal(clarification.sourceOrgId, '00Dg500000E07e9EAB');
+  assert.equal(clarification.planVersion, 1);
+  assert.equal(clarification.planHash, currentPlan.planHash);
+  assert.equal(clarification.scopeHash, currentPlan.scopeHash);
+  assert.equal(clarification.status, 'OPEN');
+});
+
+test('specialist clarification response replans and clears stale implementation approval', async (t) => {
+  const jobId = `specialist-blocked-replan-${Date.now()}`;
+  const currentInspection = inspection();
+  const oldPlan = actionPlan(currentInspection);
+  const plannerCalls = [];
+  setDirectAnalysisDependenciesForTest({
+    inspectFlowRequirement: async () => currentInspection,
+    createArchitecturePlan: async (input) => {
+      plannerCalls.push(input);
+      return {
+        ...actionPlan(currentInspection, {
+          components: [
+            ...oldPlan.components,
+            { operation: 'create', metadataType: 'CustomField', apiName: 'GiftTransaction.Lock_Key__c', owner: 'object-field-specialist', reason: 'Support the clarified locking-capable design.' }
+          ],
+          expectedBehavior: ['Paid donations are numbered after the clarified scope decision.']
+        })
+      };
+    }
+  });
+  t.after(() => setDirectAnalysisDependenciesForTest());
+
+  await createJobRecord({
+    jobId,
+    userId: '005g5000009ImIkAAK',
+    orgId: '00Dg500000E07e9EAB',
+    source: 'salesforce-chat',
+    prompt: 'Create a recurring donation installment Flow.'
+  });
+  await updateJob(jobId, {
+    status: 'IMPLEMENTING',
+    inspection: currentInspection,
+    plan: oldPlan,
+    metadataScope: { hash: oldPlan.scopeHash, source: 'architecture-plan', components: oldPlan.components },
+    orgContext: orgContext(),
+    approvals: [implementationApproval(oldPlan)]
+  });
+
+  await processAgentJob({ jobId, action: 'implement', actor: '005g5000009ImIkAAK' });
+  let updated = await getJobRecord(jobId);
+  assert.equal(updated.status, 'AWAITING_CLARIFICATION');
+
+  await appendConversation(jobId, {
+    role: 'user',
+    kind: 'clarification-response',
+    text: 'Expand scope for locking-capable Apex.',
+    actor: '005g5000009ImIkAAK',
+    ambiguityId: updated.clarifications[0].ambiguityId,
+    responseToInspectionHash: updated.inspection.hash,
+    responseToPlanVersion: updated.iteration
+  });
+
+  await processAgentJob({ jobId, action: 'understand', actor: '005g5000009ImIkAAK' });
+  updated = await getJobRecord(jobId);
+
+  assert.equal(updated.status, 'AWAITING_IMPLEMENTATION_APPROVAL');
+  assert.equal(updated.approvals.length, 0);
+  assert.notEqual(updated.plan.scopeHash, oldPlan.scopeHash);
+  assert.deepEqual(plannerCalls.at(-1).answers, [{
+    ambiguityId: 'specialist:FLOW:blocked:v1',
+    text: 'Expand scope for locking-capable Apex.',
+    inspectionHash: updated.inspection.hash,
+    planVersion: updated.iteration
+  }]);
+});
+
 function orgContext() {
   return {
     orgRegistryId: 'providus_orgfarm_dev',
@@ -247,4 +360,39 @@ function plan() {
     scopeHash: 'scope-hash',
     materialChangeHash: 'scope-hash'
   };
+}
+
+function actionPlan(currentInspection = inspection(), overrides = {}) {
+  const core = {
+    requirement: 'Create a recurring donation installment Flow.',
+    acceptanceCriteria: ['Only paid donations are numbered.'],
+    assumptions: [],
+    evidenceIds: ['evidence:relationship'],
+    components: [{ operation: 'modify', metadataType: 'Flow', apiName: 'Assign_Installment', owner: 'flow-specialist', reason: 'Implement the requested behavior.' }],
+    expectedBehavior: ['Paid donations are numbered.'],
+    testingStrategy: ['Validate the Flow in the verified sandbox.'],
+    risks: [],
+    rollbackStrategy: 'Disable generated metadata before deployment.',
+    trustedBinding: { inspectionHash: currentInspection.hash, sourceOrgId: '00Dg500000E07e9EAB' },
+    planVersion: 1,
+    ...overrides
+  };
+  const hashes = architectureHashes(core);
+  return { ...core, planHash: hashes.planHash, scopeHash: hashes.scopeHash, materialChangeHash: hashes.scopeHash };
+}
+
+function implementationApproval(currentPlan) {
+  return {
+    approvalId: 'approval-1',
+    approvalType: 'IMPLEMENTATION',
+    decision: 'APPROVED',
+    planVersion: currentPlan.planVersion,
+    planHash: currentPlan.planHash,
+    metadataScopeHash: currentPlan.scopeHash,
+    salesforceOrganizationId: '00Dg500000E07e9EAB'
+  };
+}
+
+function architectureHashes(planBody) {
+  return architecturePlanHashes(planBody);
 }

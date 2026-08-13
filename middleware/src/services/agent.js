@@ -191,8 +191,11 @@ async function implement(job, actor) {
       const blocked = Object.values(result.resultsBySpecialist).find((item) => item.status === 'BLOCKED');
       const message = compactText(blocked?.materialQuestion || 'A specialist needs material clarification before source generation can continue.');
       await appendLog(job.jobId, 'warn', `Specialist generation blocked: ${message}`);
-      await transitionJob(job.jobId, JOB_STATES.FAILED, { actor, reason: 'Specialist generation blocked before source writes.', error: message });
-      return { jobId: job.jobId, status: JOB_STATES.FAILED, specialistStatus: 'BLOCKED' };
+      await updateJob(job.jobId, {
+        clarifications: upsertClarification(job.clarifications || [], specialistBlockedClarification(job, blocked, message))
+      });
+      await transitionJob(job.jobId, JOB_STATES.AWAITING_CLARIFICATION, { actor, reason: message });
+      return { jobId: job.jobId, status: JOB_STATES.AWAITING_CLARIFICATION, specialistStatus: 'BLOCKED', clarificationRequired: true };
     }
     await appendLog(job.jobId, 'info', `Executed ${Object.keys(result.resultsBySpecialist).length} bounded specialist contracts. No source files were written in Task 7.`);
     return validate(await requiredJob(job.jobId), actor);
@@ -513,6 +516,22 @@ function upsertClarification(clarifications, clarification) {
     !(item.ambiguityId === clarification.ambiguityId && item.inspectionHash === clarification.inspectionHash && Number(item.planVersion) === Number(clarification.planVersion))
   );
   return [...filtered, clarification];
+}
+
+function specialistBlockedClarification(job, blocked, message) {
+  const specialistId = String(blocked?.specialistId || 'SPECIALIST');
+  return {
+    ambiguityId: `specialist:${specialistId}:blocked:v${Number(job.plan?.planVersion || job.iteration || 1)}`,
+    question: message,
+    inspectionHash: job.inspection?.hash || job.plan?.trustedBinding?.inspectionHash || '',
+    sourceOrgId: job.plan?.trustedBinding?.sourceOrgId || job.inspection?.sourceOrgId || job.orgContext?.expectedOrgId || '',
+    planVersion: Number(job.plan?.planVersion || job.iteration || 1),
+    planHash: job.plan?.planHash || '',
+    scopeHash: job.metadataScope?.hash || job.plan?.scopeHash || '',
+    specialistId,
+    status: 'OPEN',
+    createdAt: new Date().toISOString()
+  };
 }
 
 function isControlledPlanningFailure(error) {

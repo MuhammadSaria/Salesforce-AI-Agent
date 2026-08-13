@@ -311,6 +311,62 @@ test('Salesforce chat clarification is bound by HTTP endpoint and replans with o
   assert.equal(job.requirement.acceptanceCriteria.includes('Paid'), false);
 });
 
+test('Salesforce chat specialist clarification response uses trusted server binding', async (t) => {
+  config.apiAuthToken = 'unit-test-token';
+  const queued = [];
+  const currentInspection = specialistInspection();
+  const { base, close } = await testServer(t, {
+    apiAuthToken: 'unit-test-token',
+    resolveSameOrg: async ({ authenticatedOrgId }) => trustedContext(authenticatedOrgId),
+    enqueue: async (message, options) => queued.push({ message, options })
+  });
+  t.after(close);
+
+  const jobId = `specialist-api-clarification-${Date.now()}`;
+  await createJobRecord({
+    jobId,
+    userId: '005g5000009ImIkAAK',
+    orgId: '00Dg500000E07e9EAB',
+    source: 'salesforce-chat',
+    prompt: 'Create a recurring donation installment Flow.'
+  });
+  await updateJob(jobId, {
+    status: 'AWAITING_CLARIFICATION',
+    iteration: 1,
+    inspection: currentInspection,
+    clarifications: [{
+      ambiguityId: 'specialist:FLOW:blocked:v1',
+      question: 'Strict uniqueness requires locking-capable Apex. Expand scope?',
+      inspectionHash: currentInspection.hash,
+      sourceOrgId: '00Dg500000E07e9EAB',
+      planVersion: 1,
+      planHash: 'plan-hash',
+      scopeHash: 'scope-hash',
+      specialistId: 'FLOW',
+      status: 'OPEN'
+    }]
+  });
+
+  const response = await postJson(`${base}/api/jobs/${jobId}/messages`, {
+    text: 'Expand scope for locking-capable Apex.',
+    ambiguityId: 'attacker-controlled',
+    responseToInspectionHash: 'attacker-controlled',
+    responseToPlanVersion: 999,
+    specialistId: 'OBJECT_FIELD'
+  }, salesforceChatHeaders('005g5000009ImIkAAK'));
+
+  assert.equal(response.status, 202);
+  const job = await getJobRecord(jobId);
+  const clarification = job.conversation.at(-1);
+  assert.equal(clarification.kind, 'clarification-response');
+  assert.equal(clarification.ambiguityId, 'specialist:FLOW:blocked:v1');
+  assert.equal(clarification.responseToInspectionHash, currentInspection.hash);
+  assert.equal(clarification.responseToPlanVersion, 1);
+  assert.equal(clarification.actor, '005g5000009ImIkAAK');
+  assert.equal(queued.length, 1);
+  assert.deepEqual(queued[0].message, { jobId, action: 'understand', actor: '005g5000009ImIkAAK' });
+});
+
 test('production PostgreSQL repository wiring persists API jobs outside legacy memory store', async (t) => {
   const pool = createTestPostgresPool();
   await migrate(pool);
@@ -673,4 +729,21 @@ function sourceFreePlan() {
   };
   ARCHITECTURE_PLAN_SCHEMA.parse(core);
   return core;
+}
+
+function specialistInspection() {
+  const body = {
+    sourceOrgId: '00Dg500000E07e9EAB',
+    evidence: [{
+      evidenceId: 'relationship:GiftTransaction.GiftCommitmentId',
+      kind: 'RELATIONSHIP',
+      objectApiName: 'GiftTransaction',
+      fieldApiName: 'GiftCommitmentId',
+      targetObjectApiName: 'GiftCommitment',
+      sourceOrgId: '00Dg500000E07e9EAB',
+      active: true,
+      observedAt: fixedClock().toISOString()
+    }]
+  };
+  return { ...body, hash: canonicalInspectionHash(body) };
 }

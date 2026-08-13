@@ -17,6 +17,27 @@
 
 ## Completed Tasks
 
+- Phase 1 Task 7 first correction: Fix bounded specialist BLOCKED lifecycle handling
+  - Implementation commit: this correction commit
+  - Verification date: 2026-08-13
+  - Verification:
+    - `cd middleware && node --import ./test/setup.js --test test/agentClarificationEvidence.test.js` - RED first, 5 passed and 2 failed because valid bounded specialist `BLOCKED` incorrectly transitioned the job to `FAILED` instead of `AWAITING_CLARIFICATION`.
+    - `cd middleware && node --import ./test/setup.js --test test/developmentJob.test.js` - RED first, 5 passed and 1 failed because `IMPLEMENTING -> AWAITING_CLARIFICATION` was not a legal transition.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/specialistRunner.test.js test/specialistAgents.test.js test/orchestrator.test.js test/agentClarificationEvidence.test.js test/conversationApi.test.js test/approval.test.js test/agentSameOrg.test.js test/developmentJob.test.js` - PASS, 68 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/productionStoreWiring.test.js test/agentQueueFallback.test.js test/jobRepositoryPostgres.test.js test/outboxDispatcher.test.js test/conversationApi.test.js` - combined DB-heavy batch exposed shared PostgreSQL reset/state interference; affected PostgreSQL suites were rerun individually.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/jobRepositoryPostgres.test.js` - PASS, 11 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/outboxDispatcher.test.js` - PASS, 4 tests, 0 skipped.
+    - `cd middleware && node --import ./test/setup.js --test test/productionStoreWiring.test.js test/agentQueueFallback.test.js` - PASS, 3 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 242 tests and 0 skipped.
+    - `git diff --check` - PASS, whitespace clean; Git reported line-ending warnings only.
+  - Review:
+    - Corrected the direct Salesforce-chat bounded specialist lifecycle so a valid `BLOCKED` result with a material question persists trusted clarification state and transitions from `IMPLEMENTING` to `AWAITING_CLARIFICATION` instead of `FAILED`.
+    - The trusted clarification records a server-derived `ambiguityId`, specialist ID, question text, plan version, plan hash, scope hash, inspection hash, and source org ID; model-controlled request fields cannot replace those bindings.
+    - User clarification responses continue through the existing conversation mechanism, queue the normal `understand` action, and re-enter inspection/planning instead of jumping directly back to implementation.
+    - Replanning clears stale implementation approvals when the plan or scope changes, so the previous approval cannot authorize expanded scope.
+    - The `BLOCKED` path writes no source, runs no Salesforce validation, runs no deployment, and does not activate Flow.
+    - Ownership violations, scope violations, malformed specialist output, and other invalid specialist results remain fail-closed rejections rather than clarification prompts.
+
 - Phase 1 Task 7: Define and execute real bounded specialist contracts
   - Implementation commit: this Task 7 completion commit
   - Verification date: 2026-08-13

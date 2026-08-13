@@ -12,6 +12,10 @@ test('implementation cannot skip approval', () => {
   assert.throws(() => assertDevelopmentTransition('PLANNING', 'IMPLEMENTING'), /Invalid job transition/);
 });
 
+test('implementation may pause for material specialist clarification', () => {
+  assert.doesNotThrow(() => assertDevelopmentTransition('IMPLEMENTING', 'AWAITING_CLARIFICATION'));
+});
+
 test('states have business-readable labels', () => {
   assert.equal(publicDevelopmentStatus('AWAITING_IMPLEMENTATION_APPROVAL'), 'Plan ready for review');
   assert.equal(publicDevelopmentStatus('VALIDATING'), 'Checking the solution in Salesforce');
