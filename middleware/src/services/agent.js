@@ -20,7 +20,7 @@ import { orgBoundApproval } from '../domain/approval.js';
 import { assertArchitecturePlanActionable } from '../domain/planActionability.js';
 import { humanizeValidationFailure } from '../utils/validationFailure.js';
 import { activatePendingJiraRevision, syncJiraComments } from './jiraSync.js';
-import { approveSpecialistWorkItems, buildSpecialistOrchestration, specialistAuditEvent, structuredSpecialistMessage, workItemForFile } from './orchestrator.js';
+import { approveSpecialistWorkItems, buildSpecialistOrchestration, executeBoundedSpecialists, specialistAuditEvent, structuredSpecialistMessage, workItemForFile } from './orchestrator.js';
 import { SPECIALIST_AGENT_IDS, SPECIALIST_MESSAGE_TYPES, WORK_ITEM_STATUSES, implementationAgentIds, ownerForMetadataType } from '../domain/specialistAgents.js';
 import { sameSalesforceId } from '../utils/salesforceId.js';
 
@@ -174,6 +174,29 @@ async function implement(job, actor) {
   assertState(job, JOB_STATES.IMPLEMENTING, JOB_STATES.VALIDATION_FAILED);
   const approval = validApproval(job, 'IMPLEMENTATION', { orgContext: trustedOrgContext });
   await persistSafeDirectOrgContext(job, trustedOrgContext);
+  if (isSourceFreeDirectPlan(job)) {
+    const result = await executeBoundedSpecialists({
+      job,
+      plan: job.plan,
+      inspection: job.inspection,
+      workspace: {
+        workspacePath: `implementation/plan-v${job.plan.planVersion}/project`,
+        planVersion: Number(job.plan.planVersion || 1)
+      }
+    }, {
+      runners: defaultBlockedSpecialistRunners(),
+      jobStore: currentJobStore()
+    });
+    if (result.status === 'BLOCKED') {
+      const blocked = Object.values(result.resultsBySpecialist).find((item) => item.status === 'BLOCKED');
+      const message = compactText(blocked?.materialQuestion || 'A specialist needs material clarification before source generation can continue.');
+      await appendLog(job.jobId, 'warn', `Specialist generation blocked: ${message}`);
+      await transitionJob(job.jobId, JOB_STATES.FAILED, { actor, reason: 'Specialist generation blocked before source writes.', error: message });
+      return { jobId: job.jobId, status: JOB_STATES.FAILED, specialistStatus: 'BLOCKED' };
+    }
+    await appendLog(job.jobId, 'info', `Executed ${Object.keys(result.resultsBySpecialist).length} bounded specialist contracts. No source files were written in Task 7.`);
+    return validate(await requiredJob(job.jobId), actor);
+  }
   if (job.status === JOB_STATES.VALIDATION_FAILED) {
     if (job.implementation) return validate(job, actor);
     await transitionJob(job.jobId, JOB_STATES.IMPLEMENTING, { actor, reason: 'Retrying missing local implementation before validation.' });
@@ -377,6 +400,28 @@ async function deploy(job, actor) {
 
 function validApproval(job, type, options = {}) {
   return orgBoundApproval(job, type, options);
+}
+
+function isSourceFreeDirectPlan(job) {
+  return job.source === 'salesforce-chat'
+    && Array.isArray(job.plan?.components)
+    && !Array.isArray(job.plan?.fileOperations);
+}
+
+function defaultBlockedSpecialistRunners() {
+  const blocked = (specialistId) => async () => ({
+    status: 'BLOCKED',
+    operations: [],
+    dependencies: [],
+    risks: ['Task 8 specialist source generator is not configured yet.'],
+    verification: ['No Salesforce source was generated or written.'],
+    materialQuestion: `${specialistId} source generation is not available until Phase 1 Task 8.`
+  });
+  return {
+    OBJECT_FIELD: blocked('OBJECT_FIELD'),
+    SECURITY_PERMISSIONS: blocked('SECURITY_PERMISSIONS'),
+    FLOW: blocked('FLOW')
+  };
 }
 
 async function analyzeDirectSalesforceChat(job, actor) {

@@ -12,10 +12,32 @@
 
 ## Current Task
 
-- Task: Phase 1 Task 7
+- Task: Phase 1 Task 8
 - Status: Not started
 
 ## Completed Tasks
+
+- Phase 1 Task 7: Define and execute real bounded specialist contracts
+  - Implementation commit: this Task 7 completion commit
+  - Verification date: 2026-08-13
+  - Verification:
+    - `cd middleware && node --import ./test/setup.js --test test/specialistRunner.test.js` - RED first, failed for expected missing `middleware/src/domain/specialistContract.js`; then PASS, 10 tests, 0 skipped.
+    - `cd middleware && node --import ./test/setup.js --test test/specialistRunner.test.js test/orchestrator.test.js test/specialistAgents.test.js` - PASS, 17 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --input-type=module -e "import pg from 'pg'; const c = new pg.Client({ connectionString: process.env.TEST_DATABASE_URL }); await c.connect(); const r = await c.query('select current_database() as db, inet_server_addr() as addr, inet_server_port() as port'); console.log(JSON.stringify(r.rows[0])); await c.end();"` - PASS, connected to `providus_nexus_test` on PostgreSQL port 5432.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/architecturePlanner.test.js test/approval.test.js test/agentClarificationEvidence.test.js test/agentSameOrg.test.js test/conversationApi.test.js test/agentQueue.test.js test/agentQueueFallback.test.js test/productionStoreWiring.test.js test/jobRepositoryPostgres.test.js test/outboxDispatcher.test.js` - initial combined DB-heavy batch exposed shared PostgreSQL test-state interference; rerunning the affected PostgreSQL files individually passed.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/jobRepositoryPostgres.test.js` - PASS, 11 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/outboxDispatcher.test.js` - PASS, 4 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 238 tests and 0 skipped.
+    - `git diff --check` - PASS, whitespace clean; Git reported line-ending warnings only.
+  - Review:
+    - Added strict Zod `SPECIALIST_REQUEST_SCHEMA`, `SPECIALIST_OPERATION_SCHEMA`, and `SPECIALIST_RESULT_SCHEMA` contracts with `.strict()` on model-controlled request/result surfaces; unexpected org, approval, command, and authority fields are rejected.
+    - Added a deterministic bounded specialist runner for the Phase 1 implementation owners `OBJECT_FIELD`, `SECURITY_PERMISSIONS`, and `FLOW`, with dependency ordering `OBJECT_FIELD -> SECURITY_PERMISSIONS -> FLOW`.
+    - Specialist requests include only owned approved components, relevant source-free plan context, relevant verified inspection evidence, permitted dependency outputs, and workspace identifiers.
+    - Specialist results are validated before acceptance, remain traceable under `specialistResults[owner]`, and persist through the unified injected JobStore abstraction without direct production imports of legacy `services/jobStore.js`.
+    - Ownership and scope are fail-closed: metadata type ownership, file path ownership, and approved component operation/type/API name must all match the executing specialist; cross-owner Flow-to-PermissionSet output is rejected.
+    - BLOCKED specialist results require a material question and empty operations, suppress dependent specialists, preserve structured blocked output, and do not write Salesforce source.
+    - Direct source-free Salesforce-chat implementation now enters the bounded specialist boundary; until Task 8 supplies real generators, default specialists return structured `BLOCKED` rather than fabricating metadata.
+    - No Task 8 source generators, Salesforce deployment, Flow activation, production deployment, queue fallback, approval bypass, same-org weakening, or Task 6 persistence bypass was introduced.
 
 - Phase 1 Task 6: Separate source-free architecture planning from source generation
   - Implementation commit: 56c4d3841792d5a7d8c5425d7aa7df38fbe5bc72
