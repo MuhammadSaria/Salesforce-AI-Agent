@@ -2,16 +2,32 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { architecturePlanHashes } from '../src/domain/architecturePlan.js';
 import { canonicalInspectionHash } from '../src/domain/inspection.js';
-import { processAgentJob, setDirectAnalysisDependenciesForTest, setDirectSpecialistModelRunnerForTest, setSameOrgResolverForTest } from '../src/services/agent.js';
+import { processAgentJob, setDirectAnalysisDependenciesForTest, setDirectSpecialistModelRunnerForTest, setImplementationBaselineRunnerForTest, setSameOrgResolverForTest } from '../src/services/agent.js';
 import { appendConversation, createJobRecord, getJobRecord, updateJob } from '../src/services/jobStore.js';
 
 test.beforeEach(() => {
   setSameOrgResolverForTest(async ({ authenticatedOrgId }) => orgContext(authenticatedOrgId));
+  setImplementationBaselineRunnerForTest(async ({ job, operations }) => {
+    const baseline = {
+      status: 'CAPTURED', sourceWritten: false,
+      baselineCommit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      componentKeys: job.plan.components.map((component) => `${component.metadataType}:${component.apiName}`).sort(),
+      files: operations.map((operation) => ({ path: operation.path, state: operation.operation === 'create' ? 'ABSENT' : 'PRESENT', ...(operation.operation === 'create' ? {} : { hash: 'b'.repeat(64) }) })),
+      sourceOrgId: job.sourceValidation.sourceOrgId,
+      planHash: job.sourceValidation.planHash,
+      scopeHash: job.sourceValidation.scopeHash,
+      inspectionHash: job.sourceValidation.inspectionHash,
+      sourceHash: job.sourceValidation.sourceHash
+    };
+    await updateJob(job.jobId, { implementationBaseline: baseline });
+    return baseline;
+  });
 });
 
 test.afterEach(() => {
   setSameOrgResolverForTest();
   setDirectSpecialistModelRunnerForTest();
+  setImplementationBaselineRunnerForTest();
 });
 
 test('direct jobs use createArchitecturePlan and persist no source-generation fields', async (t) => {
@@ -248,7 +264,7 @@ test('blocked bounded specialist records trusted clarification instead of failin
   assert.equal(clarification.status, 'OPEN');
 });
 
-test('direct implementation selects real Task 8 generators, persists results, and stops before source writes', async () => {
+test('direct implementation validates Task 8 results and captures a bound baseline before future local writes', async () => {
   const jobId = `specialist-completed-${Date.now()}`;
   const currentInspection = inspection();
   const currentPlan = actionPlan(currentInspection, {
@@ -298,6 +314,9 @@ test('direct implementation selects real Task 8 generators, persists results, an
   assert.equal(updated.sourceValidation.status, 'PASSED');
   assert.equal(updated.sourceValidation.operationCount, 3);
   assert.match(updated.sourceValidation.sourceHash, /^[a-f0-9]{64}$/);
+  assert.equal(result.implementationBaseline.sourceHash, updated.sourceValidation.sourceHash);
+  assert.equal(result.implementationBaseline.sourceOrgId, currentPlan.trustedBinding.sourceOrgId);
+  assert.deepEqual(result.implementationBaseline.componentKeys, ['CustomField:GiftTransaction.Installment_Number__c', 'Flow:Assign_Installment', 'PermissionSet:Gift_Operations']);
 });
 
 test('Task 9 rejects one malicious operation after complete specialist collection with zero write or Salesforce effects', async () => {

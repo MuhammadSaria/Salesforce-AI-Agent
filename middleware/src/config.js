@@ -28,6 +28,8 @@ export const config = {
   validationExpiryMinutes: Number(process.env.VALIDATION_EXPIRY_MINUTES || 60),
   allowProductionDeployment: process.env.ALLOW_PRODUCTION_DEPLOYMENT === 'true',
   sfCommandTimeoutMs: Number(process.env.SF_COMMAND_TIMEOUT_MS || 600000),
+  componentLockLeaseSeconds: Number(process.env.COMPONENT_LOCK_LEASE_SECONDS || 60),
+  componentLockHeartbeatMs: Number(process.env.COMPONENT_LOCK_HEARTBEAT_MS || 15000),
   sfCliNode: process.env.SF_CLI_NODE || '',
   sfCliRun: process.env.SF_CLI_RUN || '',
   codexCommand: process.env.CODEX_COMMAND || 'codex',

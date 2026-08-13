@@ -26,6 +26,8 @@ export const REQUIRED_JOB_STORE_METHODS = Object.freeze([
   'create', 'get', 'list', 'update', 'updateAtomically', 'transition',
   'appendConversation', 'appendConversationAtomically', 'appendAudit', 'appendLog', 'appendCommand',
   'transitionWorkItem', 'claimFileOwnership', 'releaseFileOwnership',
+  'acquireComponentLocks', 'renewComponentLocks', 'releaseComponentLocks',
+  'assertComponentLocksOwned', 'updateWithComponentLocks',
   'invalidateForOrgChange', 'invalidateForPlanChange',
   'createDispatch', 'claimDispatch', 'claimNextDispatch', 'markDispatchDelivered', 'markDispatchRetryable',
   'listClaimableDispatches', 'savePlanWithCompareAndSet', 'approveImplementationAtomically', 'hydrateJob'
@@ -41,6 +43,7 @@ const jobStoreScope = new AsyncLocalStorage();
 let defaultJobStore = null;
 
 export function createMemoryJobStore() {
+  const componentLocks = new Map();
   const store = {
     create: createJobRecord,
     createJob: createJobRecord,
@@ -61,6 +64,33 @@ export function createMemoryJobStore() {
     transitionWorkItem,
     claimFileOwnership,
     releaseFileOwnership,
+    acquireComponentLocks: async ({ jobId, componentKeys, leaseMilliseconds, lockToken }) => {
+      const now = Date.now();
+      if (componentKeys.some((key) => componentLocks.has(key) && componentLocks.get(key).jobId !== jobId && componentLocks.get(key).leaseExpiresAt > now)) {
+        throw Object.assign(new Error('One or more approved components are currently locked.'), { code: 'COMPONENT_LOCKED', statusCode: 409 });
+      }
+      const leaseExpiresAt = now + leaseMilliseconds;
+      for (const key of componentKeys) componentLocks.set(key, { jobId, lockToken, leaseExpiresAt });
+      return { jobId, componentKeys, lockToken, leaseExpiresAt: new Date(leaseExpiresAt).toISOString() };
+    },
+    renewComponentLocks: async ({ jobId, componentKeys, leaseMilliseconds, lockToken }) => {
+      const now = Date.now();
+      if (componentKeys.some((key) => componentLocks.get(key)?.jobId !== jobId || componentLocks.get(key)?.lockToken !== lockToken || componentLocks.get(key).leaseExpiresAt <= now)) {
+        throw Object.assign(new Error('Component lock ownership was lost.'), { code: 'COMPONENT_LOCK_LOST', statusCode: 409 });
+      }
+      const leaseExpiresAt = now + leaseMilliseconds;
+      for (const key of componentKeys) componentLocks.set(key, { jobId, lockToken, leaseExpiresAt });
+      return { jobId, componentKeys, lockToken, leaseExpiresAt: new Date(leaseExpiresAt).toISOString() };
+    },
+    releaseComponentLocks: async ({ jobId, componentKeys, lockToken }) => {
+      for (const key of componentKeys) if (componentLocks.get(key)?.jobId === jobId && componentLocks.get(key)?.lockToken === lockToken) componentLocks.delete(key);
+      return { jobId, componentKeys };
+    },
+    assertComponentLocksOwned: async ({ jobId, componentKeys, lockToken }) => assertMemoryLocks(componentLocks, { jobId, componentKeys, lockToken }),
+    updateWithComponentLocks: async ({ jobId, componentKeys, lockToken }, operation) => {
+      assertMemoryLocks(componentLocks, { jobId, componentKeys, lockToken });
+      return updateJobAtomically(jobId, operation);
+    },
     invalidateForOrgChange,
     invalidateForPlanChange,
     createDispatch: async (dispatch) => updateJobAtomically(dispatch.jobId, (record) => { if (!(record.dispatches || []).some((item) => item.dispatchKey === dispatch.dispatchKey)) record.dispatches.push(dispatch); return dispatch; }),
@@ -89,6 +119,14 @@ async function atomicMemoryMutation(jobId, expectedRevision, operation) {
     record.dispatches.push(outcome.dispatch);
     return outcome.result;
   });
+}
+
+function assertMemoryLocks(componentLocks, { jobId, componentKeys, lockToken }) {
+  const now = Date.now();
+  if (componentKeys.some((key) => componentLocks.get(key)?.jobId !== jobId || componentLocks.get(key)?.lockToken !== lockToken || componentLocks.get(key)?.leaseExpiresAt <= now)) {
+    throw Object.assign(new Error('Component lock ownership was lost.'), { code: 'COMPONENT_LOCK_LOST', statusCode: 409 });
+  }
+  return { jobId, componentKeys, lockToken };
 }
 
 export function createPostgresJobStore({ pool, dispatchLeaseMs, claimantId, dispatchRetryBaseMs, dispatchMaxAttempts } = {}) {

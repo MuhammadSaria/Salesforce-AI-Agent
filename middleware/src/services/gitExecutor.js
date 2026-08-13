@@ -8,13 +8,13 @@ const ALLOWED = new Set(['status', 'diff', 'worktree-add', 'add', 'commit', 'rev
 
 export async function runGit(command, params = {}) {
   if (!ALLOWED.has(command)) throw new Error(`Blocked Git command: ${command}`);
-  const args = buildArgs(command, params);
+  const args = buildGitArgs(command, params);
   if (args.some((arg) => /[;&|<>`\r\n]/.test(arg))) throw new Error('Git argument contains blocked shell syntax.');
   return spawnGit(args, safeCwd(params.cwd));
 }
 
-function buildArgs(command, params) {
-  if (command === 'status') return ['status', '--short'];
+export function buildGitArgs(command, params = {}) {
+  if (command === 'status') return ['status', '--short', '--untracked-files=all'];
   if (command === 'diff') return ['diff', '--no-ext-diff', ...(params.cached ? ['--cached'] : []), '--', ...(params.paths || [])];
   if (command === 'worktree-add') {
     if (!/^ai-agent\/[A-Z][A-Z0-9_]+-[0-9]+-[A-Za-z0-9_-]+$/.test(params.branch || '')) throw new Error('Invalid agent branch name.');
@@ -23,7 +23,7 @@ function buildArgs(command, params) {
     return ['worktree', 'add', '-b', params.branch, worktree, 'HEAD'];
   }
   if (command === 'add') return ['add', '--', ...(params.paths || [])];
-  if (command === 'commit') return ['commit', '-m', String(params.message || '').slice(0, 120)];
+  if (command === 'commit') return ['commit', ...(params.allowEmpty ? ['--allow-empty'] : []), '-m', String(params.message || '').slice(0, 120)];
   return ['rev-parse', params.ref || 'HEAD'];
 }
 

@@ -87,6 +87,112 @@ export function createPostgresJobRecordStore({ pool, dispatchLeaseMs = 30000, cl
         Object.assign(item, { lockStatus: 'RELEASED', currentHash, updatedAt: new Date().toISOString() });
       });
     },
+    async acquireComponentLocks({ jobId, componentKeys, leaseMilliseconds, lockToken }) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        for (const componentKey of componentKeys) {
+          await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [componentKey]);
+        }
+        const existing = await client.query(
+          `SELECT component_key, job_id, lease_expires_at > now() AS active
+           FROM component_locks
+           WHERE component_key = ANY($1::text[])
+           FOR UPDATE`,
+          [componentKeys]
+        );
+        if (existing.rows.some((row) => row.active && row.job_id !== jobId)) {
+          throw Object.assign(new Error('One or more approved components are currently locked.'), { code: 'COMPONENT_LOCKED', statusCode: 409 });
+        }
+        for (const componentKey of componentKeys) {
+          await client.query(
+            `INSERT INTO component_locks (lock_id, job_id, component_key, lease_expires_at, released_at)
+             VALUES ($1, $2, $3, now() + ($4::int * interval '1 millisecond'), NULL)
+             ON CONFLICT (component_key) DO UPDATE
+             SET lock_id = EXCLUDED.lock_id,
+                 job_id = EXCLUDED.job_id,
+                 lease_expires_at = EXCLUDED.lease_expires_at,
+                 released_at = NULL,
+                 updated_at = now()`,
+            [lockToken, jobId, componentKey, leaseMilliseconds]
+          );
+        }
+        const expiry = await client.query('SELECT now() + ($1::int * interval \'1 millisecond\') AS lease_expires_at', [leaseMilliseconds]);
+        await client.query('COMMIT');
+        return { jobId, componentKeys, lockToken, leaseExpiresAt: expiry.rows[0].lease_expires_at.toISOString() };
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+    async renewComponentLocks({ jobId, componentKeys, leaseMilliseconds, lockToken }) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        for (const componentKey of componentKeys) {
+          await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [componentKey]);
+        }
+        const renewed = await client.query(
+          `UPDATE component_locks
+           SET lease_expires_at = now() + ($3::int * interval '1 millisecond'), updated_at = now()
+           WHERE job_id = $1
+             AND component_key = ANY($2::text[])
+             AND lock_id = $4
+             AND lease_expires_at > now()
+           RETURNING component_key, lease_expires_at`,
+          [jobId, componentKeys, leaseMilliseconds, lockToken]
+        );
+        if (renewed.rowCount !== componentKeys.length) {
+          throw Object.assign(new Error('Component lock ownership was lost.'), { code: 'COMPONENT_LOCK_LOST', statusCode: 409 });
+        }
+        await client.query('COMMIT');
+        return { jobId, componentKeys, lockToken, leaseExpiresAt: renewed.rows[0].lease_expires_at.toISOString() };
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+    async releaseComponentLocks({ jobId, componentKeys, lockToken }) {
+      await pool.query(
+        `DELETE FROM component_locks
+         WHERE job_id = $1 AND component_key = ANY($2::text[]) AND lock_id = $3`,
+        [jobId, componentKeys, lockToken]
+      );
+      return { jobId, componentKeys };
+    },
+    async assertComponentLocksOwned({ jobId, componentKeys, lockToken }) {
+      await assertPostgresLocks(pool, { jobId, componentKeys, lockToken });
+      return { jobId, componentKeys, lockToken };
+    },
+    async updateWithComponentLocks({ jobId, componentKeys, lockToken }, operation) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await assertPostgresLocks(client, { jobId, componentKeys, lockToken, forUpdate: true });
+        const result = await client.query('SELECT record FROM development_jobs WHERE job_id = $1 FOR UPDATE', [jobId]);
+        if (!result.rowCount) throw notFound();
+        const record = result.rows[0].record;
+        const value = await operation(record);
+        record.updatedAt = new Date().toISOString();
+        await client.query(
+          `UPDATE development_jobs
+           SET status = $2, current_plan_version = $3, record = $4::jsonb, revision = revision + 1, updated_at = now()
+           WHERE job_id = $1`,
+          [jobId, record.status, Number(record.nextPlanVersion || record.iteration || record.plan?.planVersion || 1), JSON.stringify(record)]
+        );
+        await client.query('COMMIT');
+        return value ?? record;
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
     async invalidateForOrgChange(jobId, selection, actor) { return invalidateRecord(pool, jobId, selection, actor, true); },
     async invalidateForPlanChange(jobId, actor) {
       const current = await this.get(jobId);
@@ -311,8 +417,24 @@ async function invalidateRecord(pool, jobId, selection, actor, orgChanged) {
     const currentPlanVersion = Number(record.plan?.planVersion || record.nextPlanVersion || 0);
     record.revisions = [...(record.revisions || []), ...(record.plan ? [{ revisionNumber: currentPlanVersion, invalidatedAt: now, invalidatedBy: actor, plan: record.plan, approvals: record.approvals, orgContext: record.orgContext }] : [])];
     record.stateHistory.push({ previousState: record.status, newState: JOB_STATES.RECEIVED, timestamp: now, actor, reason: orgChanged ? 'Target org changed; artifacts invalidated.' : 'Requirements changed; artifacts invalidated.', approvalId: '', orgId: '' });
-    Object.assign(record, { status: JOB_STATES.RECEIVED, context: { ...record.context, selectedOrgRegistryId: selection }, orgContext: null, metadataScope: null, plan: null, nextPlanVersion: Math.max(1, currentPlanVersion + 1), iteration: Math.max(1, currentPlanVersion + 1), orchestration: null, workItems: [], specialistMessages: [], fileOwnership: [], revisionContext: null, approvals: [], validation: null, deployment: null, implementation: null, diff: '', error: '' });
+    Object.assign(record, { status: JOB_STATES.RECEIVED, context: { ...record.context, selectedOrgRegistryId: selection }, orgContext: null, metadataScope: null, plan: null, nextPlanVersion: Math.max(1, currentPlanVersion + 1), iteration: Math.max(1, currentPlanVersion + 1), orchestration: null, workItems: [], specialistMessages: [], specialistResults: {}, fileOwnership: [], revisionContext: null, approvals: [], sourceValidation: null, implementationBaseline: null, validation: null, deployment: null, implementation: null, diff: '', error: '' });
   });
+}
+
+async function assertPostgresLocks(db, { jobId, componentKeys, lockToken, forUpdate = false }) {
+  const result = await db.query(
+    `SELECT component_key
+     FROM component_locks
+     WHERE job_id = $1
+       AND component_key = ANY($2::text[])
+       AND lock_id = $3
+       AND lease_expires_at > now()
+     ${forUpdate ? 'FOR UPDATE' : ''}`,
+    [jobId, componentKeys, lockToken]
+  );
+  if (result.rowCount !== componentKeys.length) {
+    throw Object.assign(new Error('Component lock ownership was lost.'), { code: 'COMPONENT_LOCK_LOST', statusCode: 409 });
+  }
 }
 
 function newJobRecord(input) {
@@ -350,6 +472,8 @@ function newJobRecord(input) {
     approvals: [],
     validation: null,
     deployment: null,
+    sourceValidation: null,
+    implementationBaseline: null,
     diff: '',
     logs: [{ timestamp: now, level: 'info', message: 'Job received.' }],
     commands: [],

@@ -10,7 +10,7 @@ test('migration 003 upgrades concurrently and records retry scheduling columns o
     await resetPostgresSchema(pool);
     await Promise.all([migrate(pool), migrate(pool)]);
     const migrations = await pool.query('SELECT filename FROM schema_migrations ORDER BY filename');
-    assert.deepEqual(migrations.rows.map((row) => row.filename), ['001_phase1_jobs.sql', '002_task6_job_dispatches.sql', '003_task6_dispatch_retry.sql']);
+    assert.deepEqual(migrations.rows.map((row) => row.filename), ['001_phase1_jobs.sql', '002_task6_job_dispatches.sql', '003_task6_dispatch_retry.sql', '004_task10_component_leases.sql']);
     const columns = await pool.query("SELECT column_name FROM information_schema.columns WHERE table_name='job_dispatches'");
     for (const name of ['next_attempt_at', 'terminal_at', 'terminal_reason']) assert.ok(columns.rows.some((row) => row.column_name === name));
   } finally { await pool.end(); }

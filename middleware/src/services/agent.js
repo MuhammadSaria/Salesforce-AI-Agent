@@ -7,7 +7,7 @@ import { stableHash } from '../utils/hash.js';
 import { currentJobStore, withJobStore } from '../persistence/jobStore.js';
 import { auditEvent } from './auditLog.js';
 import { buildOrgContext, isDataObjectAllowed, selectOrgForJob } from './orgRegistry.js';
-import { ensureJobWorkspace, writeOrgContext } from './jobWorkspace.js';
+import { captureMetadataBaseline, ensureJobWorkspace, writeOrgContext } from './jobWorkspace.js';
 import { addJiraComment, getJiraIssue } from './jira.js';
 import { analyzeDependencies, buildMetadataScope, buildPlan, expandScopeForFileOperations, extractRequirement, writeManifest } from './planning.js';
 import { inspectFlowRequirement } from './orgInspectionService.js';
@@ -28,6 +28,7 @@ import { generateObjectFieldSource } from '../specialists/objectFieldSpecialist.
 import { generateSecuritySource } from '../specialists/securitySpecialist.js';
 import { generateFlowSource } from '../specialists/flowSpecialist.js';
 import { validateSpecialistOperations } from '../validation/sourceValidator.js';
+import { componentKeysForPlan, createComponentLockService, withComponentLocks } from './componentLockService.js';
 
 let sameOrgResolver = resolveSameOrg;
 let directAnalysisDependencies = {
@@ -36,6 +37,7 @@ let directAnalysisDependencies = {
   architecturePlannerDependencies: createProductionArchitecturePlannerDependencies()
 };
 let directSpecialistModelRunner = executeSpecialistModel;
+let implementationBaselineRunner = establishImplementationBaseline;
 
 export function setSameOrgResolverForTest(resolver) {
   sameOrgResolver = resolver || resolveSameOrg;
@@ -51,6 +53,10 @@ export function setDirectAnalysisDependenciesForTest(dependencies = null) {
 
 export function setDirectSpecialistModelRunnerForTest(modelRunner = null) {
   directSpecialistModelRunner = modelRunner || executeSpecialistModel;
+}
+
+export function setImplementationBaselineRunnerForTest(runner = null) {
+  implementationBaselineRunner = runner || establishImplementationBaseline;
 }
 
 export async function processAgentJob(message, options = {}) {
@@ -185,7 +191,7 @@ async function implement(job, actor) {
   const approval = validApproval(job, 'IMPLEMENTATION', { orgContext: trustedOrgContext });
   await persistSafeDirectOrgContext(job, trustedOrgContext);
   if (isSourceFreeDirectPlan(job)) {
-    await updateJob(job.jobId, { sourceValidation: null });
+    await updateJob(job.jobId, { sourceValidation: null, implementationBaseline: null });
     let result;
     try {
       result = await executeBoundedSpecialists({
@@ -241,8 +247,17 @@ async function implement(job, actor) {
       validatedAt: new Date().toISOString()
     };
     await updateJob(job.jobId, { sourceValidation });
-    await appendLog(job.jobId, 'info', `Generated, persisted, and deterministically validated ${validated.operations.length} bounded specialist operations. No source files were written and no Salesforce validation ran.`);
-    return { jobId: job.jobId, status: job.status, specialistStatus: 'COMPLETED', sourceWritten: false, sourceEligible: true, sourceValidation };
+    let baseline;
+    try {
+      baseline = await implementationBaselineRunner({ job: { ...job, sourceValidation }, operations: validated.operations, actor });
+    } catch (error) {
+      const safeMessage = 'Implementation baseline preparation failed safely. No Salesforce validation or deployment ran.';
+      await appendLog(job.jobId, 'error', `${safeMessage} Code: ${safeBaselineFailureCode(error)}.`);
+      await transitionJob(job.jobId, JOB_STATES.FAILED, { actor, reason: safeMessage, error: safeMessage });
+      return { jobId: job.jobId, status: JOB_STATES.FAILED };
+    }
+    await appendLog(job.jobId, 'info', `Generated and deterministically validated ${validated.operations.length} bounded specialist operations, then captured their immutable exact-org baseline before local source writes. No Salesforce validation ran.`);
+    return { jobId: job.jobId, status: job.status, specialistStatus: 'COMPLETED', sourceWritten: baseline.sourceWritten, sourceEligible: true, sourceValidation, implementationBaseline: baseline };
   }
   if (job.status === JOB_STATES.VALIDATION_FAILED) {
     if (job.implementation) return validate(job, actor);
@@ -452,6 +467,107 @@ function validApproval(job, type, options = {}) {
 function safeSpecialistFailureCode(error) {
   const code = String(error?.code || 'SPECIALIST_GENERATION_FAILED');
   return /^SPECIALIST_[A-Z0-9_]+$/.test(code) ? code : 'SPECIALIST_GENERATION_FAILED';
+}
+
+function safeBaselineFailureCode(error) {
+  const code = String(error?.code || 'BASELINE_PREPARATION_FAILED');
+  return /^(?:BASELINE|COMPONENT_LOCK)_[A-Z0-9_]+$/.test(code) ? code : 'BASELINE_PREPARATION_FAILED';
+}
+
+async function establishImplementationBaseline({ job, operations, actor }) {
+  assertImplementationBaselineEligibility(job, operations);
+  const componentKeys = componentKeysForPlan(job.plan);
+  const locks = createComponentLockService({ jobStore: currentJobStore() });
+  return withComponentLocks({
+    locks,
+    jobId: job.jobId,
+    componentKeys,
+    leaseSeconds: config.componentLockLeaseSeconds,
+    heartbeatIntervalMs: config.componentLockHeartbeatMs
+  }, async ({ assertLeaseOwned, lockToken }) => {
+    const currentBeforeWorkspace = await requiredJob(job.jobId);
+    assertImplementationBaselineEligibility(currentBeforeWorkspace, operations);
+    const paths = await ensureJobWorkspace(job.jobId, job.orgContext.orgRegistryId);
+    const workspaceName = `lease-${lockToken.slice(0, 12)}`;
+    const implementationProject = join(paths.implementation, `plan-v${job.plan.planVersion}`, workspaceName, 'project');
+    await mkdir(join(paths.implementation, `plan-v${job.plan.planVersion}`, workspaceName), { recursive: true });
+    const branch = `ai-agent/MANUAL-0-${job.jobId}-v${job.plan.planVersion}-${lockToken.slice(0, 12)}`.replace(/[^A-Za-z0-9_\/-]/g, '-');
+    const branchResult = await runGit('worktree-add', { branch, path: implementationProject });
+    if (branchResult.exitCode !== 0) throw baselineFailure('BASELINE_WORKTREE_FAILED', 'Cannot create the isolated implementation worktree.');
+    await assertLeaseOwned();
+
+    const captured = await captureMetadataBaseline({
+      projectRoot: implementationProject,
+      operations,
+      trustedSourceOrgId: job.sourceValidation.sourceOrgId,
+      assertAuthority: assertLeaseOwned,
+      retrieve: async (components) => {
+        const result = await runSfCommand('retrieveMetadata', { components }, {
+          ...sfOptions(job, job.orgContext, paths, actor, job.metadataScope),
+          cwd: implementationProject
+        });
+        return {
+          ...result,
+          sourceOrgId: job.orgContext.expectedOrgId,
+          componentKeys: components.map(({ type, apiName }) => `${type}:${apiName}`)
+        };
+      }
+    });
+    await assertLeaseOwned();
+    const baseline = {
+      status: 'CAPTURED',
+      baselineCommit: captured.baselineCommit,
+      files: captured.files,
+      componentKeys,
+      sourceOrgId: job.sourceValidation.sourceOrgId,
+      planHash: job.sourceValidation.planHash,
+      scopeHash: job.sourceValidation.scopeHash,
+      inspectionHash: job.sourceValidation.inspectionHash,
+      sourceHash: job.sourceValidation.sourceHash,
+      workspacePath: `implementation/plan-v${job.plan.planVersion}/${workspaceName}/project`,
+      capturedAt: new Date().toISOString(),
+      sourceWritten: false
+    };
+    await currentJobStore().updateWithComponentLocks({ jobId: job.jobId, componentKeys, lockToken }, (record) => {
+      assertImplementationBaselineEligibility(record, operations);
+      record.implementationBaseline = baseline;
+    });
+    await assertLeaseOwned();
+
+    return baseline;
+  });
+}
+
+export function assertImplementationBaselineEligibility(job, operations) {
+  const validation = job?.sourceValidation;
+  const trustedOrgId = job?.plan?.trustedBinding?.sourceOrgId;
+  const scopeHash = job?.plan?.scopeHash || job?.metadataScope?.hash;
+  let approvedKeys = [];
+  try { approvedKeys = componentKeysForPlan(job?.plan); } catch { throw baselineFailure('BASELINE_SOURCE_VALIDATION_STALE', 'A current exact-org Task 9 source validation is required.'); }
+  const operationKeys = [...new Set(operations.map((operation) => `${operation.metadataType}:${operation.apiName}`))].sort();
+  if (job?.status !== JOB_STATES.IMPLEMENTING
+    || validation?.status !== 'PASSED'
+    || validation.sourceHash !== stableHash(operations)
+    || Number(validation.operationCount) !== operations.length
+    || stableHash(validation.validatedPaths || []) !== stableHash(operations.map((operation) => operation.path))
+    || validation.planHash !== job?.plan?.planHash
+    || validation.scopeHash !== scopeHash
+    || validation.inspectionHash !== job?.inspection?.hash
+    || stableHash(operationKeys) !== stableHash(approvedKeys)
+    || !sameSalesforceId(validation.sourceOrgId, trustedOrgId)
+    || !sameSalesforceId(validation.sourceOrgId, job?.orgContext?.expectedOrgId)
+    || !sameSalesforceId(validation.sourceOrgId, job?.orgId)) {
+    throw baselineFailure('BASELINE_SOURCE_VALIDATION_STALE', 'A current exact-org Task 9 source validation is required.');
+  }
+  const storedOperations = Object.values(job?.specialistResults || {}).flatMap((result) => result?.operations || []);
+  storedOperations.sort((left, right) => `${left.operation}:${left.metadataType}:${left.apiName}`.localeCompare(`${right.operation}:${right.metadataType}:${right.apiName}`, 'en-US'));
+  if (storedOperations.length !== operations.length || stableHash(storedOperations) !== validation.sourceHash) {
+    throw baselineFailure('BASELINE_SOURCE_VALIDATION_STALE', 'A current exact-org Task 9 source validation is required.');
+  }
+}
+
+function baselineFailure(code, message) {
+  return Object.assign(new Error(message), { code, statusCode: 409 });
 }
 
 function isSourceFreeDirectPlan(job) {
