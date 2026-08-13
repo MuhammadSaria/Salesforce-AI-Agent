@@ -13,7 +13,7 @@ import {
 export const PHASE1_SPECIALIST_DEPENDENCIES = Object.freeze({
   OBJECT_FIELD: Object.freeze([]),
   SECURITY_PERMISSIONS: Object.freeze(['OBJECT_FIELD']),
-  FLOW: Object.freeze(['SECURITY_PERMISSIONS'])
+  FLOW: Object.freeze(['OBJECT_FIELD', 'SECURITY_PERMISSIONS'])
 });
 
 export async function runSpecialists({ job, plan, inspection, workspace }, options = {}) {
@@ -65,7 +65,7 @@ export function buildSpecialistRequest({ specialistId, job, plan, inspection, wo
   const evidenceIds = new Set(plan?.evidenceIds || []);
   const inspectionEvidence = (inspection?.evidence || []).filter((evidence) => {
     if (!evidenceIds.has(evidence.evidenceId)) return false;
-    return !evidence.apiName || relevantApiNames.has(evidence.apiName);
+    return evidenceRelevantToSpecialist(evidence, specialistId, relevantApiNames);
   });
   const dependencyResults = (dependencyGraph[specialistId] || [])
     .map((dependency) => resultsBySpecialist[dependency])
@@ -93,6 +93,14 @@ export function buildSpecialistRequest({ specialistId, job, plan, inspection, wo
     inspectionEvidence,
     dependencyResults
   });
+}
+
+function evidenceRelevantToSpecialist(evidence, specialistId, relevantApiNames) {
+  const componentApiName = evidence.componentApiName || evidence.apiName || '';
+  if (componentApiName && relevantApiNames.has(componentApiName)) return true;
+  if (specialistId === 'FLOW') return ['RELATIONSHIP', 'STATUS_CANDIDATE', 'STATUS_VALUE'].includes(evidence.kind);
+  if (specialistId === 'OBJECT_FIELD') return ['OBJECT', 'FIELD', 'RELATIONSHIP'].includes(evidence.kind);
+  return false;
 }
 
 function specialistsRequiredByPlan(plan) {

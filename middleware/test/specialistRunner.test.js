@@ -26,7 +26,8 @@ const inspection = {
     { evidenceId: 'field:GiftTransaction.Installment_Number__c', kind: 'FIELD', metadataType: 'CustomField', apiName: 'GiftTransaction.Installment_Number__c', sourceOrgId: '00D000000000001AAA', active: true },
     { evidenceId: 'permissionSet:Gift_Operations', kind: 'PERMISSION_SET', metadataType: 'PermissionSet', apiName: 'Gift_Operations', sourceOrgId: '00D000000000001AAA', active: true },
     { evidenceId: 'flow:Assign_Installment', kind: 'FLOW', metadataType: 'Flow', apiName: 'Assign_Installment', sourceOrgId: '00D000000000001AAA', active: true },
-    { evidenceId: 'flow:Unrelated', kind: 'FLOW', metadataType: 'Flow', apiName: 'Unrelated', sourceOrgId: '00D000000000001AAA', active: true }
+    { evidenceId: 'flow:Unrelated', kind: 'FLOW', componentType: 'Flow', componentApiName: 'Unrelated', sourceOrgId: '00D000000000001AAA', active: true },
+    { evidenceId: 'apex:Unrelated', kind: 'APEX_AUTOMATION', componentType: 'ApexClass', componentApiName: 'UnrelatedApex', sourceOrgId: '00D000000000001AAA', active: true }
   ]
 };
 
@@ -50,6 +51,12 @@ test('runs Object/Field, Security, then Flow and isolates approved components by
     runners.FLOW.calls[0].approvedComponents.map((component) => component.apiName),
     ['Assign_Installment']
   );
+  assert.deepEqual(
+    runners.FLOW.calls[0].dependencyResults.map((dependency) => dependency.specialistId),
+    ['OBJECT_FIELD', 'SECURITY_PERMISSIONS']
+  );
+  assert.equal(runners.FLOW.calls[0].inspectionEvidence.some((evidence) => evidence.componentApiName === 'Unrelated'), false);
+  assert.equal(runners.FLOW.calls[0].inspectionEvidence.some((evidence) => evidence.componentType === 'ApexClass'), false);
   assert.deepEqual(Object.keys(result.resultsBySpecialist), ['OBJECT_FIELD', 'SECURITY_PERMISSIONS', 'FLOW']);
 });
 
@@ -240,7 +247,7 @@ function flowVerticalPlan() {
     requirement: 'Assign installment numbers for completed recurring donation payments.',
     acceptanceCriteria: ['The number is assigned only when the payment is completed.'],
     assumptions: [],
-    evidenceIds: ['field:GiftTransaction.Installment_Number__c', 'permissionSet:Gift_Operations', 'flow:Assign_Installment'],
+    evidenceIds: ['field:GiftTransaction.Installment_Number__c', 'permissionSet:Gift_Operations', 'flow:Assign_Installment', 'flow:Unrelated', 'apex:Unrelated'],
     components: [
       { operation: 'create', metadataType: 'CustomField', apiName: 'GiftTransaction.Installment_Number__c', owner: 'object-field-specialist', reason: 'Store installment number.' },
       { operation: 'modify', metadataType: 'PermissionSet', apiName: 'Gift_Operations', owner: 'security-specialist', reason: 'Grant field access.' },

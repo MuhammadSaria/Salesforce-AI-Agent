@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { architecturePlanHashes } from '../src/domain/architecturePlan.js';
 import { canonicalInspectionHash } from '../src/domain/inspection.js';
-import { processAgentJob, setDirectAnalysisDependenciesForTest, setSameOrgResolverForTest } from '../src/services/agent.js';
+import { processAgentJob, setDirectAnalysisDependenciesForTest, setDirectSpecialistModelRunnerForTest, setSameOrgResolverForTest } from '../src/services/agent.js';
 import { appendConversation, createJobRecord, getJobRecord, updateJob } from '../src/services/jobStore.js';
 
 test.beforeEach(() => {
@@ -11,6 +11,7 @@ test.beforeEach(() => {
 
 test.afterEach(() => {
   setSameOrgResolverForTest();
+  setDirectSpecialistModelRunnerForTest();
 });
 
 test('direct jobs use createArchitecturePlan and persist no source-generation fields', async (t) => {
@@ -219,6 +220,7 @@ test('blocked bounded specialist records trusted clarification instead of failin
     orgContext: orgContext(),
     approvals: [implementationApproval(currentPlan)]
   });
+  setDirectSpecialistModelRunnerForTest(async () => blockedFlowResult());
 
   const result = await processAgentJob({ jobId, action: 'implement', actor: '005g5000009ImIkAAK' });
   const updated = await getJobRecord(jobId);
@@ -237,13 +239,61 @@ test('blocked bounded specialist records trusted clarification instead of failin
   const clarification = updated.clarifications[0];
   assert.equal(clarification.ambiguityId, 'specialist:FLOW:blocked:v1');
   assert.equal(clarification.specialistId, 'FLOW');
-  assert.equal(clarification.question, 'FLOW source generation is not available until Phase 1 Task 8.');
+  assert.equal(clarification.question, 'Strict concurrent uniqueness requires a locking-capable Apex scope decision.');
   assert.equal(clarification.inspectionHash, currentInspection.hash);
   assert.equal(clarification.sourceOrgId, '00Dg500000E07e9EAB');
   assert.equal(clarification.planVersion, 1);
   assert.equal(clarification.planHash, currentPlan.planHash);
   assert.equal(clarification.scopeHash, currentPlan.scopeHash);
   assert.equal(clarification.status, 'OPEN');
+});
+
+test('direct implementation selects real Task 8 generators, persists results, and stops before source writes', async () => {
+  const jobId = `specialist-completed-${Date.now()}`;
+  const currentInspection = inspection();
+  const currentPlan = actionPlan(currentInspection, {
+    components: [
+      { operation: 'create', metadataType: 'CustomField', apiName: 'GiftTransaction.Installment_Number__c', owner: 'object-field-specialist', reason: 'Store installment sequence.' },
+      { operation: 'modify', metadataType: 'PermissionSet', apiName: 'Gift_Operations', owner: 'security-specialist', reason: 'Grant exact field access.' },
+      { operation: 'modify', metadataType: 'Flow', apiName: 'Assign_Installment', owner: 'flow-specialist', reason: 'Assign installment sequence.' }
+    ],
+    evidenceIds: ['evidence:relationship', 'evidence:status-completed'],
+    expectedBehavior: ['CREATE_AS_COMPLETED TRANSITION_TO_COMPLETED ALREADY_NUMBERED_PROTECTION SAME_PARENT_LOOKUP FIRST_INSTALLMENT_ONE INCREMENT_N_PLUS_ONE REVERSAL_RETENTION NO_HISTORICAL_RENUMBER NO_OVERWRITE.'],
+    risks: ['Highest plus one cannot guarantee strict uniqueness under concurrent processing.']
+  });
+  const calls = [];
+  setDirectSpecialistModelRunnerForTest(async (input) => {
+    calls.push(input);
+    return completedSpecialistResult(input.specialistId);
+  });
+  await createJobRecord({
+    jobId,
+    userId: '005g5000009ImIkAAK',
+    orgId: '00Dg500000E07e9EAB',
+    source: 'salesforce-chat',
+    prompt: 'Create a recurring donation installment Flow.'
+  });
+  await updateJob(jobId, {
+    status: 'IMPLEMENTING',
+    inspection: currentInspection,
+    plan: currentPlan,
+    metadataScope: { hash: currentPlan.scopeHash, source: 'architecture-plan', components: currentPlan.components },
+    orgContext: orgContext(),
+    approvals: [implementationApproval(currentPlan)]
+  });
+
+  const result = await processAgentJob({ jobId, action: 'implement', actor: '005g5000009ImIkAAK' });
+  const updated = await getJobRecord(jobId);
+
+  assert.equal(result.specialistStatus, 'COMPLETED');
+  assert.equal(result.sourceWritten, false);
+  assert.deepEqual(calls.map((call) => call.specialistId), ['OBJECT_FIELD', 'SECURITY_PERMISSIONS', 'FLOW']);
+  assert.deepEqual(calls.at(-1).dependencyResults.map((item) => item.specialistId), ['OBJECT_FIELD', 'SECURITY_PERMISSIONS']);
+  assert.deepEqual(Object.keys(updated.specialistResults), ['OBJECT_FIELD', 'SECURITY_PERMISSIONS', 'FLOW']);
+  assert.equal(Boolean(updated.implementation), false);
+  assert.equal(Boolean(updated.validation), false);
+  assert.equal(Boolean(updated.deployment), false);
+  assert.deepEqual(updated.commands, []);
 });
 
 test('specialist clarification response replans and clears stale implementation approval', async (t) => {
@@ -283,6 +333,7 @@ test('specialist clarification response replans and clears stale implementation 
     orgContext: orgContext(),
     approvals: [implementationApproval(oldPlan)]
   });
+  setDirectSpecialistModelRunnerForTest(async () => blockedFlowResult());
 
   await processAgentJob({ jobId, action: 'implement', actor: '005g5000009ImIkAAK' });
   let updated = await getJobRecord(jobId);
@@ -333,6 +384,17 @@ function inspection() {
       targetObjectApiName: 'GiftCommitment',
       componentType: 'CustomField',
       componentApiName: 'GiftTransaction.GiftCommitmentId',
+      sourceOrgId: '00Dg500000E07e9EAB',
+      active: true,
+      observedAt: new Date().toISOString()
+    }, {
+      evidenceId: 'evidence:status-completed',
+      kind: 'STATUS_VALUE',
+      objectApiName: 'GiftTransaction',
+      fieldApiName: 'Status',
+      value: 'Completed',
+      componentType: 'CustomField',
+      componentApiName: 'GiftTransaction.Status',
       sourceOrgId: '00Dg500000E07e9EAB',
       active: true,
       observedAt: new Date().toISOString()
@@ -391,6 +453,47 @@ function implementationApproval(currentPlan) {
     metadataScopeHash: currentPlan.scopeHash,
     salesforceOrganizationId: '00Dg500000E07e9EAB'
   };
+}
+
+function blockedFlowResult() {
+  return {
+    status: 'BLOCKED',
+    operations: [],
+    dependencies: [],
+    risks: ['Strict concurrent uniqueness cannot be guaranteed by highest-plus-one Flow numbering.'],
+    verification: ['No Salesforce source was generated or written.'],
+    materialQuestion: 'Strict concurrent uniqueness requires a locking-capable Apex scope decision.'
+  };
+}
+
+function completedSpecialistResult(specialistId) {
+  if (specialistId === 'OBJECT_FIELD') {
+    return completedOperation({
+      operation: 'create',
+      path: 'force-app/main/default/objects/GiftTransaction/fields/Installment_Number__c.field-meta.xml',
+      content: '<?xml version="1.0" encoding="UTF-8"?><CustomField xmlns="http://soap.sforce.com/2006/04/metadata"><fullName>Installment_Number__c</fullName><label>Installment Number</label><precision>18</precision><scale>0</scale><type>Number</type></CustomField>',
+      metadataType: 'CustomField', apiName: 'GiftTransaction.Installment_Number__c', reason: 'Store installment sequence.'
+    });
+  }
+  if (specialistId === 'SECURITY_PERMISSIONS') {
+    return completedOperation({
+      operation: 'modify',
+      path: 'force-app/main/default/permissionsets/Gift_Operations.permissionset-meta.xml',
+      content: '<?xml version="1.0" encoding="UTF-8"?><PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata"><fieldPermissions><field>GiftTransaction.Installment_Number__c</field><readable>true</readable><editable>true</editable></fieldPermissions></PermissionSet>',
+      metadataType: 'PermissionSet', apiName: 'Gift_Operations', reason: 'Grant exact field access.'
+    });
+  }
+  const semantics = 'CREATE_AS_COMPLETED TRANSITION_TO_COMPLETED ALREADY_NUMBERED_PROTECTION SAME_PARENT_LOOKUP FIRST_INSTALLMENT_ONE INCREMENT_N_PLUS_ONE REVERSAL_RETENTION NO_HISTORICAL_RENUMBER NO_OVERWRITE';
+  return completedOperation({
+    operation: 'modify',
+    path: 'force-app/main/default/flows/Assign_Installment.flow-meta.xml',
+    content: `<?xml version="1.0" encoding="UTF-8"?><Flow xmlns="http://soap.sforce.com/2006/04/metadata"><apiVersion>65.0</apiVersion><description>${semantics}</description><formulas><name>Next_Installment_Number</name><dataType>Number</dataType><expression>{!Highest_Same_Parent.Installment_Number__c} + 1</expression><scale>0</scale></formulas><recordLookups><name>Highest_Same_Parent</name><connector><targetReference>Has_Previous_Number</targetReference></connector><filters><field>GiftCommitmentId</field><operator>EqualTo</operator><value><elementReference>$Record.GiftCommitmentId</elementReference></value></filters><filters><field>Installment_Number__c</field><operator>IsNull</operator><value><booleanValue>false</booleanValue></value></filters><object>GiftTransaction</object><sortField>Installment_Number__c</sortField><sortOrder>Desc</sortOrder><getFirstRecordOnly>true</getFirstRecordOnly></recordLookups><decisions><name>Has_Previous_Number</name><defaultConnector><targetReference>Assign_First</targetReference></defaultConnector><rules><name>Increment_Previous</name><conditions><leftValueReference>Highest_Same_Parent.Id</leftValueReference><operator>IsNull</operator><rightValue><booleanValue>false</booleanValue></rightValue></conditions><connector><targetReference>Assign_Increment</targetReference></connector></rules></decisions><assignments><name>Assign_First</name><assignmentItems><assignToReference>$Record.Installment_Number__c</assignToReference><operator>Assign</operator><value><numberValue>1</numberValue></value></assignmentItems></assignments><assignments><name>Assign_Increment</name><assignmentItems><assignToReference>$Record.Installment_Number__c</assignToReference><operator>Assign</operator><value><elementReference>Next_Installment_Number</elementReference></value></assignmentItems></assignments><start><connector><targetReference>Highest_Same_Parent</targetReference></connector><filterLogic>and</filterLogic><filters><field>Status</field><operator>EqualTo</operator><value><stringValue>Completed</stringValue></value></filters><filters><field>Installment_Number__c</field><operator>IsNull</operator><value><booleanValue>true</booleanValue></value></filters><object>GiftTransaction</object><recordTriggerType>CreateAndUpdate</recordTriggerType><triggerType>RecordBeforeSave</triggerType><doesRequireRecordChangedToMeetCriteria>true</doesRequireRecordChangedToMeetCriteria></start><status>Draft</status></Flow>`,
+    metadataType: 'Flow', apiName: 'Assign_Installment', reason: 'Assign installment sequence.'
+  }, ['Highest plus one cannot guarantee strict uniqueness under concurrent processing.']);
+}
+
+function completedOperation(operation, risks = []) {
+  return { status: 'COMPLETED', operations: [operation], dependencies: [], risks, verification: ['Complete source generated in memory.'] };
 }
 
 function architectureHashes(planBody) {

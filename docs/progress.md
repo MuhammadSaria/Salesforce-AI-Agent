@@ -12,10 +12,29 @@
 
 ## Current Task
 
-- Task: Phase 1 Task 8
+- Task: Phase 1 Task 9
 - Status: Not started
 
 ## Completed Tasks
+
+- Phase 1 Task 8: Implement field, security, and inactive Flow specialists
+  - Verification date: 2026-08-13
+  - Verification:
+    - `cd middleware && node --import ./test/setup.js --test test/flowVerticalSpecialists.test.js test/specialistRunner.test.js test/agentClarificationEvidence.test.js` - RED first, 16 passed and 2 failed because the three specialist modules did not exist and Flow received only the Security dependency instead of both approved upstream results.
+    - `cd middleware && node --import ./test/setup.js --test test/flowVerticalSpecialists.test.js test/specialistRunner.test.js test/specialistAgents.test.js test/orchestrator.test.js test/modelExecutor.test.js` - PASS, 30 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/agentClarificationEvidence.test.js test/conversationApi.test.js test/developmentJob.test.js test/approval.test.js test/agentSameOrg.test.js` - PASS, 52 tests, 0 skipped. The first invocation without `TEST_DATABASE_URL` passed 51 tests and failed only the dedicated-database guard; it was rerun correctly with the required URL.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/jobRepositoryPostgres.test.js` - PASS, 11 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/outboxDispatcher.test.js` - PASS, 4 tests, 0 skipped.
+    - `cd middleware && node --import ./test/setup.js --test test/productionStoreWiring.test.js test/agentQueueFallback.test.js` - PASS, 3 tests, 0 skipped.
+    - `cd middleware && $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; npm.cmd run check` - PASS, lint plus 256 tests and 0 skipped.
+    - `git diff --check` - PASS, whitespace clean; Git reported line-ending warnings only.
+  - Review:
+    - Added Object/Field, Security, and Flow generators that each make one bounded structured model call and return the existing strict specialist result contract for only their approved owned components.
+    - Object/Field generation requires a complete Number `CustomField` document with the exact approved API name. Security generation consumes only permitted Object/Field results and rejects unrelated permission expansion while requiring explicit field readability and editability.
+    - Flow generation consumes both Object/Field and Security results, requires complete Draft Flow XML, rejects Active Flow with `FLOW_MUST_BE_INACTIVE`, and enforces generation-time evidence of create/update handling, same-parent highest-number lookup, first/increment assignment, non-overwrite, reversal retention, and no historical renumbering.
+    - Best-effort highest-plus-one numbering records that Flow cannot guarantee strict concurrent uniqueness. An explicit strict-uniqueness requirement returns a structured `BLOCKED` result and a locking-capable Apex scope question without generating Apex.
+    - The direct Salesforce-chat path explicitly selects the real Task 8 generators through the Task 7 runner. Structured results persist, while no generated source is written, no Salesforce source validation or deployment runs, and no Flow is activated; Task 9 remains the source-validation boundary.
+    - Task 7 ownership/scope fail-closed behavior and trusted clarification bindings remain intact, including rejection of cross-owner metadata and unapproved API names and replanning/new approval after a material scope change.
 
 - Phase 1 Task 7 first correction: Fix bounded specialist BLOCKED lifecycle handling
   - Implementation commit: f9e73f89e4a9638e0832e9eb6e07396fa977aa97
@@ -349,7 +368,7 @@
 
 ## Next Task
 
-Phase 1 Task 8: Implement field, security, and inactive Flow specialists. Not started.
+Phase 1 Task 9: Validate source before writing or Salesforce validation. Not started.
 
 ## Update Rules
 

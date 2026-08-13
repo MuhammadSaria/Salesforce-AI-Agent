@@ -23,6 +23,10 @@ import { activatePendingJiraRevision, syncJiraComments } from './jiraSync.js';
 import { approveSpecialistWorkItems, buildSpecialistOrchestration, executeBoundedSpecialists, specialistAuditEvent, structuredSpecialistMessage, workItemForFile } from './orchestrator.js';
 import { SPECIALIST_AGENT_IDS, SPECIALIST_MESSAGE_TYPES, WORK_ITEM_STATUSES, implementationAgentIds, ownerForMetadataType } from '../domain/specialistAgents.js';
 import { sameSalesforceId } from '../utils/salesforceId.js';
+import { executeSpecialistModel } from './modelExecutor.js';
+import { generateObjectFieldSource } from '../specialists/objectFieldSpecialist.js';
+import { generateSecuritySource } from '../specialists/securitySpecialist.js';
+import { generateFlowSource } from '../specialists/flowSpecialist.js';
 
 let sameOrgResolver = resolveSameOrg;
 let directAnalysisDependencies = {
@@ -30,6 +34,7 @@ let directAnalysisDependencies = {
   createArchitecturePlan,
   architecturePlannerDependencies: createProductionArchitecturePlannerDependencies()
 };
+let directSpecialistModelRunner = executeSpecialistModel;
 
 export function setSameOrgResolverForTest(resolver) {
   sameOrgResolver = resolver || resolveSameOrg;
@@ -41,6 +46,10 @@ export function setDirectAnalysisDependenciesForTest(dependencies = null) {
     createArchitecturePlan: dependencies?.createArchitecturePlan || createArchitecturePlan,
     architecturePlannerDependencies: dependencies?.architecturePlannerDependencies || createProductionArchitecturePlannerDependencies(dependencies || {})
   };
+}
+
+export function setDirectSpecialistModelRunnerForTest(modelRunner = null) {
+  directSpecialistModelRunner = modelRunner || executeSpecialistModel;
 }
 
 export async function processAgentJob(message, options = {}) {
@@ -184,7 +193,7 @@ async function implement(job, actor) {
         planVersion: Number(job.plan.planVersion || 1)
       }
     }, {
-      runners: defaultBlockedSpecialistRunners(),
+      runners: productionSpecialistRunners(directSpecialistModelRunner),
       jobStore: currentJobStore()
     });
     if (result.status === 'BLOCKED') {
@@ -197,8 +206,8 @@ async function implement(job, actor) {
       await transitionJob(job.jobId, JOB_STATES.AWAITING_CLARIFICATION, { actor, reason: message });
       return { jobId: job.jobId, status: JOB_STATES.AWAITING_CLARIFICATION, specialistStatus: 'BLOCKED', clarificationRequired: true };
     }
-    await appendLog(job.jobId, 'info', `Executed ${Object.keys(result.resultsBySpecialist).length} bounded specialist contracts. No source files were written in Task 7.`);
-    return validate(await requiredJob(job.jobId), actor);
+    await appendLog(job.jobId, 'info', `Generated and persisted ${Object.keys(result.resultsBySpecialist).length} bounded specialist results. No source files were written; Task 9 validation has not started.`);
+    return { jobId: job.jobId, status: job.status, specialistStatus: 'COMPLETED', sourceWritten: false };
   }
   if (job.status === JOB_STATES.VALIDATION_FAILED) {
     if (job.implementation) return validate(job, actor);
@@ -411,19 +420,11 @@ function isSourceFreeDirectPlan(job) {
     && !Array.isArray(job.plan?.fileOperations);
 }
 
-function defaultBlockedSpecialistRunners() {
-  const blocked = (specialistId) => async () => ({
-    status: 'BLOCKED',
-    operations: [],
-    dependencies: [],
-    risks: ['Task 8 specialist source generator is not configured yet.'],
-    verification: ['No Salesforce source was generated or written.'],
-    materialQuestion: `${specialistId} source generation is not available until Phase 1 Task 8.`
-  });
+function productionSpecialistRunners(modelRunner) {
   return {
-    OBJECT_FIELD: blocked('OBJECT_FIELD'),
-    SECURITY_PERMISSIONS: blocked('SECURITY_PERMISSIONS'),
-    FLOW: blocked('FLOW')
+    OBJECT_FIELD: (request) => generateObjectFieldSource(request, { modelRunner }),
+    SECURITY_PERMISSIONS: (request) => generateSecuritySource(request, { modelRunner }),
+    FLOW: (request) => generateFlowSource(request, { modelRunner })
   };
 }
 
