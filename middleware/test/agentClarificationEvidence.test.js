@@ -287,6 +287,7 @@ test('direct implementation selects real Task 8 generators, persists results, an
 
   assert.equal(result.specialistStatus, 'COMPLETED');
   assert.equal(result.sourceWritten, false);
+  assert.equal(result.sourceEligible, true);
   assert.deepEqual(calls.map((call) => call.specialistId), ['OBJECT_FIELD', 'SECURITY_PERMISSIONS', 'FLOW']);
   assert.deepEqual(calls.at(-1).dependencyResults.map((item) => item.specialistId), ['OBJECT_FIELD', 'SECURITY_PERMISSIONS']);
   assert.deepEqual(Object.keys(updated.specialistResults), ['OBJECT_FIELD', 'SECURITY_PERMISSIONS', 'FLOW']);
@@ -294,6 +295,51 @@ test('direct implementation selects real Task 8 generators, persists results, an
   assert.equal(Boolean(updated.validation), false);
   assert.equal(Boolean(updated.deployment), false);
   assert.deepEqual(updated.commands, []);
+  assert.equal(updated.sourceValidation.status, 'PASSED');
+  assert.equal(updated.sourceValidation.operationCount, 3);
+  assert.match(updated.sourceValidation.sourceHash, /^[a-f0-9]{64}$/);
+});
+
+test('Task 9 rejects one malicious operation after complete specialist collection with zero write or Salesforce effects', async () => {
+  const jobId = `source-validation-failure-${Date.now()}`;
+  const currentInspection = inspection();
+  const currentPlan = actionPlan(currentInspection, {
+    components: [
+      { operation: 'create', metadataType: 'CustomField', apiName: 'GiftTransaction.Installment_Number__c', owner: 'object-field-specialist', reason: 'Store installment sequence.' },
+      { operation: 'modify', metadataType: 'PermissionSet', apiName: 'Gift_Operations', owner: 'security-specialist', reason: 'Grant exact field access.' },
+      { operation: 'modify', metadataType: 'Flow', apiName: 'Assign_Installment', owner: 'flow-specialist', reason: 'Assign installment sequence.' }
+    ],
+    evidenceIds: ['evidence:relationship', 'evidence:status-completed']
+  });
+  setDirectSpecialistModelRunnerForTest(async (input) => {
+    const output = completedSpecialistResult(input.specialistId);
+    if (input.specialistId === 'OBJECT_FIELD') {
+      output.operations[0].content = output.operations[0].content.replace('</CustomField>', '<description>Authorization: Bearer abcdefghijklmnopqrstuvwxyz</description></CustomField>');
+    }
+    return output;
+  });
+  await createJobRecord({ jobId, userId: '005g5000009ImIkAAK', orgId: '00Dg500000E07e9EAB', source: 'salesforce-chat', prompt: 'Create a recurring donation installment Flow.' });
+  await updateJob(jobId, {
+    status: 'IMPLEMENTING', inspection: currentInspection, plan: currentPlan,
+    metadataScope: { hash: currentPlan.scopeHash, source: 'architecture-plan', components: currentPlan.components },
+    orgContext: orgContext(), approvals: [implementationApproval(currentPlan)],
+    sourceValidation: { status: 'PASSED', sourceHash: 'stale-write-eligibility' }
+  });
+
+  const result = await processAgentJob({ jobId, action: 'implement', actor: '005g5000009ImIkAAK' });
+  const updated = await getJobRecord(jobId);
+
+  assert.equal(result.status, 'FAILED');
+  assert.equal(updated.status, 'FAILED');
+  assert.match(updated.error, /source validation failed safely/i);
+  assert.doesNotMatch(updated.error, /Bearer|abcdef|Authorization/i);
+  assert.deepEqual(Object.keys(updated.specialistResults), ['OBJECT_FIELD', 'SECURITY_PERMISSIONS', 'FLOW']);
+  assert.equal(Boolean(updated.sourceValidation), false);
+  assert.equal(Boolean(updated.implementation), false);
+  assert.equal(Boolean(updated.validation), false);
+  assert.equal(Boolean(updated.deployment), false);
+  assert.deepEqual(updated.commands, []);
+  assert.deepEqual(updated.clarifications, []);
 });
 
 for (const scenario of [
@@ -533,6 +579,9 @@ function completedSpecialistResult(specialistId) {
 }
 
 function completedOperation(operation, risks = []) {
+  if (operation.metadataType === 'Flow') {
+    operation = { ...operation, content: operation.content.replace('</apiVersion>', '</apiVersion><label>Assign Installment</label><processType>AutoLaunchedFlow</processType>') };
+  }
   return { status: 'COMPLETED', operations: [operation], dependencies: [], risks, verification: ['Complete source generated in memory.'] };
 }
 

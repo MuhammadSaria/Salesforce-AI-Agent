@@ -1,10 +1,10 @@
 const NS = 'http://soap.sforce.com/2006/04/metadata';
-const MAX_BYTES = 500000;
+export const MAX_METADATA_XML_BYTES = 500000;
 const MAX_DEPTH = 64;
 
 export function parseMetadataXml(source, expectedRoot) {
   const xml = String(source || '').trim();
-  if (!xml || Buffer.byteLength(xml, 'utf8') > MAX_BYTES || /```|\bTODO\b|rest omitted|placeholder/i.test(xml) || /<!DOCTYPE|<!ENTITY|<!\[CDATA\[|<!--|<\?(?!xml\s)|\?>[\s\S]*<\?/i.test(xml)) throw xmlError();
+  if (!xml || Buffer.byteLength(xml, 'utf8') > MAX_METADATA_XML_BYTES || /```|\bTODO\b|rest omitted|placeholder/i.test(xml) || /<!DOCTYPE|<!ENTITY|<!\[CDATA\[|<!--|<\?(?!xml\s)|\?>[\s\S]*<\?/i.test(xml)) throw xmlError();
   const declaration = xml.match(/^<\?xml\s+version=["']1\.0["'](?:\s+encoding=["'][A-Za-z0-9_-]+["'])?\s*\?>/);
   if (!declaration) throw xmlError();
   const body = xml.slice(declaration[0].length).trim();

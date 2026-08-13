@@ -2,6 +2,10 @@ import { parseMetadataXml } from './metadataXml.js';
 
 export function validateRecurringDonationFlow(source, context) {
   const xml = parseMetadataXml(source, 'Flow');
+  return validateRecurringDonationFlowDocument(xml, context);
+}
+
+export function validateRecurringDonationFlowDocument(xml, context) {
   const root = xml.root;
   const statuses = xml.children(root, 'status').map((node) => node.text.trim());
   if (statuses.length !== 1 || statuses[0] !== 'Draft') throw flowError('FLOW_MUST_BE_INACTIVE', 'Flow must contain exactly one Draft status.');

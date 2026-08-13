@@ -12,10 +12,32 @@
 
 ## Current Task
 
-- Task: Phase 1 Task 9
-- Status: Not started
+- Task: Phase 1 Task 10
+- Status: NOT STARTED
 
 ## Completed Tasks
+
+- Phase 1 Task 9 — Validate source before writing or Salesforce validation
+  - Verification date: 2026-08-13
+  - Gap analysis: the consolidated Tasks 6–8 baseline already supplied canonical metadata path derivation and path-identity protection, strict specialist ownership/scope contracts, bounded operation schemas, current exact-org specialist evidence validation, the bounded safe Salesforce XML parser, Draft enforcement, and connected recurring-donation Flow graph semantics. Task 9 reused those authoritative primitives rather than creating competing path, evidence, XML, or Flow implementations.
+  - The genuine Task 9 gaps were complete-set composition, authoritative pre-write eligibility, per-document and aggregate byte enforcement, deterministic secret/script rejection, final Object Field and Security checks, top-level Flow metadata checks, Task 9 evidence rebinding, sanitized validation-failure lifecycle handling, and explicit zero-downstream-effects integration coverage.
+  - `validateSpecialistOperations({ operations, plan, ownership, inspection })` now validates the entire approved operation set before returning a deterministic source hash. It enforces exact operation/type/API scope, trusted specialist ownership, canonical path and case/Unicode identity, strict operation schema, complete safe XML, expected metadata roots/namespaces, per-document and aggregate bounds, obvious secret/credential rejection, and obvious shell/child-process rejection.
+  - CustomField validation requires the exact approved object-qualified field identity, one matching `fullName`, Number type, and bounded precision/scale. Security validation permits only explicit approved generated-field access and recursively rejects object, user, class, application, Flow, record-type, tab, and custom-permission expansion.
+  - `validateFlowSource({ content, approvedBehavior, inspection })` reuses the safe XML parse tree and connected semantic validator. It requires one bounded label, valid API version, `AutoLaunchedFlow`, exactly one Draft status, verified create-and-update transition behavior, status/non-overwrite criteria, same-parent descending single-record highest-number lookup, reachable decision and first/N+1 assignments to the exact field, and no orphan, reversal-clear, historical-renumber, or marker-spoof bypass.
+  - Flow behavior is rebound only to plan-approved, specialist-relevant, current active evidence for the exact source org. The validator requires the approved inspection hash and source-org binding, unique strict evidence, the exact recurring relationship and completed-status value, and rejects missing, stale, future, inactive, malformed, unrelated, duplicate, and wrong-org evidence.
+  - Agent integration clears stale source eligibility before every new generation attempt, collects all Task 8 specialist operations, validates the complete set once, and only then persists a hash-bound `sourceValidation: PASSED` marker. The current lifecycle still writes no generated source; Task 9 only makes a fully validated set eligible for the later write stage.
+  - One invalid operation rejects the complete set and persists no Task 9 eligibility. Agent regression proves malicious source produces a sanitized FAILED state with zero `writeMetadataFile` commands, zero Salesforce validation, zero deployment, zero Flow activation, and no clarification. Valid Task 8 results receive write eligibility only after Task 9 passes.
+  - RED verification:
+    - `cd middleware && node --import ./test/setup.js --test test/sourceValidator.test.js test/flowValidator.test.js test/agentClarificationEvidence.test.js` — expected RED: 19 tests, 15 passed, 4 failed because both Task 9 modules and agent write eligibility were absent.
+    - Aggregate-size regression — expected RED: 1 test, 1 failed with “Missing expected exception.”
+    - Stale-eligibility regression — expected RED: 1 test, 1 failed because an older PASS marker remained after malicious source failed.
+    - Review regressions — expected RED: 2 tests, 2 failed for nested permission expansion and unrelated cross-specialist evidence rejection.
+  - Focused validation/security regression: `node --import ./test/setup.js --test test/sourceValidator.test.js test/flowValidator.test.js test/safeMetadataXml.test.js test/connectedFlowSemantics.test.js test/specialistPathSecurity.test.js test/specialistEvidenceIntegrity.test.js test/specialistRunner.test.js test/flowVerticalSpecialists.test.js test/agentClarificationEvidence.test.js test/metadataCapabilities.test.js` — PASS, 119 tests, 0 failed, 0 skipped.
+  - Non-DB aggregate, excluding only the eight suites importing the PostgreSQL harness — PASS, 301 tests, 0 failed, 0 skipped.
+  - PostgreSQL-heavy suites run individually with `TEST_DATABASE_URL=postgres://providus:providus@127.0.0.1:5432/providus_nexus_test`: PostgreSQL helper 6/6, repository 11/11, JobStore contract 3/3, atomic mutations 3/3, migration/retry 2/2, outbox dispatcher 4/4, conversation API 19/19, and two-instance production 1/1; every suite had 0 failed and 0 skipped.
+  - Final `npm.cmd run check`: lint PASS; 353 tests, 353 passed, 0 failed, 0 skipped. The known parallel shared-schema interference did not reproduce in this run.
+  - `git diff --check`: PASS.
+  - No Task 10 locking/baseline work, source write, Salesforce validation/deployment, Flow activation, production deployment, or main merge was performed. Tasks 6–8 boundaries remain intact.
 
 - Phase 1 Tasks 6-8 consolidated persistence, boundary, evidence, XML, and Flow correction
   - Verification date: 2026-08-13
@@ -382,7 +404,7 @@
 
 ## Next Task
 
-Phase 1 Task 9: Validate source before writing or Salesforce validation. Not started.
+Phase 1 Task 10. NOT STARTED.
 
 ## Update Rules
 

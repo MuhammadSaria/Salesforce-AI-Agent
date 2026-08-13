@@ -27,6 +27,7 @@ import { executeSpecialistModel } from './modelExecutor.js';
 import { generateObjectFieldSource } from '../specialists/objectFieldSpecialist.js';
 import { generateSecuritySource } from '../specialists/securitySpecialist.js';
 import { generateFlowSource } from '../specialists/flowSpecialist.js';
+import { validateSpecialistOperations } from '../validation/sourceValidator.js';
 
 let sameOrgResolver = resolveSameOrg;
 let directAnalysisDependencies = {
@@ -184,6 +185,7 @@ async function implement(job, actor) {
   const approval = validApproval(job, 'IMPLEMENTATION', { orgContext: trustedOrgContext });
   await persistSafeDirectOrgContext(job, trustedOrgContext);
   if (isSourceFreeDirectPlan(job)) {
+    await updateJob(job.jobId, { sourceValidation: null });
     let result;
     try {
       result = await executeBoundedSpecialists({
@@ -214,8 +216,33 @@ async function implement(job, actor) {
       await transitionJob(job.jobId, JOB_STATES.AWAITING_CLARIFICATION, { actor, reason: message });
       return { jobId: job.jobId, status: JOB_STATES.AWAITING_CLARIFICATION, specialistStatus: 'BLOCKED', clarificationRequired: true };
     }
-    await appendLog(job.jobId, 'info', `Generated and persisted ${Object.keys(result.resultsBySpecialist).length} bounded specialist results. No source files were written; Task 9 validation has not started.`);
-    return { jobId: job.jobId, status: job.status, specialistStatus: 'COMPLETED', sourceWritten: false };
+    let validated;
+    try {
+      const operations = Object.values(result.resultsBySpecialist).flatMap((specialistResult) => specialistResult.operations);
+      const ownership = Object.fromEntries(Object.values(result.resultsBySpecialist).flatMap((specialistResult) =>
+        specialistResult.operations.map((operation) => [operation.path, specialistResult.specialistId])
+      ));
+      validated = validateSpecialistOperations({ operations, plan: job.plan, ownership, inspection: job.inspection });
+    } catch (error) {
+      const safeMessage = 'Specialist source validation failed safely. Correct the generated metadata before retrying.';
+      await appendLog(job.jobId, 'error', `${safeMessage} Code: ${safeSpecialistFailureCode(error)}.`);
+      await transitionJob(job.jobId, JOB_STATES.FAILED, { actor, reason: safeMessage, error: safeMessage });
+      return { jobId: job.jobId, status: JOB_STATES.FAILED };
+    }
+    const sourceValidation = {
+      status: 'PASSED',
+      sourceHash: validated.sourceHash,
+      operationCount: validated.operations.length,
+      validatedPaths: validated.operations.map((operation) => operation.path),
+      sourceOrgId: job.plan.trustedBinding.sourceOrgId,
+      inspectionHash: job.inspection.hash,
+      planHash: job.plan.planHash,
+      scopeHash: job.plan.scopeHash,
+      validatedAt: new Date().toISOString()
+    };
+    await updateJob(job.jobId, { sourceValidation });
+    await appendLog(job.jobId, 'info', `Generated, persisted, and deterministically validated ${validated.operations.length} bounded specialist operations. No source files were written and no Salesforce validation ran.`);
+    return { jobId: job.jobId, status: job.status, specialistStatus: 'COMPLETED', sourceWritten: false, sourceEligible: true, sourceValidation };
   }
   if (job.status === JOB_STATES.VALIDATION_FAILED) {
     if (job.implementation) return validate(job, actor);
