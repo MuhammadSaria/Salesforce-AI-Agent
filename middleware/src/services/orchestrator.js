@@ -12,6 +12,11 @@ import {
   selectSpecialistAgents,
   specialistAgent
 } from '../domain/specialistAgents.js';
+import { runSpecialists } from './specialistRunner.js';
+
+export async function executeBoundedSpecialists(input, options = {}) {
+  return runSpecialists(input, options);
+}
 
 export function buildSpecialistOrchestration(job, requirement, metadataScope, plan) {
   const selectedAgentIds = selectSpecialistAgents(requirement, metadataScope, plan);

@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { config } from '../config.js';
 import { stableHash } from '../utils/hash.js';
@@ -65,7 +65,7 @@ export function expandScopeForFileOperations(scope, fileOperations, orgContext) 
   return { ...expanded, hash: stableHash(expanded) };
 }
 
-export async function writeManifest(paths, scope) {
+export async function writeManifest(paths, scope, { destructiveMetadata = [] } = {}) {
   const byType = new Map();
   for (const component of scope.primaryMetadata) {
     const members = byType.get(component.type) || [];
@@ -77,6 +77,19 @@ export async function writeManifest(paths, scope) {
   const manifest = join(paths.manifest, 'package.xml');
   await mkdir(dirname(manifest), { recursive: true });
   await writeFile(manifest, xml, 'utf8');
+  const destructiveManifest = join(paths.manifest, 'destructiveChangesPre.xml');
+  if (destructiveMetadata.length) {
+    const destructiveByType = new Map();
+    for (const component of destructiveMetadata) {
+      const members = destructiveByType.get(component.type) || [];
+      members.push(component.apiName);
+      destructiveByType.set(component.type, members);
+    }
+    const destructiveTypes = [...destructiveByType.entries()].map(([name, members]) => `    <types>\n${members.sort().map((member) => `        <members>${escapeXml(member)}</members>`).join('\n')}\n        <name>${name}</name>\n    </types>`).join('\n');
+    await writeFile(destructiveManifest, `<?xml version="1.0" encoding="UTF-8"?>\n<Package xmlns="http://soap.sforce.com/2006/04/metadata">\n${destructiveTypes}\n    <version>65.0</version>\n</Package>\n`, 'utf8');
+  } else {
+    await rm(destructiveManifest, { force: true });
+  }
   return manifest;
 }
 
@@ -101,6 +114,12 @@ export async function analyzeDependencies(paths, scope) {
 }
 
 export function buildPlan(job, requirement, scope, dependencies) {
+  const materialAmbiguities = (scope.ambiguities || []).filter((ambiguity) => ambiguity?.material);
+  if (materialAmbiguities.length) {
+    const error = new Error(materialAmbiguities.map((ambiguity) => ambiguity.question || ambiguity.message || String(ambiguity)).join(' '));
+    error.code = 'MATERIAL_CLARIFICATION_REQUIRED';
+    throw error;
+  }
   const planCore = {
     jobId: job.jobId,
     jiraIssueKey: job.jiraIssueKey,

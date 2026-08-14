@@ -2,6 +2,8 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { config } from '../config.js';
 import { isPathInside } from '../utils/paths.js';
+import { canonicalSalesforceId, sameSalesforceId } from '../utils/salesforceId.js';
+import { trustOrgContext } from './orgContextTrust.js';
 
 const VALID_ENVIRONMENTS = new Set(['developer', 'scratch', 'sandbox', 'partial-copy', 'full-copy', 'production']);
 let cachedRegistry;
@@ -99,7 +101,7 @@ export async function getRegisteredOrg(orgRegistryId) {
 }
 
 export function buildOrgContext(selection, job) {
-  return {
+  return trustOrgContext({
     orgRegistryId: selection.org.id,
     salesforceAlias: selection.org.salesforceAlias,
     expectedOrgId: selection.org.expectedOrgId,
@@ -122,7 +124,7 @@ export function buildOrgContext(selection, job) {
     selectionSource: selection.source,
     selectionTimestamp: new Date().toISOString(),
     selectingUser: job.userId || job.context?.username || 'system'
-  };
+  });
 }
 
 export function publicOrgOption(org) {
@@ -176,7 +178,7 @@ function normalizeOrg(org) {
     displayName: requiredString(org.displayName, 'Display name'),
     customerName: requiredString(org.customerName, 'Customer name'),
     salesforceAlias: requiredString(org.salesforceAlias, 'Salesforce CLI alias'),
-    expectedOrgId: requiredString(org.expectedOrgId, 'Expected Salesforce Organization ID'),
+    expectedOrgId: canonicalSalesforceId(requiredString(org.expectedOrgId, 'Expected Salesforce Organization ID'), 'Expected Salesforce Organization ID'),
     environment,
     instanceUrl: requiredString(org.instanceUrl, 'Instance URL'),
     expectedUsername: String(org.expectedUsername || ''),
@@ -232,11 +234,7 @@ function mappingMatches(expectedValues, ticketValue) {
 }
 
 function sameOrgId(left, right) {
-  return normalizeOrgId(left) === normalizeOrgId(right);
-}
-
-function normalizeOrgId(value) {
-  return String(value || '').trim().slice(0, 15).toUpperCase();
+  return sameSalesforceId(left, right);
 }
 
 function normalizeText(value) {

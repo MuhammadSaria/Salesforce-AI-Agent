@@ -4,7 +4,9 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { config } from '../config.js';
 import { redactSecrets } from '../utils/sanitize.js';
 import { isPathInside } from '../utils/paths.js';
+import { canonicalSalesforceId } from '../utils/salesforceId.js';
 import { auditSalesforceOperation } from './auditLog.js';
+import { assertTrustedOrgContext } from './orgContextTrust.js';
 
 const COMMANDS = {
   writeMetadataFile: {
@@ -34,6 +36,11 @@ const COMMANDS = {
         throw new Error('Mutation keywords are not allowed in read-only SOQL.');
       }
     }
+  },
+  toolingQuery: {
+    operation: 'read',
+    args: ({ query, targetOrg }) => ['data', 'query', '--query', query, '--target-org', targetOrg, '--use-tooling-api', '--json'],
+    validate: ({ query }) => validateReadOnlyQuery(query)
   },
   sobjectDescribe: {
     operation: 'read',
@@ -81,6 +88,19 @@ const COMMANDS = {
     ],
     validate: ({ manifest, outputDir }) => { validateManifestPath(manifest); validateJobOutputPath(outputDir); }
   },
+  retrieveMetadata: {
+    operation: 'retrieve',
+    args: ({ components, targetOrg }) => [
+      'project',
+      'retrieve',
+      'start',
+      ...components.flatMap((component) => ['--metadata', `${component.type}:${component.apiName}`]),
+      '--target-org',
+      targetOrg,
+      '--json'
+    ],
+    validate: ({ components }) => validateRetrieveComponents(components)
+  },
   runApexTests: {
     operation: 'validate',
     args: ({ tests, targetOrg }) => {
@@ -98,12 +118,16 @@ const COMMANDS = {
   },
   deployDryRun: {
     operation: 'validate',
-    args: ({ manifest, targetOrg, tests }) => {
+    args: ({ manifest, preDestructiveChanges, targetOrg, tests }) => {
       const args = ['project', 'deploy', 'start', '--dry-run', '--manifest', manifest, '--target-org', targetOrg, '--test-level', tests ? 'RunSpecifiedTests' : 'RunLocalTests', '--json'];
+      if (preDestructiveChanges) args.push('--pre-destructive-changes', preDestructiveChanges);
       if (tests) args.push('--tests', tests);
       return args;
     },
-    validate: ({ manifest }) => validateManifestPath(manifest)
+    validate: ({ manifest, preDestructiveChanges }) => {
+      validateManifestPath(manifest);
+      if (preDestructiveChanges) validateManifestPath(preDestructiveChanges);
+    }
   },
   deployManifest: {
     operation: 'deploy',
@@ -114,6 +138,14 @@ const COMMANDS = {
       return args;
     },
     validate: ({ manifest }) => validateManifestPath(manifest)
+  },
+  deployValidated: {
+    operation: 'deploy',
+    requiresApproval: true,
+    args: ({ validationId, targetOrg }) => ['project', 'deploy', 'quick', '--job-id', validationId, '--target-org', targetOrg, '--json'],
+    validate: ({ validationId }) => {
+      if (!/^[A-Za-z0-9]{15,18}$/.test(String(validationId || ''))) throw new Error('A valid Salesforce validation job ID is required.');
+    }
   }
 };
 
@@ -140,6 +172,8 @@ export async function runSfCommand(command, params = {}, options = {}) {
   if (!orgContext?.salesforceAlias || !orgContext?.expectedOrgId) {
     throw new Error('A verified Salesforce org context is required before running Salesforce commands.');
   }
+  assertTrustedOrgContext(orgContext);
+  assertNonProductionOrgContext(orgContext);
 
   if (definition.requiresApproval && !options.approved) {
     const error = new Error(`Command ${command} requires explicit approval.`);
@@ -201,6 +235,35 @@ export async function runSfCommand(command, params = {}, options = {}) {
   return result;
 }
 
+export function buildSfCommandArgs(command, params = {}) {
+  const definition = COMMANDS[command];
+  if (!definition || !definition.args) throw new Error(`Blocked sf command: ${command}`);
+  const resolvedParams = {
+    ...params,
+    targetOrg: params.targetOrg
+  };
+  definition.validate?.(resolvedParams);
+  return definition.args(resolvedParams);
+}
+
+export async function retrieveMetadata({ components, orgContext, executor, verifier, timeoutMs, cwd } = {}) {
+  assertTrustedOrgContext(orgContext);
+  assertNonProductionOrgContext(orgContext);
+  if (!orgContext.allowedOperations?.includes('retrieve')) {
+    throw new Error('Operation retrieve is not allowed for the selected Salesforce org.');
+  }
+  validateRetrieveComponents(components);
+  if (verifier) await verifier(orgContext);
+  else await verifySelectedOrg(orgContext);
+  const sortedComponents = [...components].sort((left, right) => `${left.type}:${left.apiName}`.localeCompare(`${right.type}:${right.apiName}`));
+  const args = COMMANDS.retrieveMetadata.args({ components: sortedComponents, targetOrg: orgContext.salesforceAlias });
+  if (!args.includes('--target-org') || !args.includes(orgContext.salesforceAlias)) {
+    throw new Error('Blocked Salesforce CLI command without explicit target org.');
+  }
+  if (executor) return executor(args, { timeoutMs, cwd });
+  return executeSf(args, timeoutMs || config.sfCommandTimeoutMs, cwd || config.projectRoot);
+}
+
 function validateManifestPath(manifest) {
   const fullPath = resolve(String(manifest || ''));
   const jobsRoot = resolve(config.workspaceRoot, 'jobs');
@@ -217,6 +280,32 @@ function validateJobOutputPath(path) {
 
 function validateApiName(value, label) {
   if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(String(value || ''))) throw new Error(`Invalid Salesforce ${label} API name.`);
+}
+
+function validateReadOnlyQuery(query) {
+  if (!/^\s*select\b/i.test(query || '')) {
+    throw new Error('Only SELECT SOQL queries are allowed.');
+  }
+  if (/\b(insert|update|upsert|delete|undelete|merge)\b/i.test(query)) {
+    throw new Error('Mutation keywords are not allowed in read-only SOQL.');
+  }
+}
+
+function validateRetrieveComponents(components) {
+  if (!Array.isArray(components) || components.length === 0) {
+    throw new Error('At least one metadata component is required for retrieval.');
+  }
+  if (components.length > config.maxRetrievedComponents) {
+    throw new Error(`Metadata retrieval exceeds the configured limit of ${config.maxRetrievedComponents} components.`);
+  }
+  for (const component of components) {
+    const type = String(component?.type || '');
+    const apiName = String(component?.apiName || '');
+    if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(type)) throw new Error('Invalid Salesforce metadata type.');
+    if (!/^[A-Za-z][A-Za-z0-9_. ()/-]+$/.test(apiName) || /(?:;|&&|\|\||`|\$|<|>|\r|\n|--target-org|--metadata|\.\.)/i.test(apiName)) {
+      throw new Error('Invalid Salesforce metadata component name.');
+    }
+  }
 }
 
 function validateDataFields(fields) {
@@ -275,6 +364,8 @@ function resolveMetadataPath(path) {
 }
 
 export async function verifySelectedOrg(orgContext, options = {}) {
+  assertTrustedOrgContext(orgContext);
+  assertNonProductionOrgContext(orgContext);
   const started = new Date().toISOString();
   const result = await executeSf(['org', 'display', '--target-org', orgContext.salesforceAlias, '--json'], config.sfCommandTimeoutMs);
   const parsed = parseSfJson(result.stdout);
@@ -293,8 +384,8 @@ export async function verifySelectedOrg(orgContext, options = {}) {
     !connected ||
     normalizeOrgId(actualOrgId) !== normalizeOrgId(orgContext.expectedOrgId) ||
     (actualAlias && actualAlias !== orgContext.salesforceAlias) ||
-    (orgContext.instanceUrl && actualInstanceUrl && normalizeUrl(actualInstanceUrl) !== normalizeUrl(orgContext.instanceUrl)) ||
-    (orgContext.expectedUsername && actualUsername.toLowerCase() !== orgContext.expectedUsername.toLowerCase()) ||
+    (!orgContext.instanceUrl || !actualInstanceUrl || normalizeUrl(actualInstanceUrl) !== normalizeUrl(orgContext.instanceUrl)) ||
+    (!orgContext.expectedUsername || !actualUsername || actualUsername.toLowerCase() !== orgContext.expectedUsername.toLowerCase()) ||
     environmentMismatch;
 
   await auditSalesforceOperation({
@@ -336,6 +427,14 @@ export async function verifySelectedOrg(orgContext, options = {}) {
     environment: orgContext.environment,
     verifiedAt: new Date().toISOString()
   };
+}
+
+function assertNonProductionOrgContext(orgContext) {
+  if (String(orgContext?.environment || '').toLowerCase() === 'production' || orgContext?.productionApprovalRequired === true) {
+    const error = new Error('Production Salesforce orgs are not allowed in Phase 1.');
+    error.code = 'PRODUCTION_ORG_BLOCKED';
+    throw error;
+  }
 }
 
 function executeSf(args, timeoutMs, cwd = config.projectRoot) {
@@ -397,7 +496,11 @@ function parseSfJson(stdout) {
 }
 
 function normalizeOrgId(value) {
-  return String(value || '').trim().slice(0, 15).toUpperCase();
+  try {
+    return canonicalSalesforceId(value, 'Salesforce org ID');
+  } catch {
+    return '';
+  }
 }
 
 function normalizeUrl(value) {

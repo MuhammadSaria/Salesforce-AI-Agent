@@ -1,4 +1,7 @@
+import { DEVELOPMENT_JOB_STATES, assertDevelopmentTransition } from './developmentJob.js';
+
 export const JOB_STATES = Object.freeze({
+  ...DEVELOPMENT_JOB_STATES,
   RECEIVED: 'RECEIVED',
   AWAITING_ORG_SELECTION: 'AWAITING_ORG_SELECTION',
   VERIFYING_ORG: 'VERIFYING_ORG',
@@ -27,7 +30,7 @@ const transitions = new Map([
   [JOB_STATES.ANALYZING_JIRA, [JOB_STATES.DISCOVERING_METADATA, JOB_STATES.FAILED, JOB_STATES.CANCELLED]],
   [JOB_STATES.DISCOVERING_METADATA, [JOB_STATES.RETRIEVING_RELEVANT_METADATA, JOB_STATES.FAILED, JOB_STATES.CANCELLED]],
   [JOB_STATES.RETRIEVING_RELEVANT_METADATA, [JOB_STATES.ANALYZING_DEPENDENCIES, JOB_STATES.FAILED, JOB_STATES.CANCELLED]],
-  [JOB_STATES.ANALYZING_DEPENDENCIES, [JOB_STATES.AWAITING_PLAN_APPROVAL, JOB_STATES.IMPLEMENTING, JOB_STATES.FAILED, JOB_STATES.CANCELLED]],
+  [JOB_STATES.ANALYZING_DEPENDENCIES, [JOB_STATES.AWAITING_PLAN_APPROVAL, JOB_STATES.FAILED, JOB_STATES.CANCELLED]],
   [JOB_STATES.AWAITING_PLAN_APPROVAL, [JOB_STATES.IMPLEMENTING, JOB_STATES.PLAN_REJECTED, JOB_STATES.CANCELLED]],
   [JOB_STATES.PLAN_REJECTED, [JOB_STATES.ANALYZING_JIRA, JOB_STATES.CANCELLED]],
   [JOB_STATES.IMPLEMENTING, [JOB_STATES.VALIDATING, JOB_STATES.FAILED, JOB_STATES.CANCELLED]],
@@ -40,13 +43,21 @@ const transitions = new Map([
   [JOB_STATES.CANCELLED, []]
 ]);
 
-export function assertTransition(from, to) {
+export function assertTransition(from, to, job = {}) {
   if (!Object.values(JOB_STATES).includes(to)) {
     throw conflict(`Unknown job state: ${to}`);
+  }
+  if (isDirectDevelopmentJob(job)) {
+    assertDevelopmentTransition(from, to);
+    return;
   }
   if (!(transitions.get(from) || []).includes(to)) {
     throw conflict(`Invalid job transition: ${from} -> ${to}`);
   }
+}
+
+function isDirectDevelopmentJob(job) {
+  return job?.source === 'salesforce-chat' || job?.lifecycle === 'development';
 }
 
 function conflict(message) {

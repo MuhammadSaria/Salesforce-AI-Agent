@@ -30,6 +30,30 @@ test('a Jira project mapped to one connected org selects only that org', () => {
   assert.deepEqual(result.evidence, ['jiraProjectKey']);
 });
 
+test('org routing matches valid 15 and 18 character Salesforce IDs without collapsing case', () => {
+  const selected = selectOrgFromRegistry([
+    org('canonical', [], { expectedOrgId: '00Dg500000E07e9' }),
+    org('case-different', [], { expectedOrgId: '00DG500000E07E9' })
+  ], {
+    orgId: '00Dg500000E07e9EAB',
+    context: {}
+  });
+
+  assert.equal(selected.status, 'selected');
+  assert.equal(selected.org.id, 'canonical');
+});
+
+test('org routing rejects corrupted 18 character Salesforce ID checksums', () => {
+  const selected = selectOrgFromRegistry([
+    org('canonical', [], { expectedOrgId: '00Dg500000E07e9' })
+  ], {
+    orgId: '00Dg500000E07e9EAC',
+    context: {}
+  });
+
+  assert.equal(selected.status, 'none');
+});
+
 test('project and component signals are intersected instead of unioned', () => {
   const result = selectOrgFromRegistry([
     org('sapa-dev', ['SAPA'], { components: ['Development'] }),

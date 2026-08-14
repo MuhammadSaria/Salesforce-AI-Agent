@@ -7,6 +7,8 @@ import { claimJiraComment, claimWebhookEvent, parseJiraWebhook, verifyJiraWebhoo
 import { redactSecrets } from '../src/utils/sanitize.js';
 import { stableHash } from '../src/utils/hash.js';
 import { runSfCommand } from '../src/services/sfExecutor.js';
+import { resolveSameOrg } from '../src/services/sameOrgService.js';
+import { trustOrgContext } from '../src/services/orgContextTrust.js';
 import { buildAssignedIssuesJql } from '../src/services/jiraPoller.js';
 import { isAgentGeneratedComment, selectNewUserComments, shouldResumeReceivedRevision } from '../src/services/jiraSync.js';
 
@@ -125,10 +127,79 @@ test('Jira polling is restricted to configured projects and the agent account', 
 });
 
 test('Salesforce operations are blocked when the org registry does not allow them', async () => {
+  const orgContext = await resolveSameOrg({
+    authenticatedOrgId: '00D000000000SAP',
+    actorId: '005-user',
+    registryOrgs: [{
+      id: 'sapa',
+      active: true,
+      authenticationStatus: 'connected',
+      expectedOrgId: '00D000000000SAP',
+      salesforceAlias: 'sapa',
+      environment: 'sandbox',
+      instanceUrl: 'https://sapa.sandbox.my.salesforce.com',
+      expectedUsername: 'sapa@example.test',
+      allowedOperations: ['read']
+    }],
+    observed: {
+      organizationId: '00D000000000SAP',
+      instanceUrl: 'https://sapa.sandbox.my.salesforce.com',
+      username: 'sapa@example.test',
+      connected: true,
+      isSandbox: true
+    }
+  });
   await assert.rejects(
     runSfCommand('deployPreview', { manifest: 'ignored.xml' }, {
-      orgContext: { salesforceAlias: 'sapa', expectedOrgId: '00DTEST', allowedOperations: ['read'] }
+      orgContext
     }),
     /Operation validate is not allowed/
+  );
+});
+
+test('Salesforce executor rejects production and mismatched explicit target orgs before CLI lookup', async () => {
+  await assert.rejects(
+    runSfCommand('orgDisplay', {}, {
+      orgContext: trustOrgContext({
+        orgRegistryId: 'prod',
+        salesforceAlias: 'prod',
+        expectedOrgId: '00DPROD',
+        environment: 'production',
+        instanceUrl: 'https://prod.my.salesforce.com',
+        allowedOperations: ['read']
+      })
+    }),
+    /Production Salesforce orgs are not allowed/
+  );
+
+  await assert.rejects(
+    runSfCommand('orgDisplay', { targetOrg: 'default' }, {
+      orgContext: trustOrgContext({
+        orgRegistryId: 'sapa',
+        salesforceAlias: 'my-sandbox',
+        expectedOrgId: '00DTEST',
+        environment: 'sandbox',
+        instanceUrl: 'https://sapa.sandbox.my.salesforce.com',
+        allowedOperations: ['read']
+      })
+    }),
+    /does not match/
+  );
+});
+
+test('Salesforce executor rejects structurally valid but untrusted org contexts', async () => {
+  await assert.rejects(
+    runSfCommand('orgDisplay', {}, {
+      orgContext: {
+        orgRegistryId: 'sapa',
+        salesforceAlias: 'my-sandbox',
+        expectedOrgId: '00D000000000SAP',
+        environment: 'sandbox',
+        instanceUrl: 'https://sapa.sandbox.my.salesforce.com',
+        allowedOperations: ['read', 'deploy'],
+        verified: true
+      }
+    }),
+    /trusted Salesforce org context/
   );
 });

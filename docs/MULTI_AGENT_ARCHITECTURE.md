@@ -1,102 +1,48 @@
-# Multi-Agent Architecture
+# Providus Nexus Phase 1 Architecture
 
-## Overview
-
-The user still interacts with one Salesforce In-Org AI Agent. Internally, the Orchestrator Agent decomposes the verified Jira requirement into bounded specialist work items, combines their proposals into one plan, and coordinates implementation, testing, validation, deployment, and explanation.
+## Implemented runtime
 
 ```text
-User or Jira
-  -> Orchestrator Agent
-  -> task decomposition and specialist selection
-  -> dependency-aware specialist proposals
-  -> one unified plan and implementation approval
-  -> specialist-owned local implementation
-  -> Testing Agent
-  -> Validation and Deployment Agent
-  -> separate deployment approval
-  -> deployment to the exact verified org
-  -> Documentation and Explanation Agent
-  -> one LWC and Jira summary
+Salesforce agentChat LWC
+  ↓ fixed Apex methods and trusted permission/org/user headers
+AgentController + Agent_Middleware Named Credential
+  ↓ HTTPS bearer-authenticated requests
+Express API + durable outbox dispatcher
+  ↓ shared PostgreSQL state / Redis delivery
+BullMQ worker + injected Phase 1 runtime
+  ↓
+same-org verifier → bounded Salesforce inspector → architecture planner
+  ↓ implementation approval
+Object/Field specialist → Security specialist → Flow specialist
+  ↓ complete-set Task 9 source validation
+PostgreSQL component leases → isolated Git worktree → immutable baseline
+  ↓ exact source write/commit
+Salesforce dry-run validation ↔ bounded owner-only correction (maximum 3)
+  ↓ separate exact-artifact deployment approval
+guarded Salesforce inactive deployment
+  ↓
+COMPLETED + persisted reportId (Flow remains Draft)
 ```
 
-Specialists do not receive independent approval authority and do not execute arbitrary commands. The existing allowlisted Salesforce and Git services remain the only mutation boundary.
+The LWC is a persistent conversation workspace. Apex exposes only fixed routes, bounds text/path values, derives custom-permission claims, and translates failures safely. The API owns authorization, lifecycle, approvals, durable conversations/jobs, and outbox delivery. Separate API and worker processes share PostgreSQL; Redis never replaces durable authority.
 
-## Specialist Registry
+The worker runtime uses production dependency injection for the PostgreSQL JobStore, same-org verifier, inspector, planner, specialist runner, Task 9 validators, component-lock/baseline service, correction router, Salesforce executor, guarded deployer, and report writer. Tests replace only true model, Salesforce network, and temporary infrastructure boundaries. Production has no fake service, in-memory JobStore, inline queue, no-source completion, or preconstructed final job.
 
-Agent definitions are immutable code records in `middleware/src/domain/specialistAgents.js`. Each definition contains a stable ID, user-facing name, role, owned metadata types, owned Salesforce DX path roots, and an inspection checklist.
+## Responsibilities
 
-The registry includes:
+- Inspector obtains current bounded evidence from the verified source org.
+- Planner proposes only an evidence-bound actionable architecture. The accepted vertical slice is exactly CustomField, PermissionSet, Flow.
+- Object/Field creates the Number field; Security creates least-privilege field access; Flow creates connected executable Draft automation. Ownership cannot cross boundaries.
+- Task 9 validates the complete set and business graph before source write.
+- Task 10 atomically leases all components and captures an immutable exact-org baseline in an isolated Git worktree.
+- Task 11 routes trusted mechanical findings only to the owner, revalidates the complete set, and stops after three cycles. Material findings need clarification; infrastructure findings consume no attempt.
+- Task 12 binds validation, approval, and deployment to the same org, baseline, source, package, commit, plan, scope, inspection, lease, and validation identities. Flow must be Draft before validation and deployment.
+- Reporting persists approved components and exact inactive deployment evidence without claiming activation.
 
-- Object and Field Agent
-- Flow Agent
-- Apex Agent
-- LWC Agent
-- UI Metadata Agent
-- Security and Permissions Agent
-- Integration Agent
-- Data Agent
-- Testing Agent
-- Validation and Deployment Agent
-- Documentation and Explanation Agent
+## Proved recurring-donation behavior
 
-The orchestrator selects only agents relevant to the requirement. Testing, validation/deployment, and explanation are common review stages. A field task also selects UI and security specialists because a new field is not usable until placement and least-privilege access are considered.
+The record-triggered Flow qualifies Donation creation as Completed and transition to Completed, requires a Recurring Donation parent and empty installment number, queries only that parent's numbered Donations ordered descending with a one-record limit, assigns 1 when none exists and N+1 otherwise, never overwrites or historically renumbers, retains numbers after reversal, and remains Draft after deployment. Highest-plus-one is best effort under concurrency, not a strict uniqueness guarantee.
 
-## Work Items
+## Boundaries
 
-Every selected agent receives one persisted work item for the plan iteration. A work item contains:
-
-- Work item and parent job IDs
-- Jira issue key and iteration
-- Assigned specialist agent
-- Exact target org registry ID and Salesforce Organization ID
-- Specialist metadata scope
-- Dependency work item IDs
-- Status
-- Sanitized inputs and structured outputs
-- Files affected
-- Validation requirements and risk
-- Unified approval ID after approval
-
-The required specialist result fields are stored under `outputs`: analysis summary, existing metadata, proposed changes, create/modify lists, components not changed, dependencies, risks, assumptions, validation requirements, files affected, and completion status.
-
-## Dependencies and Scheduling
-
-`middleware/src/services/orchestrator.js` creates a directed acyclic dependency graph and a deterministic topological execution order. For example, Object and Field work precedes a Flow that references the field; Apex precedes an LWC that calls it; implementation work precedes independent testing; testing precedes validation and deployment.
-
-The current queue schedules one parent job at a time. Inside that worker stage, specialist work executes in dependency order. Independent work items are represented as parallel-safe in the graph, but filesystem writes remain serialized until separate per-work-item workers and leases are introduced. This avoids concurrent writes to the same Git worktree.
-
-## File Ownership
-
-Every proposed file must map to exactly one specialist boundary. The plan is rejected when a file is unowned, duplicated, or assigned outside its specialist boundary.
-
-Before a local write, the worker:
-
-1. Resolves the approved owning work item.
-2. Captures the baseline content hash.
-3. Acquires the persisted file lock.
-4. Uses the existing allowlisted metadata writer.
-5. Captures the resulting content hash.
-6. Releases the lock.
-
-The ownership record stores path, owning agent, work item ID, lock status, baseline hash, current hash, and timestamp.
-
-## Approvals
-
-Specialists never request approval directly. The Orchestrator Agent consolidates their results into `plan.specialistSections`, and the existing implementation approval approves the exact unified plan hash, metadata scope hash, org, and all included work items.
-
-Deployment remains a different approval tied to the successful validation ID, validated source hash, commit hash, package hash, and exact target org. The Validation and Deployment Agent cannot edit implementation files.
-
-## Revisions
-
-An instruction creates a new iteration. Revision impact analysis identifies affected specialists separately from initial requirement analysis, so mentioning an existing field does not reopen the Object and Field Agent unless the instruction asks to change that field.
-
-Completed, unaffected work items are carried forward. Affected work items and the Testing, Validation/Deployment, and Explanation stages are recreated. Selective metadata retrieval is filtered to affected specialist boundaries. Existing parent-job artifacts remain archived in `revisions`.
-
-Instructions received during implementation, validation, or deployment are queued and activated at the next safe parent state. Instructions after deployment reopen the completed job as a new supervised iteration.
-
-## Structured Communication and Audit
-
-Specialist communication uses fixed message types and fields: sender, recipient, parent job, work item, type, metadata, request, dependency, risk, and timestamp. Free-form internal commands are not accepted.
-
-Dependency discovery, specialist proposals, status changes, implementation start/completion/failure, validation failure, file ownership, and final results are stored as concise audit events. The audit contains decisions and evidence, not hidden reasoning or model chain-of-thought.
-
+Phase 1 does not activate Flows, merge to main, select default orgs, deploy to production by default, perform unsupervised changes, treat Jira as authority, add Apex/Trigger/LWC to the recurring-donation solution, guarantee strict concurrent numbering uniqueness, or implement Phase 2 autonomy. Jira code is optional legacy integration and disabled by default.

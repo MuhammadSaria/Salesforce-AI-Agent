@@ -1,66 +1,92 @@
-# Setup
+# Providus Nexus Phase 1 Setup
 
-## Jira-to-org routing
+Phase 1 requires Node.js 20.11+, Git, Docker Compose, Salesforce CLI (`sf`), PostgreSQL 16, and Redis 7. Commands below start at the repository root.
 
-Every connected Salesforce org is registered in `middleware/config/org-registry.json`. Automatic ticket routing uses only configured Jira project keys, components, and custom-field values. Ticket descriptions, comments, aliases, usernames, URLs, and credentials are never org-selection inputs.
+## Install and migrate
 
-Use a unique project mapping when one Jira project belongs to one org:
+Compose credentials are local-development defaults only. Never reuse them outside a workstation.
 
-```json
-"jiraProjectKeys": ["TA"]
+```powershell
+cd middleware
+Copy-Item .env.example .env
+docker compose up -d postgres redis
+npm.cmd install
+$env:DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus'
+npm.cmd run migrate
 ```
 
-When a project serves multiple orgs, configure a Jira component or a dedicated single-select custom field on each registry entry:
+Create the isolated test database once if absent:
 
-```json
-"jiraComponents": ["Development"],
-"jiraCustomFieldMappings": {
-  "customfield_10001": ["SAPA Dev Sandbox"]
-}
+```powershell
+docker compose exec -T postgres createdb -U providus providus_nexus_test
+$env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'
 ```
 
-All configured routing signals must agree. Zero or multiple matches put the job in `AWAITING_ORG_SELECTION`; no Salesforce inspection or execution starts until an authenticated user selects an offered connected org. Every subsequent Salesforce command reverifies the alias, Organization ID, instance URL, username, and environment, and includes an explicit `--target-org`.
+`npm run migrate` applies SQL files lexically and records them in `schema_migrations`. Files `001`–`005` build the complete schema, including durable outbox retries and multi-component lease sets; no manual `ALTER TABLE` is required.
 
-## Jira
+## Environment
 
-1. Create a least-privilege Jira service account and record its account ID.
-2. Set `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_AGENT_ACCOUNT_ID`, `JIRA_WEBHOOK_SECRET`, and `JIRA_ALLOWED_PROJECT_KEYS` only in the middleware secret store.
-3. Set `JIRA_POLL_INTERVAL_SECONDS=60` to discover assigned issues when an admin-managed webhook is unavailable. Set it to `0` only after webhook delivery is confirmed.
-4. Register a Jira admin webhook for `jira:issue_created` and `jira:issue_updated`, filtered to the allowed project, and set its URL to `POST /api/webhooks/jira`. Set the webhook `secret` to `JIRA_WEBHOOK_SECRET`; Jira sends the resulting HMAC in `X-Hub-Signature`.
-5. New Jira comments on an existing, assigned issue are synchronized as untrusted change requests. Before deployment, they archive the current artifacts, invalidate approvals, increment the plan version, and queue revised analysis. Middleware-generated plan and completion comments are ignored to prevent loops. Comments never count as implementation or deployment approval.
-6. The middleware verifies the raw-body HMAC, allowed project, and configured assignee before accepting an event. Jira Automation remains an optional fallback using a hidden `X-Agent-Webhook-Token` header.
-7. Jira transition automation is intentionally disabled by default; successful deployment adds a comment but does not close the issue.
+Required production settings are `DATABASE_URL`, `REDIS_URL`, `QUEUE_DRIVER=redis`, a long random `MIDDLEWARE_API_TOKEN`, `SALESFORCE_ORG_REGISTRY_PATH`, `PROJECT_ROOT`, `WORKSPACE_ROOT`, and `AGENT_BACKEND=codex`. Install/authenticate the configured `CODEX_COMMAND` on the worker host.
 
-For local testing, set `NGROK_AUTHTOKEN` in the middleware secret store and run `npm run tunnel`. The launcher relies on ngrok's environment-based authentication so the token is not exposed in process arguments.
+Runtime settings include `NODE_ENV`, `PORT`, `ALLOWED_ORIGINS`, `LOG_LEVEL`, `CODEX_COMMAND_WINDOWS`, `CODEX_TIMEOUT_MS`, `SF_COMMAND_TIMEOUT_MS`, `SF_CLI_NODE`, `SF_CLI_RUN`, `MAX_PROMPT_LENGTH`, `MAX_METADATA_COMPONENTS`/`MAX_RETRIEVED_COMPONENTS`, `MAX_METADATA_SIZE_BYTES`, `MAX_RETRIEVAL_OPERATIONS`, `MAX_DEPENDENCY_DEPTH`, `MAX_ORG_VERIFICATION_AGE_MS`, `VALIDATION_EXPIRY_MINUTES`, `COMPONENT_LOCK_LEASE_SECONDS`, and `COMPONENT_LOCK_HEARTBEAT_MS`. `DISPATCHER_POLL_INTERVAL_MS` and `DISPATCHER_MAX_PER_SCAN` optionally tune the outbox.
 
-## Org Registry
+`TEST_DATABASE_URL` is test-only and must identify the dedicated `_test` database. `REDISMS_PORT` is for the local Redis launcher; `NGROK_AUTHTOKEN` is optional for `npm run tunnel`.
 
-Copy the inactive example in `middleware/config/org-registry.json`. Replace the alias, exact 15/18-character Organization ID, canonical instance URL, project/component mappings, workspace, metadata policies, and deployment policy. Confirm `sf org display --target-org <alias> --json`, then set `active: true`. Record capability must also set `dataMutationPermission`, `recordDeletionPermission`, `allowedDataObjects`, `restrictedDataObjects`, `maximumDataOperations`, `maximumDeleteOperations`, and the exact `data-create`/`data-update`/`data-delete` operations. `allowedDataObjects: ["*"]` permits all business objects supported by the connected Salesforce user's live CRUD access, except the security-sensitive denylist. Never store OAuth tokens or session IDs in this file.
+Jira is not required. Keep `JIRA_ENABLED=false` (the default). Only a deliberately enabled legacy integration uses `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_AGENT_ACCOUNT_ID`, `JIRA_WEBHOOK_SECRET`, `JIRA_ALLOWED_PROJECT_KEYS`, and `JIRA_POLL_INTERVAL_SECONDS`. `ALLOW_PRODUCTION_DEPLOYMENT` defaults false and remains false for Phase 1 operation.
 
-For production entries set `environment: production`, `productionApprovalRequired: true`, and enable `ALLOW_PRODUCTION_DEPLOYMENT=true` only after external change controls are ready.
+## Startup order
 
-## Named Credential and Apex
+1. `cd middleware; docker compose up -d postgres redis`
+2. `npm.cmd run migrate`
+3. Start the API/outbox dispatcher: `npm.cmd start`
+4. In another shell with identical database, Redis, registry, project, and workspace settings: `npm.cmd run worker`
+5. Verify `/health` and `/ready` through the trusted gateway.
+6. Configure Salesforce, then expose the LWC.
 
-In Salesforce Setup, create a modern Named Credential named `Agent_Middleware` and a Named Principal External Credential. Set the HTTPS middleware endpoint and configure a generated `Authorization: Bearer <MIDDLEWARE_API_TOKEN>` header, or enforce equivalent identity at an API gateway/mTLS layer. Populate the principal secret in Salesforce Setup or through the Connect API; it is intentionally not checked into metadata. Grant the External Credential principal, Apex class access, and the LWC through a permission set. Grant `AI_Agent_Deploy` only to deployment approvers.
+API and worker both use PostgreSQL. `QUEUE_DRIVER=memory` is test/development-only; a non-test worker refuses it. Redis failure stays in the durable outbox and never causes inline execution.
 
-Salesforce recommends the modern Named Credential plus External Credential model because legacy Named Credentials are deprecated. Packaged credential metadata does not include sensitive tokens or certificates, so principal population remains a required post-deployment step.
+## Salesforce
 
-The middleware URL must be HTTPS and reachable from Salesforce. The Apex proxy allows only fixed API actions and sends the current Salesforce user ID as audit identity.
+Authenticate and verify an explicitly selected development sandbox:
 
-## Example Flow
+```powershell
+$env:PHASE1_SALESFORCE_ALIAS='your-development-sandbox-alias'
+sf org display --target-org $env:PHASE1_SALESFORCE_ALIAS --json
+```
 
-1. Jira assigns `TA-42` to the agent and sends a signed webhook.
-2. Project/component mapping resolves `providus_orgfarm_dev`; `sf org display --target-org orgfarm-dev --json` must match the stored Organization ID and URL.
-3. The worker extracts exact metadata names, writes `jobs/<jobId>/manifest/package.xml`, retrieves only that scope, analyzes dependencies, and publishes plan version 1 with “No changes have been made yet.”
-4. A developer clicks **Approve Implementation**, then **Implement Locally**. The worker creates `ai-agent/READUSA-42-<jobId>`, writes only approved files, and records a diff/source hash. It does not deploy.
-5. Validation performs an exact-manifest dry run against the same org. A deployer separately clicks **Approve Deployment** and **Deploy Approved Package**.
-6. The worker reverifies identity and hashes, then deploys the exact manifest or executes only the approved structured record operations. It records deployment or record IDs and comments on Jira.
+The registry entry must match observed org ID, username, instance URL, environment, authentication status, allowed operations/types, and deployment policy. Never rely on a default org.
 
-## Remaining Manual Steps
+Apex calls `callout:Agent_Middleware`. The checked-in legacy Named Credential contains no secret. For operation, configure a modern Named Credential with that API name plus a Named Principal External Credential—or an equivalent identity-aware gateway/mTLS layer—to send `Authorization: Bearer <MIDDLEWARE_API_TOKEN>`. Populate the principal only in Salesforce Setup; no External Credential secret is checked in. The endpoint must be reachable over HTTPS.
 
-- Initialize or restore the Git repository; the current `.git` directory is empty, so implementation correctly fails closed at branch creation.
-- Configure real org registry entries and authenticate each alias on the worker host.
-- Configure HTTPS, gateway authentication, request throttling, centralized logs, backups, and a production-grade secret manager.
-- Configure the Named Credential/External Credential principal and permission sets in Salesforce.
-- Configure the Jira webhook HMAC gateway and service-account permissions.
-- Install the Codex CLI on the middleware worker and run `codex login`. The middleware uses an ephemeral, read-only Codex execution with schema-constrained output; it does not require or expose an OpenAI API key. Keep `AGENT_BACKEND=codex`.
+Assign `AI_Agent_User` for app/tab/Apex access. Assign `AI_Agent_Executor` only to approvers; it grants `AI_Agent_Admin` for implementation approval and `AI_Agent_Deploy` for deployment approval. Add `agentChat` to the intended Lightning page.
+
+## Tests and dry run
+
+```powershell
+cd middleware
+$env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'
+npm.cmd run check
+node --import ./test/setup.js --test test/recurringDonationVerticalSlice.test.js
+cd ..
+npm.cmd run test:unit
+```
+
+After safely verifying the alias, run only the non-destructive check:
+
+```powershell
+sf project deploy start --dry-run --source-dir force-app --test-level RunSpecifiedTests --tests AgentControllerTest --target-org $env:PHASE1_SALESFORCE_ALIAS --wait 30
+```
+
+Never remove `--dry-run`, quick deploy this validation, or activate generated Flow metadata.
+
+## Troubleshooting
+
+- PostgreSQL/migrations: check `docker compose ps`, the exact database URL, then rerun migrations. Required DB tests fail rather than skip.
+- Redis: restore it and let the dispatcher retry; never switch production to memory or execute inline.
+- Salesforce alias/auth: rerun read-only `sf org display` and reauthenticate the explicit sandbox. Do not deploy to test access.
+- Named Credential 401: verify endpoint and bearer mapping without logging the secret.
+- Same-org mismatch: update the registry only after independently verifying org ID, username, and instance URL.
+- Approval expired/stale: refresh and approve the current plan or validation; never reuse old authority.
+- Lease loss: stop and investigate current owner/expiry instead of bypassing fencing.
+- Dry-run failure: retain safe evidence and do not convert it to a live deployment.
+- Jira disabled: normal for direct chat; Jira routes/actions are absent until deliberately enabled.

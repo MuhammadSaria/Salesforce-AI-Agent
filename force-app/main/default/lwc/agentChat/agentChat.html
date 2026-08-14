@@ -1,172 +1,211 @@
 <template>
-    <lightning-card title="Salesforce In-Org AI Agent" icon-name="utility:einstein">
-        <template if:true={isBusy}><lightning-spinner alternative-text="Working" size="small"></lightning-spinner></template>
-        <div class="console">
-            <template if:true={errorMessage}><div class="error" role="alert">{errorMessage}</div></template>
-
-            <section class="toolbar" aria-label="Assigned Jira tasks">
-                <lightning-combobox label="Assigned Jira Tasks" options={jobOptions} value={selectedJobId} onchange={handleJobSelection}></lightning-combobox>
-                <lightning-input label="Jira Issue Key" value={jiraIssueKey} data-field="jiraIssueKey" onchange={handleValue}></lightning-input>
-                <lightning-textarea label="Manual User Instruction" value={prompt} data-field="prompt" onchange={handleValue}></lightning-textarea>
-                <lightning-button variant="brand" label="Create Job" icon-name="utility:add" onclick={handleCreate} disabled={createDisabled}></lightning-button>
-            </section>
-
-            <template if:true={hasJob}>
-                <div class="identity-bar">
-                    <div><span class="label">Status</span><lightning-badge label={status}></lightning-badge></div>
-                    <div><span class="label">Customer</span><strong>{orgContext.customerName}</strong></div>
-                    <div><span class="label">Target Org</span><strong>{orgContext.displayName}</strong></div>
-                    <div><span class="label">Environment</span><strong>{orgContext.environment}</strong></div>
-                    <div><span class="label">Organization ID</span><code>{orgContext.expectedOrgId}</code></div>
+    <lightning-card>
+        <div class="nexus" aria-busy={isBusy}>
+            <header class="nexus-header">
+                <div>
+                    <p class="eyebrow">Salesforce development workspace</p>
+                    <h1>Providus Nexus</h1>
                 </div>
-                <template if:true={isProduction}><div class="production-warning" role="alert">You are reviewing work for a Production Salesforce org. Deployment requires production-specific approval.</div></template>
-                <template if:true={hasDataOperations}><div class="production-warning" role="alert">This plan contains Salesforce record changes. Review every object, record ID, field, and value before granting the separate execution approval.</div></template>
-                <template if:true={hasDeleteOperations}><div class="production-warning" role="alert">Destructive action: this plan will delete an existing Salesforce record. Confirm the exact object and record ID. Recovery depends on Salesforce Recycle Bin support and retention.</div></template>
+                <div class="environment-context" aria-label="Trusted Salesforce environment">
+                    <lightning-icon icon-name="utility:world" size="x-small" alternative-text="Salesforce environment"></lightning-icon>
+                    <span>{environmentLabel}</span>
+                </div>
+            </header>
 
-                <section class="milestones" aria-label="Job progress">
-                    <div class={implementationMilestoneClass}>
-                        <lightning-icon icon-name={implementationMilestoneIcon} size="small" alternative-text={implementationMilestoneTitle}></lightning-icon>
-                        <div><strong>{implementationMilestoneTitle}</strong><span>{implementationMilestoneMessage}</span></div>
-                    </div>
-                    <div class={validationMilestoneClass}>
-                        <lightning-icon icon-name={validationMilestoneIcon} size="small" alternative-text={validationMilestoneTitle}></lightning-icon>
-                        <div><strong>{validationMilestoneTitle}</strong><span>{validationMilestoneMessage}</span></div>
-                    </div>
-                    <div class={deploymentMilestoneClass}>
-                        <lightning-icon icon-name={deploymentMilestoneIcon} size="small" alternative-text={deploymentMilestoneTitle}></lightning-icon>
-                        <div><strong>{deploymentMilestoneTitle}</strong><span>{deploymentMilestoneMessage}</span></div>
-                    </div>
-                </section>
+            <template if:true={isProduction}>
+                <div class="production-warning" role="alert">Production org selected. Review the trusted org context before any approval.</div>
+            </template>
+            <template if:true={errorMessage}>
+                <div class="error" role="alert">{errorMessage}</div>
+            </template>
+            <template if:true={isBusy}>
+                <lightning-spinner alternative-text="Providus Nexus is working" size="small"></lightning-spinner>
+            </template>
 
-                <template if:true={hasSpecialistWorkItems}>
-                    <section class="specialist-progress" aria-labelledby="specialist-progress-title">
-                        <div class="specialist-progress__heading">
-                            <div>
-                                <h2 id="specialist-progress-title">Specialist agent progress</h2>
-                                <p>Iteration {orchestrationIteration}. The Orchestrator Agent combines these results into one plan and one approval.</p>
-                            </div>
-                            <lightning-badge label={specialistOverallStatus}></lightning-badge>
+            <div class="workspace">
+                <aside class="conversation-sidebar" aria-label="Conversations">
+                    <div class="sidebar-heading">
+                        <div>
+                            <p class="eyebrow">Persistent history</p>
+                            <h2>Conversations</h2>
                         </div>
-                        <div class="specialist-list">
-                            <template for:each={specialistWorkItems} for:item="item">
-                                <article class="specialist-row" key={item.key}>
-                                    <div class="specialist-row__identity">
-                                        <strong>{item.agentName}</strong>
-                                        <span class={item.statusClass}>{item.status}</span>
-                                    </div>
-                                    <div>
-                                        <p>{item.responsibility}</p>
-                                        <p class="specialist-row__work">{item.proposedWork}</p>
-                                        <template if:true={item.preserved}><span class="specialist-row__preserved">{item.preservedText}</span></template>
-                                    </div>
+                        <lightning-button label="Refresh conversation" icon-name="utility:refresh" onclick={handleRefresh} disabled={isBusy}></lightning-button>
+                    </div>
+
+                    <section class="new-conversation" aria-labelledby="new-conversation-heading">
+                        <h3 id="new-conversation-heading">New conversation</h3>
+                        <lightning-textarea
+                            data-field="newPrompt"
+                            label="Start a new conversation"
+                            value={newPrompt}
+                            maxlength="8000"
+                            onchange={handleValue}
+                            disabled={isBusy}>
+                        </lightning-textarea>
+                        <lightning-button variant="brand" label="Create conversation" icon-name="utility:add" onclick={handleCreate} disabled={createDisabled}></lightning-button>
+                    </section>
+
+                    <nav class="conversation-list" aria-label="Saved conversations">
+                        <template for:each={jobItems} for:item="item">
+                            <button key={item.jobId} type="button" class={item.buttonClass} data-job-id={item.jobId} aria-current={item.ariaCurrent} onclick={handleJobSelection}>
+                                <strong>{item.title}</strong>
+                                <span>{item.statusText}</span>
+                                <time datetime={item.updatedText}>{item.updatedText}</time>
+                            </button>
+                        </template>
+                        <template if:false={jobs.length}>
+                            <p class="empty-state">No conversations yet. Start one above.</p>
+                        </template>
+                    </nav>
+                </aside>
+
+                <main class="conversation-workspace">
+                    <template if:true={hasSelectedJob}>
+                        <header class="conversation-header">
+                            <div>
+                                <p class="eyebrow">Selected conversation</p>
+                                <h2 class="workspace-title">{workspaceTitle}</h2>
+                            </div>
+                            <div class="org-badge">
+                                <span>{orgContext.displayName}</span>
+                                <code>{orgContext.expectedOrgId}</code>
+                            </div>
+                        </header>
+
+                        <section class="progress-card" aria-labelledby="progress-heading" aria-live="polite">
+                            <lightning-icon icon-name="utility:sync" size="small" alternative-text="Current lifecycle status"></lightning-icon>
+                            <div>
+                                <h3 id="progress-heading">Progress</h3>
+                                <strong>{statusLabel}</strong>
+                                <span class="status-code">{status}</span>
+                            </div>
+                        </section>
+
+                        <template if:true={hasClarification}>
+                            <section class="clarification-card" aria-labelledby="clarification-heading">
+                                <lightning-icon icon-name="utility:question" size="small" alternative-text="Clarification required"></lightning-icon>
+                                <div>
+                                    <h3 id="clarification-heading">Clarification needed</h3>
+                                    <p>{clarificationQuestion}</p>
+                                    <p class="supporting-text">Reply in the message composer below.</p>
+                                </div>
+                            </section>
+                        </template>
+
+                        <template if:true={hasPlan}>
+                            <section class="plan-card" aria-labelledby="plan-heading">
+                                <p class="eyebrow">Proposed, server-authoritative plan</p>
+                                <h3 id="plan-heading">Implementation plan</h3>
+                                <p>{planSummary}</p>
+                                <template if:true={hasPlanComponents}>
+                                    <ul>
+                                        <template for:each={planComponents} for:item="component">
+                                            <li key={component.key}>
+                                                <strong>{component.label}</strong>
+                                                <template if:true={component.description}><span>{component.description}</span></template>
+                                            </li>
+                                        </template>
+                                    </ul>
+                                </template>
+                            </section>
+                        </template>
+
+                        <section class="chat-timeline" aria-labelledby="timeline-heading" aria-live="polite">
+                            <h3 id="timeline-heading">Conversation</h3>
+                            <template for:each={messages} for:item="message">
+                                <article key={message.key} class={message.messageClass}>
+                                    <header>
+                                        <strong>{message.authorLabel}</strong>
+                                        <time datetime={message.timestamp}>{message.timestamp}</time>
+                                    </header>
+                                    <p>{message.text}</p>
                                 </article>
                             </template>
-                        </div>
-                    </section>
-                </template>
+                            <template if:false={messages.length}>
+                                <p class="empty-state">Conversation history will appear here after the request is accepted.</p>
+                            </template>
+                        </section>
 
-                <template if:true={validationFailed}>
-                    <section class="validation-failure" role="alert" aria-labelledby="validation-failure-title">
-                        <lightning-icon icon-name="utility:error" size="small" alternative-text="Validation failed"></lightning-icon>
-                        <div>
-                            <h2 id="validation-failure-title">Why validation failed</h2>
-                            <p>{validationFailureReason}</p>
-                            <p class="failure-next-step">Nothing was deployed. Correct the proposed implementation and run validation again before requesting deployment approval.</p>
-                        </div>
-                    </section>
-                </template>
-
-                <template if:true={deploymentComplete}>
-                    <section class="deployment-summary" aria-labelledby="deployment-summary-title">
-                        <h2 id="deployment-summary-title">Deployment complete</h2>
-                        <p class="deployment-summary-text">{deploymentSummaryText}</p>
-                        <p class="deployment-summary-detail"><strong>How it works:</strong> {deploymentHowItWorks}</p>
-                        <p class="deployment-summary-detail"><strong>Validation:</strong> {deploymentValidationSummary}</p>
-                        <template if:true={hasDeploymentItems}>
-                            <div class="deployment-table">
-                                <div class="deployment-table__header">
-                                    <span>Name</span>
-                                    <span>API Name</span>
-                                    <span>Brief Info</span>
-                                </div>
-                                <template for:each={deploymentItems} for:item="item">
-                                    <div class="deployment-table__row" key={item.key}>
-                                        <span>{item.displayName}</span>
-                                        <span>{item.apiName}</span>
-                                        <span>{item.briefInfo}</span>
-                                    </div>
+                        <template if:true={showResult}>
+                            <section class="result-card" aria-labelledby="result-heading">
+                                <p class="eyebrow">Safe implementation report</p>
+                                <h3 id="result-heading">Result</h3>
+                                <template if:true={isInactiveFlowDeployment}>
+                                    <p class="inactive-result"><strong>Flow deployed inactive (Draft).</strong> The automation is not running.</p>
                                 </template>
-                            </div>
+                                <p>{reportSummary}</p>
+                                <template if:true={hasImplementedComponents}>
+                                    <h4>Implemented components</h4>
+                                    <ul class="result-components">
+                                        <template for:each={implementedComponents} for:item="component">
+                                            <li key={component.key}>{component.label}</li>
+                                        </template>
+                                    </ul>
+                                </template>
+                                <dl>
+                                    <template if:true={reportId}><dt>Report identifier</dt><dd>{reportId}</dd></template>
+                                    <template if:true={validationResult}><dt>Validation</dt><dd>{validationResult}</dd></template>
+                                    <template if:true={deploymentResult}><dt>Deployment</dt><dd>{deploymentResult}</dd></template>
+                                    <template if:true={recordEffects}><dt>Record effects</dt><dd>{recordEffects}</dd></template>
+                                    <template if:true={concurrencyConsiderations}><dt>Concurrency</dt><dd>{concurrencyConsiderations}</dd></template>
+                                </dl>
+                            </section>
                         </template>
-                    </section>
-                </template>
 
-                <template if:true={canSelectOrg}>
-                    <section class="action-band">
-                        <lightning-combobox label="Target Org Selection" options={orgOptions} value={selectedOrgId} onchange={handleValue} data-field="selectedOrgId"></lightning-combobox>
-                        <lightning-button variant="brand" label="Select Org" icon-name="utility:check" onclick={handleSelectOrg} disabled={isBusy}></lightning-button>
-                    </section>
-                </template>
+                        <template if:true={showActionPanel}>
+                            <section class="approval-card" aria-labelledby="approval-heading">
+                                <h3 id="approval-heading">Supervised action</h3>
+                                <lightning-textarea
+                                    data-field="actionComments"
+                                    label="Approval or rejection comments"
+                                    value={actionComments}
+                                    maxlength="1000"
+                                    onchange={handleValue}
+                                    disabled={isActing}>
+                                </lightning-textarea>
+                                <div class="approval-actions">
+                                    <template if:true={canApproveImplementation}>
+                                        <lightning-button data-id="approve-implementation" variant="brand" label="Approve implementation" onclick={handleApproveImplementation} disabled={isActing}></lightning-button>
+                                        <lightning-button label="Reject implementation" onclick={handleRejectImplementation} disabled={isActing}></lightning-button>
+                                    </template>
+                                    <template if:true={canApproveDeployment}>
+                                        <lightning-button data-id="approve-deployment" variant="brand" label="Approve deployment" onclick={handleApproveDeployment} disabled={isActing}></lightning-button>
+                                        <lightning-button label="Reject deployment" onclick={handleRejectDeployment} disabled={isActing}></lightning-button>
+                                    </template>
+                                    <template if:true={canDeployApprovedChange}>
+                                        <lightning-button variant="brand" label="Deploy approved change" onclick={handleDeploy} disabled={isActing}></lightning-button>
+                                    </template>
+                                </div>
+                            </section>
+                        </template>
 
-                <lightning-accordion allow-multiple-sections-open active-section-name="details">
-                    <lightning-accordion-section name="details" label="Jira Task Details and Requirement Analysis">
-                        <dl class="details"><dt>Issue</dt><dd>{job.jiraIssueKey}</dd><dt>Summary</dt><dd>{job.requirement.summary}</dd><dt>Acceptance Criteria</dt><dd>{job.requirement.acceptanceCriteria}</dd><dt>Org Verification</dt><dd>{verifiedAt}</dd></dl>
-                    </lightning-accordion-section>
-                    <lightning-accordion-section name="plan" label="Implementation Plan for Approval">
-                        <div class="human-plan">
-                            <h3>What will be delivered</h3>
-                            <p class="plan-summary">{planSummary}</p>
-                            <h3>Implementation steps</h3>
-                            <ol>
-                                <template for:each={implementationSteps} for:item="step"><li key={step.key}>{step.text}</li></template>
-                            </ol>
-                            <h3>Expected outcome</h3>
-                            <p>{expectedOutcome}</p>
-                            <h3>Business impact</h3>
-                            <p>{businessImpact}</p>
-                            <h3>How it will be tested</h3>
-                            <ul><template for:each={testingItems} for:item="item"><li key={item.key}>{item.text}</li></template></ul>
-                            <h3>Risks and assumptions</h3>
-                            <ul><template for:each={riskAndAssumptionItems} for:item="item"><li key={item.key}>{item.text}</li></template></ul>
-                            <h3>Not included</h3>
-                            <ul><template for:each={outOfScopeItems} for:item="item"><li key={item.key}>{item.text}</li></template></ul>
-                            <h3>Rollback</h3>
-                            <p>{rollbackPlan}</p>
-                            <p class="notice">{planNotice}</p>
-                        </div>
-                    </lightning-accordion-section>
-                </lightning-accordion>
-
-                <section class="conversation" aria-labelledby="conversation-title">
-                    <h2 id="conversation-title">Manual User Instructions</h2>
-                    <p class="conversation-status">Use this area to add a change request or clarification for the current job. This remains available before implementation, after implementation, before deployment, and after deployment.</p>
-                    <div class="instruction-band">
-                        <lightning-textarea label="Request a change or add an instruction" value={instruction} data-field="instruction" onchange={handleValue} disabled={instructionInputDisabled}></lightning-textarea>
-                        <div class="instruction-actions">
-                            <lightning-button label="Request Changes" icon-name="utility:edit" onclick={handleAddInstruction} disabled={instructionSendDisabled}></lightning-button>
-                            <lightning-button variant="brand" label="Send Instruction" icon-name="utility:send" onclick={handleAddInstruction} disabled={instructionSendDisabled}></lightning-button>
-                        </div>
-                    </div>
-                    <template if:false={canAddInstruction}><p class="conversation-note">Change requests are unavailable only when the job has been cancelled.</p></template>
-                </section>
-
-                <div class="actions">
-                    <template if:true={canReviewPlan}>
-                        <lightning-button variant="brand" label="Approve Implementation" icon-name="utility:check" onclick={handleApproveImplementation} disabled={isBusy}></lightning-button>
-                        <lightning-button label="Request Changes" icon-name="utility:edit" onclick={handleAddInstruction} disabled={instructionSendDisabled}></lightning-button>
-                        <lightning-button variant="destructive-text" label="Reject" icon-name="utility:close" onclick={handleRejectPlan} disabled={isBusy}></lightning-button>
+                        <section class="composer" aria-label="Conversation composer">
+                            <lightning-textarea
+                                data-id="message-input"
+                                data-field="draftMessage"
+                                label="Message Providus Nexus"
+                                value={draftMessage}
+                                maxlength="4000"
+                                onchange={handleValue}
+                                onkeydown={handleComposerKeydown}
+                                disabled={messageDisabled}>
+                            </lightning-textarea>
+                            <div class="composer-footer">
+                                <span>Enter sends · Shift+Enter adds a new line</span>
+                                <lightning-button variant="brand" label="Send message" icon-name="utility:send" onclick={handleSend} disabled={sendDisabled}></lightning-button>
+                            </div>
+                        </section>
                     </template>
-                    <template if:true={canImplement}><lightning-button variant="brand" label="Implement Locally" icon-name="utility:code_playground" onclick={handleImplement} disabled={isBusy}></lightning-button></template>
-                    <template if:true={canValidate}><lightning-button label="Validate" icon-name="utility:test" onclick={handleValidate} disabled={isBusy}></lightning-button></template>
-                    <template if:true={canApproveDeployment}>
-                        <lightning-button variant="brand" label={approvalActionLabel} icon-name="utility:approval" onclick={handleApproveDeployment} disabled={isBusy}></lightning-button>
-                        <lightning-button label={rejectionActionLabel} icon-name="utility:close" onclick={handleRejectDeployment} disabled={isBusy}></lightning-button>
+
+                    <template if:false={hasSelectedJob}>
+                        <div class="workspace-empty">
+                            <lightning-icon icon-name="utility:comments" size="large" alternative-text="No conversation selected"></lightning-icon>
+                            <h2>Select or start a conversation</h2>
+                            <p>Providus Nexus reloads persisted conversation history from the middleware.</p>
+                        </div>
                     </template>
-                    <template if:true={hasDeploymentApproval}><lightning-button variant="destructive" label={executionActionLabel} icon-name="utility:upload" onclick={handleDeploy} disabled={isBusy}></lightning-button></template>
-                    <template if:true={canRefreshAnalysis}><lightning-button label="Refresh Analysis" icon-name="utility:refresh" onclick={handleRefreshAnalysis} disabled={isBusy}></lightning-button></template>
-                    <template if:true={canCancel}><lightning-button label="Cancel" icon-name="utility:ban" onclick={handleCancel} disabled={isBusy}></lightning-button></template>
-                </div>
-            </template>
+                </main>
+            </div>
         </div>
     </lightning-card>
 </template>

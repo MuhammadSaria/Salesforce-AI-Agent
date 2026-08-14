@@ -24,14 +24,16 @@ export async function createJobRecord(input) {
     orgId: input.orgId || '',
     userId: input.userId || '',
     context: input.context || {},
-    orgContext: null,
+    orgContext: input.orgContext || null,
     orgCandidates: [],
     orgRoutingEvidence: [],
-    jira: input.jira || null,
+    ...(input.jira ? { jira: input.jira } : {}),
     jiraSync: null,
     pendingRevision: false,
     followUpRequired: false,
     conversation: [],
+    clarifications: [],
+    dispatches: [],
     metadataScope: null,
     plan: null,
     iteration: 1,
@@ -44,7 +46,13 @@ export async function createJobRecord(input) {
     revisions: [],
     instructions: [],
     approvals: [],
+    sourceValidation: null,
+    implementationBaseline: null,
+    correctionAttempt: 0,
+    correctionReservation: null,
+    correctionHistory: [],
     validation: null,
+    dataPreview: null,
     deployment: null,
     diff: '',
     logs: [{ timestamp: now, level: 'info', message: 'Job received.' }],
@@ -52,6 +60,7 @@ export async function createJobRecord(input) {
     stateHistory: [{ previousState: null, newState: JOB_STATES.RECEIVED, timestamp: now, actor: input.userId || 'system', reason: 'Job created', approvalId: '', orgId: '' }],
     audit: [],
     error: '',
+    revision: 1,
     createdAt: now,
     updatedAt: now
   };
@@ -96,16 +105,27 @@ export async function listJobRecords() {
 export async function updateJob(jobId, patch) {
   return withJobLock(jobId, async () => {
     const record = await requiredJob(jobId);
-    Object.assign(record, patch, { updatedAt: new Date().toISOString() });
+    Object.assign(record, patch, { updatedAt: new Date().toISOString(), revision: Number(record.revision || 0) + 1 });
     await save(record);
     return record;
+  });
+}
+
+export async function updateJobAtomically(jobId, operation) {
+  return withJobLock(jobId, async () => {
+    const record = await requiredJob(jobId);
+    const result = await operation(record);
+    record.updatedAt = new Date().toISOString();
+    record.revision = Number(record.revision || 0) + 1;
+    await save(record);
+    return result ?? record;
   });
 }
 
 export async function transitionJob(jobId, newState, details = {}) {
   return withJobLock(jobId, async () => {
     const record = await requiredJob(jobId);
-    assertTransition(record.status, newState);
+    assertTransition(record.status, newState, record);
     const event = {
       previousState: record.status,
       newState,
@@ -118,6 +138,7 @@ export async function transitionJob(jobId, newState, details = {}) {
     record.status = newState;
     record.stateHistory.push(event);
     record.updatedAt = event.timestamp;
+    record.revision = Number(record.revision || 0) + 1;
     if (details.error) {
       record.error = details.error;
     } else if (![JOB_STATES.FAILED, JOB_STATES.VALIDATION_FAILED, JOB_STATES.ORG_VERIFICATION_FAILED].includes(newState)) {
@@ -160,7 +181,10 @@ export async function appendConversation(jobId, entry) {
       text: String(entry.text || '').slice(0, 4000),
       actor: String(entry.actor || ''),
       timestamp: entry.timestamp || new Date().toISOString(),
-      responseToMessageId: entry.responseToMessageId || ''
+      responseToMessageId: entry.responseToMessageId || '',
+      ambiguityId: entry.ambiguityId || '',
+      responseToInspectionHash: entry.responseToInspectionHash || '',
+      responseToPlanVersion: entry.responseToPlanVersion || 0
     }];
     record.conversation = conversation.slice(-200);
     await save(record);
@@ -262,7 +286,11 @@ async function invalidate(jobId, selection, actor, reason, options = {}) {
         orchestration: record.orchestration,
         workItems: record.workItems,
         specialistMessages: record.specialistMessages,
-        fileOwnership: record.fileOwnership
+        fileOwnership: record.fileOwnership,
+        sourceValidation: record.sourceValidation,
+        implementationBaseline: record.implementationBaseline,
+        correctionAttempt: record.correctionAttempt,
+        correctionHistory: record.correctionHistory
       });
     }
     const affectedAgentIds = options.orgChanged
@@ -280,7 +308,7 @@ async function invalidate(jobId, selection, actor, reason, options = {}) {
       preservedWorkItems
     };
     record.stateHistory.push({ previousState: record.status, newState: JOB_STATES.RECEIVED, timestamp: now, actor, reason, approvalId: '', orgId: '' });
-    Object.assign(record, { status: JOB_STATES.RECEIVED, context: { ...record.context, selectedOrgRegistryId: selection }, orgContext: null, orgCandidates: [], orgRoutingEvidence: [], metadataScope: null, plan: null, nextPlanVersion: Math.max(1, currentPlanVersion + 1), iteration: Math.max(1, currentPlanVersion + 1), orchestration: null, workItems: preservedWorkItems, specialistMessages: [], fileOwnership: [], revisionContext, revisions, approvals: [], validation: null, deployment: null, implementation: null, diff: '', pendingRevision: false, followUpRequired: false, error: '', updatedAt: now });
+    Object.assign(record, { status: JOB_STATES.RECEIVED, context: { ...record.context, selectedOrgRegistryId: selection }, orgContext: null, orgCandidates: [], orgRoutingEvidence: [], metadataScope: null, plan: null, nextPlanVersion: Math.max(1, currentPlanVersion + 1), iteration: Math.max(1, currentPlanVersion + 1), orchestration: null, workItems: preservedWorkItems, specialistMessages: [], specialistResults: {}, fileOwnership: [], revisionContext, revisions, approvals: [], sourceValidation: null, implementationBaseline: null, correctionAttempt: 0, correctionReservation: null, correctionHistory: [], validation: null, dataPreview: null, deployment: null, implementation: null, diff: '', pendingRevision: false, followUpRequired: false, error: '', updatedAt: now });
     await save(record);
     return record;
   });
@@ -369,7 +397,70 @@ async function writeSnapshot(record) {
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   await mkdir(directory, { recursive: true });
   await writeFile(temporary, JSON.stringify(record, null, 2), { encoding: 'utf8', mode: 0o600 });
-  await rename(temporary, path);
+  await renameWithRetry(temporary, path);
+}
+
+export async function claimPendingDispatch(dispatchKey) {
+  return updateDispatch(dispatchKey, (record, dispatch) => {
+    if (!dispatch || dispatch.status === 'DISPATCHED' || dispatch.status === 'DISPATCHING') return null;
+    dispatch.status = 'DISPATCHING';
+    dispatch.updatedAt = new Date().toISOString();
+    return { job: record, dispatch: structuredClone(dispatch) };
+  });
+}
+
+export async function markDispatchDispatched(dispatchKey) {
+  return updateDispatch(dispatchKey, (record, dispatch) => {
+    if (!dispatch) return null;
+    dispatch.status = 'DISPATCHED';
+    dispatch.dispatchedAt = new Date().toISOString();
+    dispatch.updatedAt = dispatch.dispatchedAt;
+    return { job: record, dispatch: structuredClone(dispatch) };
+  });
+}
+
+export async function markDispatchPending(dispatchKey, error) {
+  return updateDispatch(dispatchKey, (record, dispatch) => {
+    if (!dispatch) return null;
+    dispatch.status = 'PENDING';
+    dispatch.attempts = Number(dispatch.attempts || 0) + 1;
+    dispatch.lastError = String(error?.message || error || '').slice(0, 500);
+    dispatch.updatedAt = new Date().toISOString();
+    return { job: record, dispatch: structuredClone(dispatch) };
+  });
+}
+
+export async function listPendingDispatches() {
+  const jobs = await listJobRecords();
+  return jobs.flatMap((job) => (job.dispatches || [])
+    .filter((dispatch) => dispatch.status === 'PENDING')
+    .map((dispatch) => ({ jobId: job.jobId, dispatch })));
+}
+
+async function updateDispatch(dispatchKey, operation) {
+  const jobs = await listJobRecords();
+  const job = jobs.find((candidate) => (candidate.dispatches || []).some((dispatch) => dispatch.dispatchKey === dispatchKey));
+  if (!job) return null;
+  return withJobLock(job.jobId, async () => {
+    const record = await requiredJob(job.jobId);
+    const dispatch = (record.dispatches || []).find((item) => item.dispatchKey === dispatchKey);
+    const result = operation(record, dispatch);
+    record.updatedAt = new Date().toISOString();
+    await save(record);
+    return result;
+  });
+}
+
+async function renameWithRetry(source, destination) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      await rename(source, destination);
+      return;
+    } catch (error) {
+      if (!['EPERM', 'EBUSY'].includes(error.code) || attempt === 19) throw error;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 50 * (attempt + 1)));
+    }
+  }
 }
 
 async function ensureSnapshot(record) {

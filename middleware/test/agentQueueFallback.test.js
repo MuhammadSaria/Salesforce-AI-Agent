@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { URL } from 'node:url';
 import { createJobRecord } from '../src/services/jobStore.js';
 import { agentQueue, enqueueAgentJob } from '../src/queue/agentQueue.js';
 
-test('enqueueAgentJob falls back to in-memory execution when BullMQ enqueue fails', async () => {
+test('enqueueAgentJob supports inline execution only when memory queue mode is selected', async () => {
   if (!agentQueue) {
     assert.equal(typeof enqueueAgentJob, 'function');
     return;
@@ -22,4 +24,10 @@ test('enqueueAgentJob falls back to in-memory execution when BullMQ enqueue fail
   } finally {
     agentQueue.add = originalAdd;
   }
+});
+
+test('Redis queue enqueue failure is not followed by inline worker fallback', async () => {
+  const source = await readFile(new URL('../src/queue/agentQueue.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /falling back to in-memory processing/);
+  assert.match(source, /config\.queueDriver !== 'memory'/);
 });

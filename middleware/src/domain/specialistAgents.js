@@ -12,6 +12,26 @@ export const SPECIALIST_AGENT_IDS = Object.freeze({
   DOCUMENTATION_EXPLANATION: 'DOCUMENTATION_EXPLANATION'
 });
 
+export const PHASE1_IMPLEMENTATION_SPECIALIST_IDS = Object.freeze([
+  SPECIALIST_AGENT_IDS.OBJECT_FIELD,
+  SPECIALIST_AGENT_IDS.SECURITY_PERMISSIONS,
+  SPECIALIST_AGENT_IDS.FLOW
+]);
+
+export const ARCHITECTURE_OWNER_TO_SPECIALIST_ID = Object.freeze({
+  'object-field-specialist': SPECIALIST_AGENT_IDS.OBJECT_FIELD,
+  'security-specialist': SPECIALIST_AGENT_IDS.SECURITY_PERMISSIONS,
+  'flow-specialist': SPECIALIST_AGENT_IDS.FLOW,
+  'apex-specialist': SPECIALIST_AGENT_IDS.APEX,
+  'lwc-specialist': SPECIALIST_AGENT_IDS.LWC,
+  'ui-metadata-specialist': SPECIALIST_AGENT_IDS.UI_METADATA,
+  'integration-specialist': SPECIALIST_AGENT_IDS.INTEGRATION,
+  'data-specialist': SPECIALIST_AGENT_IDS.DATA,
+  'testing-specialist': SPECIALIST_AGENT_IDS.TESTING,
+  'validation-deployment-specialist': SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT,
+  'documentation-specialist': SPECIALIST_AGENT_IDS.DOCUMENTATION_EXPLANATION
+});
+
 export const WORK_ITEM_STATUSES = Object.freeze({
   PENDING: 'PENDING',
   READY: 'READY',
@@ -176,6 +196,10 @@ export function assertWorkItemTransition(from, to) {
 
 export function ownerForMetadataType(type) {
   return TYPE_OWNERS.get(String(type || '')) || '';
+}
+
+export function specialistIdForArchitectureOwner(owner) {
+  return ARCHITECTURE_OWNER_TO_SPECIALIST_ID[String(owner || '')] || '';
 }
 
 export function ownerForFile(path) {
