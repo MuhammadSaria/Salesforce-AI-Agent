@@ -16,6 +16,19 @@ export const DEVELOPMENT_JOB_STATES = Object.freeze({
   CANCELLED: 'CANCELLED'
 });
 
+export const MAX_MECHANICAL_CORRECTION_ATTEMPTS = 3;
+
+export function nextMechanicalCorrectionAttempt(job, requestedAttempt) {
+  const next = Number(job?.correctionAttempt || 0) + 1;
+  if (next > MAX_MECHANICAL_CORRECTION_ATTEMPTS || Number(requestedAttempt) > MAX_MECHANICAL_CORRECTION_ATTEMPTS) {
+    throw correctionConflict('CORRECTION_LIMIT_REACHED', 'Mechanical correction is limited to three cycles.');
+  }
+  if (!Number.isInteger(Number(requestedAttempt)) || Number(requestedAttempt) !== next) {
+    throw correctionConflict('STALE_CORRECTION_ATTEMPT', 'Correction attempt does not match persisted state.');
+  }
+  return next;
+}
+
 const transitions = new Map([
   [DEVELOPMENT_JOB_STATES.RECEIVED, [DEVELOPMENT_JOB_STATES.UNDERSTANDING, DEVELOPMENT_JOB_STATES.CANCELLED]],
   [DEVELOPMENT_JOB_STATES.UNDERSTANDING, [
@@ -119,4 +132,8 @@ function conflict(message) {
   error.statusCode = 409;
   error.code = 'INVALID_STATE_TRANSITION';
   return error;
+}
+
+function correctionConflict(code, message) {
+  return Object.assign(new Error(message), { code, statusCode: 409 });
 }

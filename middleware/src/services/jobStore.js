@@ -48,6 +48,9 @@ export async function createJobRecord(input) {
     approvals: [],
     sourceValidation: null,
     implementationBaseline: null,
+    correctionAttempt: 0,
+    correctionReservation: null,
+    correctionHistory: [],
     validation: null,
     deployment: null,
     diff: '',
@@ -282,7 +285,11 @@ async function invalidate(jobId, selection, actor, reason, options = {}) {
         orchestration: record.orchestration,
         workItems: record.workItems,
         specialistMessages: record.specialistMessages,
-        fileOwnership: record.fileOwnership
+        fileOwnership: record.fileOwnership,
+        sourceValidation: record.sourceValidation,
+        implementationBaseline: record.implementationBaseline,
+        correctionAttempt: record.correctionAttempt,
+        correctionHistory: record.correctionHistory
       });
     }
     const affectedAgentIds = options.orgChanged
@@ -300,7 +307,7 @@ async function invalidate(jobId, selection, actor, reason, options = {}) {
       preservedWorkItems
     };
     record.stateHistory.push({ previousState: record.status, newState: JOB_STATES.RECEIVED, timestamp: now, actor, reason, approvalId: '', orgId: '' });
-    Object.assign(record, { status: JOB_STATES.RECEIVED, context: { ...record.context, selectedOrgRegistryId: selection }, orgContext: null, orgCandidates: [], orgRoutingEvidence: [], metadataScope: null, plan: null, nextPlanVersion: Math.max(1, currentPlanVersion + 1), iteration: Math.max(1, currentPlanVersion + 1), orchestration: null, workItems: preservedWorkItems, specialistMessages: [], specialistResults: {}, fileOwnership: [], revisionContext, revisions, approvals: [], sourceValidation: null, implementationBaseline: null, validation: null, deployment: null, implementation: null, diff: '', pendingRevision: false, followUpRequired: false, error: '', updatedAt: now });
+    Object.assign(record, { status: JOB_STATES.RECEIVED, context: { ...record.context, selectedOrgRegistryId: selection }, orgContext: null, orgCandidates: [], orgRoutingEvidence: [], metadataScope: null, plan: null, nextPlanVersion: Math.max(1, currentPlanVersion + 1), iteration: Math.max(1, currentPlanVersion + 1), orchestration: null, workItems: preservedWorkItems, specialistMessages: [], specialistResults: {}, fileOwnership: [], revisionContext, revisions, approvals: [], sourceValidation: null, implementationBaseline: null, correctionAttempt: 0, correctionReservation: null, correctionHistory: [], validation: null, deployment: null, implementation: null, diff: '', pendingRevision: false, followUpRequired: false, error: '', updatedAt: now });
     await save(record);
     return record;
   });

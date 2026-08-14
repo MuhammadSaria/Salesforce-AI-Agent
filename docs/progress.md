@@ -2,7 +2,7 @@
 
 **Branch:** `feature/providus-phase1-execution`  
 **Base:** `main`  
-**Last updated:** 2026-08-13
+**Last updated:** 2026-08-14
 
 ## Repository Workflow Setup
 
@@ -12,10 +12,30 @@
 
 ## Current Task
 
-- Task: Phase 1 Task 11
+- Task: Phase 1 Task 12
 - Status: NOT STARTED
 
 ## Completed Tasks
+
+- Phase 1 Task 11 — Add bounded validation correction
+  - Verification date: 2026-08-14
+  - Gap analysis: Task 11 reused the strict Task 7 specialist contracts and owner mappings, Task 8 specialist-result persistence, Task 9 complete-set validators, Task 10 component keys/lease fencing/immutable baseline record, exact-org and plan/scope/inspection/source hashes, the unified Memory/PostgreSQL JobStore, atomic row-locked mutation, existing material invalidation/clarification transitions, and bounded outbox retry policy. Missing were structured deterministic classification, sanitized Salesforce failure normalization, bounded correction input/output, durable reservation/counters/history, owner-file replacement, complete-set revalidation, and correction lifecycle routing. Repository-authoritative deviation: `correctionRouting.js` and its focused test did not exist at the approved SHA although the plan listed the service as “modify,” so both were created. JSONB required no SQL migration; record-store files and persistence tests changed minimally for Memory/PostgreSQL parity.
+  - Classification uses trusted structured `code` and `source` fields only. `MECHANICAL` covers stable XML structure/order, manifest, compile syntax, metadata syntax, and source-format codes; `MATERIAL` covers new/unapproved fields or components, business/data/security expansion, and unrelated dependencies; `INFRASTRUCTURE` covers stable timeout, CLI, Salesforce API/network, database, and queue availability codes. Unknown, unsupported-source, or ambiguous evidence throws `VALIDATION_FAILURE_UNCLASSIFIED`; free-form text never grants mechanical authority. Salesforce CLI JSON is normalized from stable failure types and canonical component identity, sanitized, and unknown Salesforce types remain unclassified.
+  - Mechanical correction reloads persisted state, resolves the exact failed operation and owner from stored specialist results, verifies the caller owner, and sends only the sanitized failure, immutable original approved behavior, complete implicated owner file, explicit ownership, exact approved component, and relevant approved evidence. It excludes other specialists’ operations/evidence, unknown detail fields, environment/DB values, and recognized secrets. The existing strict result schema rejects prose, extra properties, BLOCKED output, extra/missing operations, changed operation/type/API/path identity, new components, and cross-owner output.
+  - `correctionAttempt`, one tokenized `correctionReservation`, and bounded `correctionHistory` are durable fields in both stores. The server reloads persisted state and atomically reserves `correctionAttempt + 1`; requests cannot supply authority. Attempts 1–3 are allowed and attempt 4 throws `CORRECTION_LIMIT_REACHED` before model/source/validation side effects. A real PostgreSQL row-lock race produces one attempt-1 reservation and one `CORRECTION_IN_PROGRESS`; a second store instance reads persisted correction history after simulated worker restart. Model infrastructure failures clear their reservation without consuming an attempt; accepted model output or deterministic rejection consumes one cycle.
+  - Correction verifies the current Task 10 lock token for the complete approved component-key set before model execution and persistence. Lost/expired ownership throws `COMPONENT_LOCK_LOST`; correction never reacquires silently. It binds and rechecks `baselineCommit`, the complete baseline object, component keys, `sourceWritten:false`, source org, plan/scope/inspection hashes, plan version, approved components, current Task 9 source hash, authenticated job org, and verified org context. Baseline bytes/commit/bindings are never recreated or changed. A binding change during a failed correction invalidates authority without consuming an attempt for the new plan.
+  - Corrected owner operations are combined with every unchanged approved operation and passed once through Task 9’s authoritative complete-set validator. Canonical-path, ownership, scope, safe-XML, root/namespace, secret/script, Number field, least-privilege Security, connected Draft Flow, recurring-donation semantic, and trusted-evidence rules remain unchanged. Only a complete pass atomically replaces the owner operation and publishes a new `sourceValidation: PASSED` hash/binding; the previous Salesforce validation is cleared. Invalid corrected source leaves original operations and the prior Task 9 binding unchanged and publishes no new PASSED marker.
+  - Flow activation/semantic mutation, PermissionSet privilege expansion, CustomField type mutation, new Flow/API/path, cross-owner source, scope properties, malformed structured output, and prose output are rejected. No worktree source write, Salesforce validation/deployment, Flow activation, scope expansion, or Task 12 action occurs; successful results retain `sourceWritten:false`.
+  - Material routing never invokes correction. It uses existing plan invalidation and legal `RECEIVED -> UNDERSTANDING -> AWAITING_CLARIFICATION` transitions, archives prior plan/approval/source-validation/baseline/correction evidence, clears stale implementation approval/current artifacts, and records one safe clarification. Infrastructure routing never invokes correction or replanning, consumes no attempt, mutates no source/approval state, and throws a sanitized retryable error for the existing bounded worker/outbox policy. Successful mechanical correction returns `CORRECTING -> VALIDATING`; limit exhaustion returns to recoverable `FAILED` with no fourth model call.
+  - RED verification: `node --import ./test/setup.js --test test/correctionService.test.js` — expected FAIL, 0 passed and 1 failed with `ERR_MODULE_NOT_FOUND` for `correctionService.js`. Expanded correction tests then failed for missing factory/routing/normalization exports; lifecycle tests failed before `VALIDATING`/limit transitions were wired; concurrent plan and Task 9 binding-change regressions failed before failed-attempt finalization rechecked immutable authority; and stale Task 9 operation-count/path bindings failed before complete-set binding checks were added.
+  - Focused Task 11: `node --import ./test/setup.js --test test/correctionService.test.js test/correctionRouting.test.js test/validationFailure.test.js` — PASS, 55 tests, 0 failed, 0 skipped. Salesforce structured-failure regression: `test/sfFailureMessage.test.js` — PASS, 4 tests, 0 failed, 0 skipped. Affected agent validation gate: `test/agentSameOrg.test.js test/agentClarificationEvidence.test.js test/sfFailureMessage.test.js` — PASS, 31 tests, 0 failed, 0 skipped.
+  - Task 9 validation/security regressions: source/Flow/safe-XML/connected-graph/canonical-path/evidence/runner/specialist/agent/metadata-capability suites — PASS, 119 tests, 0 failed, 0 skipped.
+  - Task 10 regressions with the required DB URL: component locks, heartbeat/lease loss, Git executor, source hash, and baseline/worktree integration — PASS, 19 tests, 0 failed, 0 skipped. An initial invocation without `TEST_DATABASE_URL` correctly failed only the dedicated database guard (11 passed, 1 setup failure); the required rerun passed 19/19.
+  - Tasks 6–8 affected aggregate with the required DB URL: JobStore, lifecycle, approvals, queue fail-closed, same-org enforcement, bounded specialists, BLOCKED clarification, and validation behavior — PASS, 88 tests, 0 failed, 0 skipped.
+  - PostgreSQL-heavy suites run individually with `TEST_DATABASE_URL=postgres://providus:providus@127.0.0.1:5432/providus_nexus_test`: PostgreSQL helper 6/6, repository/migrations 11/11, JobStore contract/correction durability 5/5, atomic approval/clarification 3/3, migration/retry 2/2, outbox dispatcher 4/4, conversation API 19/19, two-instance production 1/1, and Task 10 component lock aggregate 19/19; all had 0 failed and 0 skipped.
+  - Final `npm.cmd run check`: lint PASS; 429 tests, 429 passed, 0 failed, 0 skipped. Known parallel shared-schema interference did not reproduce.
+  - `git diff --check`: PASS; only line-ending conversion warnings were reported.
+  - No Task 12 deployment approval/binding/execution behavior, Salesforce deployment, Flow activation, production deployment, or main merge occurred, and no Tasks 6–10 guard was weakened.
 
 - Phase 1 Task 10 — Add component locks and immutable implementation baselines
   - Verification date: 2026-08-13
@@ -423,7 +443,7 @@
 
 ## Next Task
 
-Phase 1 Task 11. NOT STARTED.
+Phase 1 Task 12. NOT STARTED.
 
 ## Update Rules
 

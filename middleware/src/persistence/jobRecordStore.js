@@ -415,9 +415,9 @@ async function invalidateRecord(pool, jobId, selection, actor, orgChanged) {
     if ([JOB_STATES.CANCELLED, JOB_STATES.DEPLOYING].includes(record.status)) throw Object.assign(new Error('This job cannot be revised in its current state.'), { statusCode: 409 });
     const now = new Date().toISOString();
     const currentPlanVersion = Number(record.plan?.planVersion || record.nextPlanVersion || 0);
-    record.revisions = [...(record.revisions || []), ...(record.plan ? [{ revisionNumber: currentPlanVersion, invalidatedAt: now, invalidatedBy: actor, plan: record.plan, approvals: record.approvals, orgContext: record.orgContext }] : [])];
+    record.revisions = [...(record.revisions || []), ...(record.plan ? [{ revisionNumber: currentPlanVersion, invalidatedAt: now, invalidatedBy: actor, plan: record.plan, approvals: record.approvals, orgContext: record.orgContext, sourceValidation: record.sourceValidation, implementationBaseline: record.implementationBaseline, correctionAttempt: record.correctionAttempt, correctionHistory: record.correctionHistory }] : [])];
     record.stateHistory.push({ previousState: record.status, newState: JOB_STATES.RECEIVED, timestamp: now, actor, reason: orgChanged ? 'Target org changed; artifacts invalidated.' : 'Requirements changed; artifacts invalidated.', approvalId: '', orgId: '' });
-    Object.assign(record, { status: JOB_STATES.RECEIVED, context: { ...record.context, selectedOrgRegistryId: selection }, orgContext: null, metadataScope: null, plan: null, nextPlanVersion: Math.max(1, currentPlanVersion + 1), iteration: Math.max(1, currentPlanVersion + 1), orchestration: null, workItems: [], specialistMessages: [], specialistResults: {}, fileOwnership: [], revisionContext: null, approvals: [], sourceValidation: null, implementationBaseline: null, validation: null, deployment: null, implementation: null, diff: '', error: '' });
+    Object.assign(record, { status: JOB_STATES.RECEIVED, context: { ...record.context, selectedOrgRegistryId: selection }, orgContext: null, metadataScope: null, plan: null, nextPlanVersion: Math.max(1, currentPlanVersion + 1), iteration: Math.max(1, currentPlanVersion + 1), orchestration: null, workItems: [], specialistMessages: [], specialistResults: {}, fileOwnership: [], revisionContext: null, approvals: [], sourceValidation: null, implementationBaseline: null, correctionAttempt: 0, correctionReservation: null, correctionHistory: [], validation: null, deployment: null, implementation: null, diff: '', error: '' });
   });
 }
 
@@ -474,6 +474,9 @@ function newJobRecord(input) {
     deployment: null,
     sourceValidation: null,
     implementationBaseline: null,
+    correctionAttempt: 0,
+    correctionReservation: null,
+    correctionHistory: [],
     diff: '',
     logs: [{ timestamp: now, level: 'info', message: 'Job received.' }],
     commands: [],

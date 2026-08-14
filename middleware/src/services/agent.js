@@ -18,7 +18,7 @@ import { runGit } from './gitExecutor.js';
 import { enrichPlanWithCodex } from './codexExecutor.js';
 import { orgBoundApproval } from '../domain/approval.js';
 import { assertArchitecturePlanActionable } from '../domain/planActionability.js';
-import { humanizeValidationFailure } from '../utils/validationFailure.js';
+import { humanizeValidationFailure, normalizeValidationFailure, structuredSalesforceValidationFailure } from '../utils/validationFailure.js';
 import { activatePendingJiraRevision, syncJiraComments } from './jiraSync.js';
 import { approveSpecialistWorkItems, buildSpecialistOrchestration, executeBoundedSpecialists, specialistAuditEvent, structuredSpecialistMessage, workItemForFile } from './orchestrator.js';
 import { SPECIALIST_AGENT_IDS, SPECIALIST_MESSAGE_TYPES, WORK_ITEM_STATUSES, implementationAgentIds, ownerForMetadataType } from '../domain/specialistAgents.js';
@@ -29,6 +29,7 @@ import { generateSecuritySource } from '../specialists/securitySpecialist.js';
 import { generateFlowSource } from '../specialists/flowSpecialist.js';
 import { validateSpecialistOperations } from '../validation/sourceValidator.js';
 import { componentKeysForPlan, createComponentLockService, withComponentLocks } from './componentLockService.js';
+import { createCorrectionRouter } from './correctionRouting.js';
 
 let sameOrgResolver = resolveSameOrg;
 let directAnalysisDependencies = {
@@ -38,6 +39,7 @@ let directAnalysisDependencies = {
 };
 let directSpecialistModelRunner = executeSpecialistModel;
 let implementationBaselineRunner = establishImplementationBaseline;
+let correctionRouterOverride = null;
 
 export function setSameOrgResolverForTest(resolver) {
   sameOrgResolver = resolver || resolveSameOrg;
@@ -57,6 +59,15 @@ export function setDirectSpecialistModelRunnerForTest(modelRunner = null) {
 
 export function setImplementationBaselineRunnerForTest(runner = null) {
   implementationBaselineRunner = runner || establishImplementationBaseline;
+}
+
+export function setCorrectionRouterForTest(router = null) {
+  correctionRouterOverride = router;
+}
+
+export function routeBoundedValidationFailureForJob(input) {
+  const router = correctionRouterOverride || createCorrectionRouter({ jobStore: currentJobStore() });
+  return router.routeValidationFailure(input);
 }
 
 export async function processAgentJob(message, options = {}) {
@@ -384,7 +395,11 @@ async function validate(job, actor) {
     const result = await runSfCommand('deployDryRun', { manifest: current.manifest }, { ...sfOptions(current, current.orgContext, paths, actor, current.metadataScope), cwd: implementationProject });
     await appendCommand(current.jobId, result);
     const now = new Date();
-    if (result.exitCode !== 0) throw new Error(sfFailureMessage(result));
+    if (result.exitCode !== 0) {
+      throw Object.assign(new Error(sfFailureMessage(result)), {
+        validationFailure: structuredSalesforceValidationFailure(result)
+      });
+    }
     const validation = { validationId: nanoid(), targetOrgId: current.orgContext.expectedOrgId, status: 'PASSED', sourceHash: current.implementation?.sourceHash || stableHash([]), commitHash: current.implementation?.commitHash || '', planHash: current.plan.planHash, metadataScopeHash: current.metadataScope.hash, packageHash: await fileHash(current.manifest), commands: [result.command], result: result.stdout, timestamp: now.toISOString(), expiryTimestamp: new Date(now.getTime() + config.validationExpiryMinutes * 60000).toISOString() };
     await writeFile(join(paths.validation, `${validation.validationId}.json`), JSON.stringify(validation, null, 2), 'utf8');
     await updateJob(current.jobId, { validation });
@@ -394,20 +409,26 @@ async function validate(job, actor) {
     await transitionJob(current.jobId, JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL, { actor, reason: 'Validation passed.' });
     if (await activatePendingJiraRevisionWhenEnabled(current.jobId, actor)) return analyze(await requiredJob(current.jobId), actor);
   } catch (error) {
-    await updateJob(job.jobId, { validation: { status: 'FAILED', error: error.message, failureReason: humanizeValidationFailure(error.message), timestamp: new Date().toISOString() } });
-    await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.TESTING, WORK_ITEM_STATUSES.CHANGES_REQUIRED, humanizeValidationFailure(error.message));
-    await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT, WORK_ITEM_STATUSES.CHANGES_REQUIRED, humanizeValidationFailure(error.message));
+    const failure = normalizeValidationFailure(error.validationFailure || {
+      code: 'SALESFORCE_VALIDATION_UNCLASSIFIED',
+      source: 'SALESFORCE_VALIDATION',
+      details: { message: error.message }
+    });
+    const failureReason = humanizeValidationFailure(failure.details?.message || error.message);
+    await updateJob(job.jobId, { validation: { status: 'FAILED', error: failureReason, failure, failureReason, timestamp: new Date().toISOString() } });
+    await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.TESTING, WORK_ITEM_STATUSES.CHANGES_REQUIRED, failureReason);
+    await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT, WORK_ITEM_STATUSES.CHANGES_REQUIRED, failureReason);
     const current = await requiredJob(job.jobId);
     const validationItem = current.workItems.find((item) => item.assignedSpecialistAgent === SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT);
     if (validationItem) {
       const message = structuredSpecialistMessage(current, validationItem.agentName, 'Orchestrator Agent', validationItem.workItemId, SPECIALIST_MESSAGE_TYPES.VALIDATION_FAILED, {
-        requestedInformation: humanizeValidationFailure(error.message),
+        requestedInformation: failureReason,
         risk: current.plan?.estimatedRiskLevel || 'MEDIUM'
       });
       await updateJob(job.jobId, { specialistMessages: [...(current.specialistMessages || []), message] });
-      await auditEvent(specialistAuditEvent(current, validationItem, 'SPECIALIST_VALIDATION_FAILED', 'failed', { failureReason: humanizeValidationFailure(error.message) }));
+      await auditEvent(specialistAuditEvent(current, validationItem, 'SPECIALIST_VALIDATION_FAILED', 'failed', { failureReason }));
     }
-    await transitionJob(job.jobId, JOB_STATES.VALIDATION_FAILED, { actor, reason: 'Validation failed.', error: error.message });
+    await transitionJob(job.jobId, JOB_STATES.VALIDATION_FAILED, { actor, reason: 'Validation failed.', error: failureReason });
     if (await activatePendingJiraRevisionWhenEnabled(job.jobId, actor)) return analyze(await requiredJob(job.jobId), actor);
   }
 }
