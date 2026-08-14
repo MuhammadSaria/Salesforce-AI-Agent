@@ -1,0 +1,78 @@
+{
+  "sourceOrgId": "00Dg500000E07e9EAB",
+  "verifiedOrg": {
+    "organizationId": "00Dg500000E07e9EAB",
+    "instanceUrl": "https://providus--phase1.sandbox.my.salesforce.com",
+    "username": "providus.integration@example.invalid",
+    "connected": true,
+    "environment": "sandbox"
+  },
+  "objects": [
+    {
+      "apiName": "GiftCommitment",
+      "label": "Recurring Donation"
+    },
+    {
+      "apiName": "GiftTransaction",
+      "label": "Donation"
+    }
+  ],
+  "fields": [
+    {
+      "objectApiName": "GiftTransaction",
+      "apiName": "GiftCommitmentId",
+      "label": "Recurring Donation",
+      "dataType": "Lookup",
+      "referenceTo": "GiftCommitment",
+      "relationshipName": "GiftCommitment"
+    },
+    {
+      "objectApiName": "GiftTransaction",
+      "apiName": "Status",
+      "label": "Status",
+      "dataType": "Picklist"
+    }
+  ],
+  "statusValues": [
+    {
+      "objectApiName": "GiftTransaction",
+      "fieldApiName": "Status",
+      "value": "Paid",
+      "label": "Paid",
+      "active": true
+    },
+    {
+      "objectApiName": "GiftTransaction",
+      "fieldApiName": "Status",
+      "value": "Completed",
+      "label": "Completed",
+      "active": true
+    }
+  ],
+  "evidenceIdentity": [
+    "CustomObject:GiftCommitment",
+    "CustomObject:GiftTransaction",
+    "relationship:GiftTransaction.GiftCommitmentId",
+    "statusValue:GiftTransaction.Status.Paid",
+    "statusValue:GiftTransaction.Status.Completed"
+  ],
+  "approvedEvidenceIds": [
+    "CustomObject:GiftTransaction",
+    "relationship:GiftTransaction.GiftCommitmentId",
+    "statusValue:GiftTransaction.Status.Completed"
+  ],
+  "expectedGeneratedComponents": [
+    {
+      "metadataType": "CustomField",
+      "apiName": "GiftTransaction.Installment_Number__c"
+    },
+    {
+      "metadataType": "PermissionSet",
+      "apiName": "Providus_Recurring_Donation_Installments"
+    },
+    {
+      "metadataType": "Flow",
+      "apiName": "Assign_Recurring_Donation_Installment"
+    }
+  ]
+}

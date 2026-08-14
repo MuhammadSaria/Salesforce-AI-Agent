@@ -1,4 +1,5 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { join } from 'node:path';
 import { nanoid } from 'nanoid';
 import { JOB_STATES } from '../domain/jobState.js';
@@ -30,6 +31,7 @@ import { generateFlowSource } from '../specialists/flowSpecialist.js';
 import { validateSpecialistOperations } from '../validation/sourceValidator.js';
 import { componentKeysForPlan, createComponentLockService, startComponentLockHeartbeat, withComponentLocks } from './componentLockService.js';
 import { createCorrectionRouter } from './correctionRouting.js';
+import { writeImplementationReport } from './implementationReport.js';
 import {
   buildDataPreview,
   executeApprovedDataOperations,
@@ -48,6 +50,38 @@ let directSpecialistModelRunner = executeSpecialistModel;
 let implementationBaselineRunner = establishImplementationBaseline;
 let correctionRouterOverride = null;
 let directArtifactRunner = prepareAndValidateDirectImplementation;
+const agentDependencyScope = new AsyncLocalStorage();
+
+export function createProductionAgentDependencies(overrides = {}) {
+  const salesforceExecutor = overrides.salesforceExecutor || {};
+  return {
+    sameOrgResolver: overrides.sameOrgResolver || resolveSameOrg,
+    inspectFlowRequirement: overrides.inspectFlowRequirement || ((input) => inspectFlowRequirement(input, overrides.inspectionDependencies || {})),
+    createArchitecturePlan: overrides.createArchitecturePlan || createArchitecturePlan,
+    architecturePlannerDependencies: overrides.architecturePlannerDependencies || createProductionArchitecturePlannerDependencies(overrides),
+    specialistModelRunner: overrides.specialistModelRunner || executeSpecialistModel,
+    implementationBaselineRunner: overrides.implementationBaselineRunner || establishImplementationBaseline,
+    correctionRouter: overrides.correctionRouter || null,
+    directArtifactRunner: overrides.directArtifactRunner || prepareAndValidateDirectImplementation,
+    runSfCommand: salesforceExecutor.runSfCommand || overrides.runSfCommand || runSfCommand,
+    verifySelectedOrg: salesforceExecutor.verifySelectedOrg || overrides.verifySelectedOrg || verifySelectedOrg,
+    runGit: overrides.runGit || runGit
+  };
+}
+
+function currentAgentDependencies() {
+  return agentDependencyScope.getStore() || {
+    sameOrgResolver,
+    ...directAnalysisDependencies,
+    specialistModelRunner: directSpecialistModelRunner,
+    implementationBaselineRunner,
+    correctionRouter: correctionRouterOverride,
+    directArtifactRunner,
+    runSfCommand,
+    verifySelectedOrg,
+    runGit
+  };
+}
 
 export function setSameOrgResolverForTest(resolver) {
   sameOrgResolver = resolver || resolveSameOrg;
@@ -78,12 +112,16 @@ export function setDirectArtifactRunnerForTest(runner = null) {
 }
 
 export function routeBoundedValidationFailureForJob(input) {
-  const router = correctionRouterOverride || createCorrectionRouter({ jobStore: currentJobStore() });
+  const router = currentAgentDependencies().correctionRouter || createCorrectionRouter({ jobStore: currentJobStore() });
   return router.routeValidationFailure(input);
 }
 
 export async function processAgentJob(message, options = {}) {
-  if (options.jobStore) return withJobStore(options.jobStore, () => processAgentJob(message));
+  if (options.jobStore || options.dependencies) {
+    const store = options.jobStore || currentJobStore();
+    const dependencies = options.dependencies || createProductionAgentDependencies();
+    return withJobStore(store, () => agentDependencyScope.run(dependencies, () => processAgentJob(message)));
+  }
   const job = await requiredJob(message.jobId);
   const actor = message.actor || 'system';
   assertJiraActionAllowed(job);
@@ -226,7 +264,7 @@ async function implement(job, actor) {
           planVersion: Number(job.plan.planVersion || 1)
         }
       }, {
-        runners: productionSpecialistRunners(directSpecialistModelRunner),
+        runners: productionSpecialistRunners(currentAgentDependencies().specialistModelRunner),
         jobStore: currentJobStore()
       });
     } catch (error) {
@@ -272,7 +310,7 @@ async function implement(job, actor) {
     await updateJob(job.jobId, { sourceValidation });
     let baseline;
     try {
-      baseline = await implementationBaselineRunner({ job: { ...job, sourceValidation }, operations: validated.operations, actor });
+      baseline = await currentAgentDependencies().implementationBaselineRunner({ job: { ...job, sourceValidation }, operations: validated.operations, actor });
     } catch (error) {
       const safeMessage = 'Implementation baseline preparation failed safely. No Salesforce validation or deployment ran.';
       await appendLog(job.jobId, 'error', `${safeMessage} Code: ${safeBaselineFailureCode(error)}.`);
@@ -280,7 +318,7 @@ async function implement(job, actor) {
       return { jobId: job.jobId, status: JOB_STATES.FAILED };
     }
     await appendLog(job.jobId, 'info', `Generated and deterministically validated ${validated.operations.length} bounded specialist operations, then captured their immutable exact-org baseline before local source writes.`);
-    return directArtifactRunner({ job: await requiredJob(job.jobId), operations: validated.operations, baseline, actor });
+    return currentAgentDependencies().directArtifactRunner({ job: await requiredJob(job.jobId), operations: validated.operations, baseline, actor });
   }
   if (job.status === JOB_STATES.VALIDATION_FAILED) {
     if (job.implementation) return validate(job, actor);
@@ -375,7 +413,7 @@ async function validate(job, actor) {
     const current = await requiredJob(job.jobId);
     const paths = await ensureJobWorkspace(current.jobId, current.orgContext.orgRegistryId);
     const implementationProject = resolveImplementationProject(paths, current.implementation);
-    await verifySelectedOrg(current.orgContext, auditOptions(current, actor));
+    await currentAgentDependencies().verifySelectedOrg(current.orgContext, auditOptions(current, actor));
     if (isSourceFreeDirectPlan(current)) return validateDirectMetadataImplementation(current, paths, implementationProject, actor);
     await assertCleanImplementation(implementationProject, current.implementation, current.plan);
     const dataOperations = current.plan.dataOperations || [];
@@ -571,7 +609,8 @@ function correctionOwner(job, failure) {
 }
 
 async function deployDirectMetadata(job, actor) {
-  await verifySelectedOrg(job.orgContext, auditOptions(job, actor));
+  const dependencies = currentAgentDependencies();
+  await dependencies.verifySelectedOrg(job.orgContext, auditOptions(job, actor));
   const paths = await ensureJobWorkspace(job.jobId, job.orgContext.orgRegistryId);
   const implementationProject = resolveImplementationProject(paths, job.implementation);
   const locks = createComponentLockService({ jobStore: currentJobStore() });
@@ -596,7 +635,7 @@ async function deployDirectMetadata(job, actor) {
       projectRoot: implementationProject,
       manifestPath: current.manifest,
       operations: currentSpecialistOperations(current),
-      runGitCommand: runGit,
+      runGitCommand: dependencies.runGit,
       baselineCommit: current.implementationBaseline.baselineCommit,
       componentLeaseOwned
     });
@@ -608,7 +647,7 @@ async function deployDirectMetadata(job, actor) {
       deploy: async ({ validationId }) => {
         if (leaseFailure) throw Object.assign(new Error('Component lock ownership was lost.'), { code: 'COMPONENT_LOCK_LOST', statusCode: 409 });
         await locks.assertComponentLocksOwned(lockRequest);
-        const result = await runSfCommand('deployValidated', { validationId }, { ...sfOptions(job, job.orgContext, paths, actor, job.metadataScope, true), cwd: implementationProject });
+        const result = await dependencies.runSfCommand('deployValidated', { validationId }, { ...sfOptions(job, job.orgContext, paths, actor, job.metadataScope, true), cwd: implementationProject });
         await appendCommand(job.jobId, result);
         if (result.exitCode !== 0) throw Object.assign(new Error(sfFailureMessage(result)), { code: 'SALESFORCE_DEPLOYMENT_FAILED', statusCode: 409 });
         return { deploymentId: extractDeployId(result.stdout), stdout: result.stdout };
@@ -627,7 +666,13 @@ async function deployDirectMetadata(job, actor) {
       specialistSummary: combinedSpecialistSummary(current, componentSummary),
       activated: false
     };
-    await updateJob(job.jobId, { deployment: finalDeployment });
+    const implementationReport = await writeImplementationReport({ job: current, deployment: finalDeployment, paths });
+    await updateJob(job.jobId, {
+      deployment: finalDeployment,
+      reportId: implementationReport.reportId,
+      implementationReport,
+      baselineCommit: current.implementationBaseline.baselineCommit
+    });
     await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT, WORK_ITEM_STATUSES.COMPLETED, 'The exact validated package deployed inactive. No Flow was activated.');
     await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.DOCUMENTATION_EXPLANATION, WORK_ITEM_STATUSES.COMPLETED, 'Validated inactive deployment evidence was recorded.');
     await transitionJob(job.jobId, JOB_STATES.COMPLETED, { actor, reason: 'The exact approved validated package deployed inactive.', approvalId: finalDeployment.approvalId });
@@ -639,6 +684,7 @@ async function deployDirectMetadata(job, actor) {
 }
 
 async function validateDirectMetadataImplementation(job, paths, implementationProject, actor) {
+  const dependencies = currentAgentDependencies();
   const operations = currentSpecialistOperations(job);
   const locks = createComponentLockService({ jobStore: currentJobStore() });
   const lockRequest = { jobId: job.jobId, componentKeys: job.implementation.componentKeys, lockToken: job.implementation.lockToken };
@@ -647,13 +693,13 @@ async function validateDirectMetadataImplementation(job, paths, implementationPr
     projectRoot: implementationProject,
     manifestPath: job.manifest,
     operations,
-    runGitCommand: runGit,
+    runGitCommand: dependencies.runGit,
     baselineCommit: job.implementationBaseline.baselineCommit,
     componentLeaseOwned: true
   });
   const before = await inspect();
   assertPreValidationArtifact(job, before);
-  const result = await runSfCommand('deployDryRun', { manifest: job.manifest, preDestructiveChanges: job.implementation.destructiveManifest || '' }, { ...sfOptions(job, job.orgContext, paths, actor, job.metadataScope), cwd: implementationProject });
+  const result = await dependencies.runSfCommand('deployDryRun', { manifest: job.manifest, preDestructiveChanges: job.implementation.destructiveManifest || '' }, { ...sfOptions(job, job.orgContext, paths, actor, job.metadataScope), cwd: implementationProject });
   await appendCommand(job.jobId, result);
   if (result.exitCode !== 0) throw Object.assign(new Error(sfFailureMessage(result)), { validationFailure: structuredSalesforceValidationFailure(result) });
   await locks.assertComponentLocksOwned(lockRequest);
@@ -670,7 +716,7 @@ async function validateDirectMetadataImplementation(job, paths, implementationPr
   const validation = {
     validationId,
     targetOrgId: job.orgContext.expectedOrgId,
-    status: 'PASSED',
+    status: 'SUCCEEDED',
     sourceHash: after.sourceHash,
     packageHash: after.packageHash,
     commitHash: after.commitHash,
@@ -724,6 +770,7 @@ function safeBaselineFailureCode(error) {
 }
 
 async function establishImplementationBaseline({ job, operations, actor }) {
+  const dependencies = currentAgentDependencies();
   assertImplementationBaselineEligibility(job, operations);
   const componentKeys = componentKeysForPlan(job.plan);
   const locks = createComponentLockService({ jobStore: currentJobStore() });
@@ -741,7 +788,7 @@ async function establishImplementationBaseline({ job, operations, actor }) {
     const implementationProject = join(paths.implementation, `plan-v${job.plan.planVersion}`, workspaceName, 'project');
     await mkdir(join(paths.implementation, `plan-v${job.plan.planVersion}`, workspaceName), { recursive: true });
     const branch = `ai-agent/MANUAL-0-${job.jobId}-v${job.plan.planVersion}-${lockToken.slice(0, 12)}`.replace(/[^A-Za-z0-9_\/-]/g, '-');
-    const branchResult = await runGit('worktree-add', { branch, path: implementationProject });
+    const branchResult = await dependencies.runGit('worktree-add', { branch, path: implementationProject });
     if (branchResult.exitCode !== 0) throw baselineFailure('BASELINE_WORKTREE_FAILED', 'Cannot create the isolated implementation worktree.');
     await assertLeaseOwned();
 
@@ -751,7 +798,7 @@ async function establishImplementationBaseline({ job, operations, actor }) {
       trustedSourceOrgId: job.sourceValidation.sourceOrgId,
       assertAuthority: assertLeaseOwned,
       retrieve: async (components) => {
-        const result = await runSfCommand('retrieveMetadata', { components }, {
+        const result = await dependencies.runSfCommand('retrieveMetadata', { components }, {
           ...sfOptions(job, job.orgContext, paths, actor, job.metadataScope),
           cwd: implementationProject
         });
@@ -760,7 +807,8 @@ async function establishImplementationBaseline({ job, operations, actor }) {
           sourceOrgId: job.orgContext.expectedOrgId,
           componentKeys: components.map(({ type, apiName }) => `${type}:${apiName}`)
         };
-      }
+      },
+      runGitCommand: dependencies.runGit
     });
     await assertLeaseOwned();
     const baseline = {
@@ -780,6 +828,7 @@ async function establishImplementationBaseline({ job, operations, actor }) {
     await currentJobStore().updateWithComponentLocks({ jobId: job.jobId, componentKeys, lockToken }, (record) => {
       assertImplementationBaselineEligibility(record, operations);
       record.implementationBaseline = baseline;
+      record.baselineCommit = baseline.baselineCommit;
     });
     await assertLeaseOwned();
 
@@ -788,6 +837,7 @@ async function establishImplementationBaseline({ job, operations, actor }) {
 }
 
 async function prepareAndValidateDirectImplementation({ job, operations, baseline, actor }) {
+  const dependencies = currentAgentDependencies();
   const componentKeys = componentKeysForPlan(job.plan);
   const locks = createComponentLockService({ jobStore: currentJobStore() });
   const leaseSeconds = Math.min(3600, Math.max(config.componentLockLeaseSeconds, config.validationExpiryMinutes * 60));
@@ -804,7 +854,7 @@ async function prepareAndValidateDirectImplementation({ job, operations, baselin
     });
     const implementation = await writeValidatedOperations({
       job, operations, projectRoot: implementationProject, manifestPath: manifest,
-      runGitCommand: runGit, assertLeaseOwned
+      runGitCommand: dependencies.runGit, assertLeaseOwned
     });
     const durableImplementation = {
       ...implementation,
@@ -836,6 +886,7 @@ async function prepareAndValidateDirectImplementation({ job, operations, baselin
 }
 
 async function rewriteAndValidateCorrectedDirectImplementation(jobId, actor) {
+  const dependencies = currentAgentDependencies();
   const job = await requiredJob(jobId);
   const operations = currentSpecialistOperations(job);
   const paths = await ensureJobWorkspace(job.jobId, job.orgContext.orgRegistryId);
@@ -848,7 +899,7 @@ async function rewriteAndValidateCorrectedDirectImplementation(jobId, actor) {
     operations,
     projectRoot: implementationProject,
     manifestPath: job.manifest,
-    runGitCommand: runGit,
+    runGitCommand: dependencies.runGit,
     assertLeaseOwned: () => locks.assertComponentLocksOwned(lockRequest)
   });
   await locks.updateWithComponentLocks(lockRequest, (record) => {
@@ -919,9 +970,10 @@ function productionSpecialistRunners(modelRunner) {
 }
 
 async function analyzeDirectSalesforceChat(job, actor) {
+  const dependencies = currentAgentDependencies();
   if (!job.orgId && !job.orgContext) return { jobId: job.jobId, status: job.status };
   const orgContext = job.source === 'salesforce-chat'
-    ? await sameOrgResolver({ authenticatedOrgId: job.orgId || job.orgContext?.expectedOrgId, actorId: actor })
+    ? await dependencies.sameOrgResolver({ authenticatedOrgId: job.orgId || job.orgContext?.expectedOrgId, actorId: actor })
     : job.orgContext;
   if (!orgContext?.verified) return { jobId: job.jobId, status: job.status };
   const requirement = directRequirement(job);
@@ -930,17 +982,17 @@ async function analyzeDirectSalesforceChat(job, actor) {
   await updateJob(job.jobId, { requirement, orgContext });
 
   await transitionJob(job.jobId, JOB_STATES.INSPECTING_ORG, { actor, reason: 'Inspecting the authenticated Salesforce sandbox.' });
-  const inspection = await directAnalysisDependencies.inspectFlowRequirement({ requirement, orgContext });
+  const inspection = await dependencies.inspectFlowRequirement({ requirement, orgContext });
   await updateJob(job.jobId, { inspection });
 
   await transitionJob(job.jobId, JOB_STATES.PLANNING, { actor, reason: 'Preparing source-free architecture plan from verified inspection evidence.' });
   try {
-    let architecturePlan = await directAnalysisDependencies.createArchitecturePlan({
+    let architecturePlan = await dependencies.createArchitecturePlan({
       requirement,
       inspection,
       orgContext,
       answers: clarificationAnswers(job, inspection)
-    }, directAnalysisDependencies.architecturePlannerDependencies);
+    }, dependencies.architecturePlannerDependencies);
     const planVersion = Number(job.nextPlanVersion || job.iteration || 1);
     architecturePlan = {
       ...architecturePlan,
@@ -1083,7 +1135,7 @@ function assertDeploymentGuard(job, approval) {
 function assertState(job, ...states) { if (!states.includes(job.status)) throw Object.assign(new Error(`Job must be in ${states.join(' or ')}.`), { statusCode: 409 }); }
 async function resolveDirectOrgContext(job, actor) {
   if (job.source !== 'salesforce-chat') return job.orgContext;
-  const orgContext = await sameOrgResolver({ authenticatedOrgId: job.orgId, actorId: actor });
+  const orgContext = await currentAgentDependencies().sameOrgResolver({ authenticatedOrgId: job.orgId, actorId: actor });
   if (!sameSalesforceId(orgContext?.expectedOrgId, job.orgId)) throw Object.assign(new Error('Resolved Salesforce org context does not match the job org.'), { statusCode: 409 });
   return orgContext;
 }

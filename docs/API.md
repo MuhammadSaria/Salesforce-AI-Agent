@@ -1,38 +1,33 @@
-# API Contract
+# Providus Nexus Phase 1 API
 
-All `/api/*` routes except the Jira webhook require `Authorization: Bearer <MIDDLEWARE_API_TOKEN>`. Salesforce supplies actor identity in `X-Agent-User-Id`; the Apex controller derives `developer` or `deployer` from the `AI_Agent_Deploy` Custom Permission. Put an identity-aware gateway in front of the API for production deployments.
+All `/api/*` endpoints require `Authorization: Bearer <MIDDLEWARE_API_TOKEN>`. Direct Salesforce routes also require `X-Agent-Source: Salesforce-Apex`, `X-Agent-Org-Id`, `X-Agent-User-Id`, `X-Agent-Can-Implement`, and `X-Agent-Can-Deploy`; permission values must be literal `true` or `false`.
 
-## Routes
+Errors are `{ "error": { "code": "...", "message": "..." } }`. Important codes: `200` read/success, `201` created, `202` queued, `401` invalid trust, `403` permission denied, `404` unavailable/not-owned, `409` stale state/authority, `422` invalid input, and `503` failed readiness.
 
-- `POST /api/webhooks/jira`: Jira event authenticated by a constant-time checked hidden webhook token or HMAC signature, fast `202`, idempotent async processing.
-- `GET /api/orgs`, `GET /api/orgs/:orgId`: public policy fields for active registry orgs.
-- `POST /api/jobs`, `GET /api/jobs`, `GET /api/jobs/:jobId`: create/list/read jobs.
-- `POST /api/jobs/:jobId/select-org`: select only an active registry ID and invalidate old artifacts.
-- `POST /api/jobs/:jobId/analyze`: queue safe inspection.
-- `GET /api/jobs/:jobId/plan`: structured versioned plan.
-- `POST /api/jobs/:jobId/instructions`: add untrusted requirements; approvals are invalidated.
-- `POST /api/jobs/:jobId/approve-implementation`, `POST /api/jobs/:jobId/reject-plan`.
-- `POST /api/jobs/:jobId/implement`: execute only approved local file operations.
-- `POST /api/jobs/:jobId/validate`, `GET /api/jobs/:jobId/validation`.
-- `GET /api/jobs/:jobId/diff`, `GET /api/jobs/:jobId/logs`, `GET /api/jobs/:jobId/audit`.
-- `GET /api/jobs/:jobId/work-items`: sanitized specialist work items plus the calculated overall specialist status.
-- `GET /api/jobs/:jobId/specialist-messages`: structured internal dependency, conflict, correction, and completion messages. Hidden reasoning and raw prompts are never returned.
-- `POST /api/jobs/:jobId/approve-deployment`, `POST /api/jobs/:jobId/reject-deployment`: the durable second approval used for metadata deployment or allowlisted record execution. The LWC labels this as data execution when the plan contains record operations.
-- `POST /api/jobs/:jobId/deploy`: queues only a matching, unexpired validated package.
-- `POST /api/jobs/:jobId/cancel`.
+## Conversations
 
-Implementation approval body:
+- `POST /api/jobs`: `{ "prompt": "Number each completed Donation for its Recurring Donation." }` → `{ "jobId", "status", "message" }`.
+- `GET /api/jobs`: returns `{ "jobs": [...] }`, filtered to authorized conversations.
+- `GET /api/jobs/:jobId`: safe public lifecycle, conversation, clarification, inspection/plan, work items, approvals, Task 9 evidence, baseline/implementation, Salesforce validation, deployment, and report. The original prompt is removed.
+- `POST /api/jobs/:jobId/messages`: `{ "text": "qualifyingStatus=Completed; reversalPolicy=retain; numberingRule=highest-plus-one" }` persists the message and queues understanding.
+- `POST /api/jobs/:jobId/cancel`: optional `{ "reason": "..." }`.
 
-```json
-{ "planVersion": 1, "comments": "Reviewed" }
-```
+Detail reads are `GET /api/jobs/:jobId/plan`, `/validation`, `/diff`, `/logs`, `/audit`, `/work-items`, and `/specialist-messages`. `GET /api/orgs` and `/api/orgs/:orgId` expose bounded registry data. `/health` is liveness and `/ready` checks dependencies.
 
-Deployment approval body:
+## Approvals and actions
 
-```json
-{ "validationId": "validation-id", "productionSpecificApproval": false, "comments": "Validated package reviewed" }
-```
+- `POST /api/jobs/:jobId/approve-implementation` requires implementation permission and `{ "planVersion": 1, "planHash": "...", "scopeHash": "..." }`. Approval and outbox dispatch are atomic.
+- `POST /api/jobs/:jobId/reject-plan` accepts optional bounded comments.
+- `POST /api/jobs/:jobId/implement` and `/validate` queue already-approved stages; the direct approval path dispatches implementation normally.
+- `POST /api/jobs/:jobId/approve-deployment` requires deployment permission and `{ "validationId": "0Af...", "comments": "optional" }`. All hashes come from server state.
+- `POST /api/jobs/:jobId/reject-deployment` rejects the current validation.
+- `POST /api/jobs/:jobId/deploy` accepts no artifact/org selector; it requires exact current approval, transitions to `DEPLOYING`, and queues guarded deployment.
+- `POST /api/jobs/:jobId/approve-data-preview` requires implementation permission and `{ "previewHash": "...", "comments": "optional" }` when more than ten records are affected.
 
-Errors use `{ "error": { "code": "...", "message": "..." } }`. Secrets, raw Authorization headers, and Jira credentials are never returned.
+Jira webhook/analyze/instructions routes exist only with `JIRA_ENABLED=true` and are outside the default direct-chat workflow.
 
-The standard `GET /api/jobs/:jobId` response also contains `iteration`, `orchestration`, `workItems`, `specialistOverallStatus`, and file-ownership hashes. The Salesforce LWC displays specialist names, responsibilities, and statuses while preserving one implementation approval and one deployment approval.
+## Lifecycle and result
+
+`RECEIVED → UNDERSTANDING → AWAITING_CLARIFICATION → UNDERSTANDING → INSPECTING_ORG → PLANNING → AWAITING_IMPLEMENTATION_APPROVAL → IMPLEMENTING → VALIDATING → AWAITING_DEPLOYMENT_APPROVAL → DEPLOYING → COMPLETED`.
+
+`WAITING_FOR_LOCK`, `CORRECTING`, `FAILED`, and `CANCELLED` are controlled alternatives. Material findings may return to clarification; mechanical correction is limited to three cycles. A completed recurring-donation job has `validation.status: "SUCCEEDED"`, `baselineCommit`, `deployment.activated: false`, no `jira` field, and a real `reportId` with inactive-deployment wording.

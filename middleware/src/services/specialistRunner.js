@@ -67,7 +67,7 @@ export function buildSpecialistRequest({ specialistId, job, plan, inspection, wo
   const inspectionEvidence = (inspection?.evidence || []).filter((evidence) => {
     if (!evidenceIds.has(evidence.evidenceId)) return false;
     return evidenceRelevantToSpecialist(evidence, specialistId, relevantApiNames);
-  }).map((evidence) => ({ ...evidence, stale: false }));
+  }).map(strictSpecialistEvidence);
   const dependencyResults = (dependencyGraph[specialistId] || [])
     .map((dependency) => resultsBySpecialist[dependency])
     .filter(Boolean)
@@ -95,6 +95,23 @@ export function buildSpecialistRequest({ specialistId, job, plan, inspection, wo
     inspectionEvidence,
     dependencyResults
   });
+}
+
+function strictSpecialistEvidence(evidence) {
+  const common = {
+    evidenceId: evidence.evidenceId,
+    kind: evidence.kind,
+    sourceOrgId: evidence.sourceOrgId,
+    active: true,
+    stale: false,
+    observedAt: evidence.observedAt
+  };
+  if (evidence.kind === 'OBJECT') return { ...common, componentType: 'CustomObject', componentApiName: evidence.componentApiName };
+  if (evidence.kind === 'FIELD') return { ...common, objectApiName: evidence.objectApiName, fieldApiName: evidence.fieldApiName, componentType: 'CustomField', componentApiName: evidence.componentApiName };
+  if (evidence.kind === 'RELATIONSHIP') return { ...common, objectApiName: evidence.objectApiName, fieldApiName: evidence.fieldApiName, targetObjectApiName: evidence.targetObjectApiName, componentType: 'CustomField', componentApiName: evidence.componentApiName };
+  if (evidence.kind === 'STATUS_VALUE') return { ...common, objectApiName: evidence.objectApiName, fieldApiName: evidence.fieldApiName, value: evidence.value, componentType: 'CustomField', componentApiName: evidence.componentApiName };
+  if (evidence.kind === 'RETRIEVED_COMPONENT') return { ...common, componentType: evidence.componentType, componentApiName: evidence.componentApiName, retrievedSource: evidence.retrievedSource };
+  return { ...evidence, stale: false };
 }
 
 function evidenceRelevantToSpecialist(evidence, specialistId, relevantApiNames) {

@@ -10,7 +10,7 @@ import { nanoid } from 'nanoid';
 export function buildDeploymentApproval(job, { approvalId, actorId, now = new Date().toISOString() } = {}) {
   const validation = job?.validation;
   const baseline = job?.implementationBaseline;
-  if (!validation || validation.status !== 'PASSED' || !isFuture(validation.expiryTimestamp, now)) throw deploymentError('STALE_VALIDATION', 'A current successful Salesforce validation is required before approval.');
+  if (!validation || !successfulValidation(validation.status) || !isFuture(validation.expiryTimestamp, now)) throw deploymentError('STALE_VALIDATION', 'A current successful Salesforce validation is required before approval.');
   assertTask9Binding(job);
   if (baseline?.baselineCommit !== validation.baselineCommit
     || job?.implementation?.baselineCommit !== validation.baselineCommit
@@ -51,7 +51,7 @@ export function assertDeploymentAuthority({ job, artifact, now = new Date().toIS
     throw deploymentError('DUPLICATE_DEPLOYMENT_CONFLICT', 'A different artifact is already recorded as deployed.');
   }
   const validation = job?.validation;
-  if (!validation || validation.status !== 'PASSED' || !isFuture(validation.expiryTimestamp, now)) {
+  if (!validation || !successfulValidation(validation.status) || !isFuture(validation.expiryTimestamp, now)) {
     throw deploymentError('STALE_VALIDATION', 'A current successful Salesforce validation is required.');
   }
   if (artifact?.componentLeaseOwned !== true) throw deploymentError('COMPONENT_LOCK_LOST', 'Component lock ownership was lost.');
@@ -496,6 +496,10 @@ function isFuture(value, now) {
 
 function deploymentError(code, message) {
   return Object.assign(new Error(message), { code, statusCode: 409 });
+}
+
+function successfulValidation(status) {
+  return status === 'PASSED' || status === 'SUCCEEDED';
 }
 
 function dataError(code, message) {

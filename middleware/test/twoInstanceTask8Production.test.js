@@ -4,7 +4,7 @@ import { createApp } from '../src/server.js';
 import { config } from '../src/config.js';
 import { createPostgresJobStore } from '../src/persistence/jobStore.js';
 import { migrate } from '../src/persistence/migrate.js';
-import { processAgentJob, setDirectAnalysisDependenciesForTest, setDirectSpecialistModelRunnerForTest, setSameOrgResolverForTest } from '../src/services/agent.js';
+import { createWorkerRuntime } from '../src/worker.js';
 import { architecturePlanHashes } from '../src/domain/architecturePlan.js';
 import { canonicalInspectionHash } from '../src/domain/inspection.js';
 import { connectedFlowXml } from './fixtures/connectedFlow.js';
@@ -23,18 +23,23 @@ test('separate API and worker PostgreSQL stores execute Task 8 without source or
   const queued = [];
   const sameOrg = async () => orgContext;
   const oldToken = config.apiAuthToken; config.apiAuthToken = 'two-instance-token';
-  setSameOrgResolverForTest(sameOrg);
-  setDirectAnalysisDependenciesForTest({ inspectFlowRequirement: async () => inspection(), createArchitecturePlan: async () => plan(inspection()) });
-  setDirectSpecialistModelRunnerForTest(async ({ specialistId }) => resultFor(specialistId));
+  const workerRuntime = createWorkerRuntime({
+    jobStore: workerStore,
+    sameOrgResolver: sameOrg,
+    inspectionDependencies: {},
+    inspectFlowRequirement: async () => inspection(),
+    createArchitecturePlan: async () => plan(inspection()),
+    specialistModelRunner: async ({ specialistId }) => resultFor(specialistId)
+  });
   let redisAvailable = true;
   const app = createApp({ jobStore: apiStore, resolveSameOrg: sameOrg, enqueue: async (message) => { if (!redisAvailable) throw new Error('redis unavailable'); queued.push(message); } });
   const server = app.listen(0); await new Promise((resolve) => server.once('listening', resolve));
-  t.after(() => { server.close(); config.apiAuthToken = oldToken; setSameOrgResolverForTest(); setDirectAnalysisDependenciesForTest(); setDirectSpecialistModelRunnerForTest(); });
+  t.after(() => { server.close(); config.apiAuthToken = oldToken; });
   const base = `http://127.0.0.1:${server.address().port}`;
 
   const created = await post(`${base}/api/jobs`, { prompt: 'Number completed recurring donations.' }, headers(false));
   assert.equal(created.status, 201);
-  await processAgentJob(queued.shift(), { jobStore: workerStore });
+  await workerRuntime.process(queued.shift());
   let job = await apiStore.get(created.body.jobId);
   assert.equal(job.status, 'AWAITING_IMPLEMENTATION_APPROVAL');
 
@@ -49,7 +54,7 @@ test('separate API and worker PostgreSQL stores execute Task 8 without source or
 
   await pool.query("UPDATE job_dispatches SET next_attempt_at=now()-interval '1 second' WHERE job_id=$1", [job.jobId]);
   const dispatch = await workerStore.claimNextDispatch();
-  await processAgentJob({ jobId: dispatch.jobId, action: dispatch.action, actor: dispatch.actor }, { jobStore: workerStore });
+  await workerRuntime.process({ jobId: dispatch.jobId, action: dispatch.action, actor: dispatch.actor });
   await workerStore.markDispatchDelivered(dispatch.dispatchKey);
   const finalApi = await apiStore.get(job.jobId);
   const finalWorker = await workerStore.get(job.jobId);

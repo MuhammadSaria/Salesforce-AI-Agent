@@ -258,7 +258,7 @@ function queueAction(action, states, permission, approvalType = '', dependencies
 }
 function assertDeploymentApprovalReady(job, approval, orgContext) {
   const validation = job.validation;
-  if (!validation || validation.status !== 'PASSED' || new Date(validation.expiryTimestamp) <= new Date()) {
+  if (!validation || !['PASSED', 'SUCCEEDED'].includes(validation.status) || new Date(validation.expiryTimestamp) <= new Date()) {
     throw Object.assign(new Error('A current deployment approval for this exact plan, scope, and org is required.'), { statusCode: 409, code: 'APPROVAL_REQUIRED' });
   }
   if (approval.sourceHash !== validation.sourceHash || approval.packageHash !== validation.packageHash || approval.commitHash !== validation.commitHash) {
@@ -381,14 +381,14 @@ function isAwaitingImplementationApproval(job) { return [JOB_STATES.AWAITING_PLA
 function isJiraSource(job) { return Boolean(job.jiraIssueKey || String(job.source || '').startsWith('jira-')); }
 function conversationRepository(store) {
   return {
-    create: store.create,
-    appendConversation: store.appendConversation,
-    appendConversationAtomically: store.appendConversationAtomically,
-    claimDispatch: store.claimDispatch,
-    markDispatchDelivered: store.markDispatchDelivered,
-    markDispatchRetryable: store.markDispatchRetryable,
-    appendAudit: store.appendAudit,
-    transition: store.transition
+    create: (...args) => store.create(...args),
+    appendConversation: (...args) => store.appendConversation(...args),
+    appendConversationAtomically: (...args) => store.appendConversationAtomically(...args),
+    claimDispatch: (...args) => store.claimDispatch(...args),
+    markDispatchDelivered: (...args) => store.markDispatchDelivered(...args),
+    markDispatchRetryable: (...args) => store.markDispatchRetryable(...args),
+    appendAudit: (...args) => store.appendAudit(...args),
+    transition: (...args) => store.transition(...args)
   };
 }
 

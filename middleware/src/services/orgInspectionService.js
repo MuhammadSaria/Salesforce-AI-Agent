@@ -265,6 +265,8 @@ function applyPicklistValues(state, statusField, values, operationId) {
       value: item.value,
       label: item.label,
       operationId,
+      componentType: 'CustomField',
+      componentApiName: `${item.objectApiName}.${item.fieldApiName}`,
     sourceOrgId: state.orgContext.expectedOrgId,
     active: true,
     observedAt: state.observedAt

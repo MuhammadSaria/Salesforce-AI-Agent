@@ -83,7 +83,7 @@ export async function withComponentLocks({ locks, jobId, componentKeys, leaseSec
 
 function normalizeRequest(request, { leaseRequired = true } = {}) {
   const jobId = String(request?.jobId || '');
-  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(jobId)) throw invalidRequest();
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId)) throw invalidRequest();
   const componentKeys = normalizeComponentKeys(request?.componentKeys);
   const lockToken = String(request?.lockToken || '');
   if (!leaseRequired) {

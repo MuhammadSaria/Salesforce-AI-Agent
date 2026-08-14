@@ -41,6 +41,8 @@ function spawnGit(args, cwd) {
     let stdout = ''; let stderr = '';
     child.stdout.on('data', (chunk) => { stdout += chunk; }); child.stderr.on('data', (chunk) => { stderr += chunk; });
     child.on('error', (error) => resolve({ exitCode: 1, stdout: '', stderr: redactSecrets(error.message) }));
-    child.on('close', (exitCode) => resolve({ exitCode, stdout: redactSecrets(stdout), stderr: redactSecrets(stderr), command: `git ${args[0]}` }));
+    // Status and identity callers require raw canonical paths/commits. Diff is
+    // presentation data and remains redacted before it can be persisted.
+    child.on('close', (exitCode) => resolve({ exitCode, stdout: args[0] === 'diff' ? redactSecrets(stdout) : stdout, stderr: redactSecrets(stderr), command: `git ${args[0]}` }));
   });
 }

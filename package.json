@@ -3,6 +3,7 @@
   "version": "2.0.0",
   "private": true,
   "scripts": {
+    "test": "sfdx-lwc-jest --",
     "test:unit": "sfdx-lwc-jest -- --runInBand",
     "test:unit:watch": "sfdx-lwc-jest --watch"
   },

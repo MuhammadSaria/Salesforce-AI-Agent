@@ -53,9 +53,24 @@ function selectedEvidence(evidence, evidenceIds) {
   const required = new Set(evidenceIds || []);
   const selected = (evidence || [])
     .filter((item) => required.has(item.evidenceId))
-    .map((item) => ({ ...item, stale: item.stale ?? false }));
+    .map(strictFlowEvidence);
   if (required.size !== selected.length || new Set(selected.map((item) => item.evidenceId)).size !== selected.length) throw evidenceError();
   return selected;
+}
+
+function strictFlowEvidence(item) {
+  const common = {
+    evidenceId: item.evidenceId,
+    kind: item.kind,
+    sourceOrgId: item.sourceOrgId,
+    active: item.active,
+    stale: item.stale ?? false,
+    observedAt: item.observedAt
+  };
+  if (item.kind === 'RELATIONSHIP') return { ...common, objectApiName: item.objectApiName, fieldApiName: item.fieldApiName, targetObjectApiName: item.targetObjectApiName, componentType: item.componentType, componentApiName: item.componentApiName };
+  if (item.kind === 'STATUS_VALUE') return { ...common, objectApiName: item.objectApiName, fieldApiName: item.fieldApiName, value: item.value, componentType: item.componentType, componentApiName: item.componentApiName };
+  if (item.kind === 'RETRIEVED_COMPONENT') return { ...common, componentType: item.componentType, componentApiName: item.componentApiName, retrievedSource: item.retrievedSource };
+  return { ...item, stale: item.stale ?? false };
 }
 
 function evidenceError() {

@@ -12,10 +12,30 @@
 
 ## Current Task
 
-- Task: Phase 1 Task 13
+- Task: Phase 1 Task 14
 - Status: COMPLETE
+- Phase 1 status: FULLY ACCEPTED
 
 ## Completed Tasks
+
+- Phase 1 Task 14 — Prove the recurring-donation vertical slice and finalize authoritative Phase 1 operating documentation
+  - Verification date: 2026-08-14
+  - Starting baseline: branch `feature/providus-phase1-execution`, clean SHA `ff8da3b404f57ecd8811a1058edc6324777aeddf` (`feat: make Providus Nexus a persistent chatbot`).
+  - Gap analysis: already wired were durable PostgreSQL jobs/conversations/approvals/outbox, same-org trust, inspector, planner, bounded specialist implementations, Task 9 validators, Task 10 lease/baseline primitives, Task 11 correction, Task 12 validation/deployment authority, and Task 13 Apex/LWC. Missing seams were explicit production worker DI, rich-inspection projection into strict specialist/Flow evidence, stable persisted inspection hashing, a bound PostgreSQL server repository adapter, multi-component lease schema support, exact Git stdout path handling, scoped Salesforce executor injection, direct validation `SUCCEEDED` presentation, Jira omission, top-level baseline identity, report generation, official root Jest command, and final operating documentation.
+  - Official RED: `cd middleware; $env:TEST_DATABASE_URL='postgres://providus:providus@127.0.0.1:5432/providus_nexus_test'; node --import ./test/setup.js --test test/recurringDonationVerticalSlice.test.js` — FAIL, 1 test, 0 passed, 1 failed, 0 skipped. First genuine seam: `typeof workerModule.createWorkerRuntime` was `undefined`, expected `function` (`worker must expose production dependency injection for the complete Phase 1 runtime`).
+  - Integration: `server.js` keeps the PostgreSQL store bound through the conversation adapter; `worker.js` exposes one production runtime using the same durable store and injects same-org, inspection, planning, specialists, Salesforce/Git executors, baseline, validation, correction, locks, guarded deployment, and report flow. No in-memory production fallback, inline Redis fallback, compatibility completion, Jira requirement, fake production dependency, validation bypass, baseline/lease bypass, correction disconnect, or approval bypass was added.
+  - Acceptance journey: direct Salesforce chat persisted a material clarification for `Completed`/`retain`/`highest-plus-one`; produced exactly CustomField, PermissionSet, Flow in authoritative order; obtained implementation approval; ran the real specialists and complete-set Task 9 validation; acquired all component leases; captured a real immutable Git `baselineCommit`; wrote and committed exact source; obtained controlled Salesforce validation evidence; rejected premature deployment; obtained separate exact deployment approval; ran one guarded inactive deployment; persisted `activated:false`, no `jira` property, top-level `baselineCommit`, real `reportId`, and truthful “deployed inactive” report; then reached `COMPLETED`.
+  - Flow semantics: critical assertions plus authoritative validators prove create-as-completed, transition-to-completed, exact Completed status, non-overwrite, same Recurring Donation parent, descending one-record highest lookup, first=1, N+1, reversal retention, no historical renumbering, exact approved relationship/status/target field, connected executable structure, and `<status>Draft</status>`.
+  - Task 9/10/11/12 evidence: Task 9 status `PASSED`, three operations, deterministic source hash; Task 10 complete-set lock token plus actual immutable baseline commit; Task 11 correction router remains injected and all correction regressions pass though the happy path needs no correction; Task 12 status `SUCCEEDED`, usable validation ID, exact source/package/commit/baseline/org/approval bindings, one controlled deployment boundary call, and `activated:false`.
+  - Schema/migrations: `005_task14_component_lock_sets.sql` changes the lock primary key to `(lock_id, component_key)`, permitting one fencing token to own an atomic component set while the Task 10 unique component-key constraint remains. Fresh and incremental migrations, concurrency, and idempotence tests include all five migration files.
+  - Acceptance final: `node --import ./test/setup.js --test test/recurringDonationVerticalSlice.test.js` — PASS, 1 test, 1 passed, 0 failed, 0 skipped.
+  - Focused security/regression aggregate: component leases, conversation API, direct planning, correction, Task 12 deployment/data guards, and PostgreSQL persistence — PASS, 112 tests, 112 passed, 0 failed, 0 skipped. The two-instance production suite also passed independently, 1/1.
+  - Full middleware: first post-change run correctly stopped on two lint findings; after correction, the first 468-test aggregate exposed four stale migration expectations, one old global-setter two-instance harness, and the known accumulated `jobs/` `EMFILE` condition. Final required run used the dedicated PostgreSQL URL and a fresh isolated `WORKSPACE_ROOT`: lint PASS; 469 tests, 469 passed, 0 failed, 0 skipped.
+  - Full LWC: the official `npm.cmd test -- --runInBand` initially exposed a missing root `test` script. The alias now forwards arguments correctly. Final result: 1 suite passed; 15 tests passed, 0 failed, 0 skipped.
+  - Salesforce verification: `PHASE1_SALESFORCE_ALIAS=Developer-org` was read-only verified as connected and matched registered org `00Dg500000E07e9EAB`. `sf project deploy start --dry-run --source-dir force-app --test-level RunSpecifiedTests --tests AgentControllerTest --target-org "$env:PHASE1_SALESFORCE_ALIAS" --wait 30 --json` succeeded with `checkOnly:true`, 15/15 components, and `AgentControllerTest` 12/12 passed, 0 failures. Deployment performed: NO. The Task 13 Apex verification blocker is resolved.
+  - Documentation: created `CURRENT_SYSTEM.md`; rewrote `SETUP.md`, `SECURITY.md`, `API.md`, and `MULTI_AGENT_ARCHITECTURE.md`; documented Node/PostgreSQL/Redis/Compose, five migrations, API/worker order, Salesforce/Named Credential/External Credential setup, exact env names, tests, troubleshooting, direct-chat/Jira-free operation, security bindings, Draft-only deployment, and Phase 1 exclusions. `JIRA_ENABLED=false` is explicit in `.env.example`.
+  - Security scans: no suspected committed secret was found. Generic scan hits are only the approved plan's literal scan examples/placeholders and documented optional `JIRA_ENABLED=true`; no runtime/default enables Jira. Active-status hits are unrelated pre-existing Salesforce Flows, Apex metadata status, the approved plan text, and adversarial tests. Scoped Phase 1-generated `force-app` artifacts: none checked in; scoped Phase 1-generated Active Flow: none. The acceptance-generated Flow is Draft.
+  - Safety: no real Salesforce deployment, quick deploy, Flow activation, production deployment, main merge, Phase 2 work, Jira enablement, or weakening of Tasks 1–13 occurred.
 
 - Phase 1 Task 13 — Convert the LWC into the persistent conversation workspace
   - Verification date: 2026-08-14
@@ -470,11 +490,11 @@
 
 ## Blockers
 
-- Apex runtime verification is safely blocked until an explicitly verified sandbox contains the Task 13 controller/test source without requiring an unauthorized real deployment.
+- None.
 
 ## Next Task
 
-Phase 1 Task 14. NOT STARTED.
+STOP. Phase 1 is fully accepted. Do not start Phase 2 without a new approved task.
 
 ## Update Rules
 

@@ -451,7 +451,7 @@ function newJobRecord(input) {
     orgContext: input.orgContext || null,
     orgCandidates: [],
     orgRoutingEvidence: [],
-    jira: input.jira || null,
+    ...(input.jira ? { jira: input.jira } : {}),
     jiraSync: null,
     pendingRevision: false,
     followUpRequired: false,

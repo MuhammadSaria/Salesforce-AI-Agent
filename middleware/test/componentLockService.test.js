@@ -14,7 +14,7 @@ test('PostgreSQL component leases are atomic, renewable, and expiry recoverable'
   try {
     await resetPostgresSchema(pool);
     await migrate(pool);
-    for (const jobId of ['a', 'b', 'c', 'd']) {
+    for (const jobId of ['a', 'b', 'c', 'd', '_direct']) {
       await pool.query(
         `INSERT INTO development_jobs (job_id, user_id, org_id, prompt, status, record)
          VALUES ($1, '005-user', '00D-org', 'Task 10 test', 'IMPLEMENTING', $2::jsonb)`,
@@ -23,6 +23,11 @@ test('PostgreSQL component leases are atomic, renewable, and expiry recoverable'
     }
     const locks = createComponentLockService({ jobStore: createPostgresJobStore({ pool }) });
     const tokens = {};
+
+    await t.test('accepts the full Nano ID alphabet for direct-chat job IDs', async () => {
+      const acquired = await locks.acquireComponentLocks({ jobId: '_direct', componentKeys: ['Flow:Underscore'], leaseSeconds: 60 });
+      await locks.releaseComponentLocks({ jobId: '_direct', componentKeys: ['Flow:Underscore'], lockToken: acquired.lockToken });
+    });
 
     await t.test('allows unrelated jobs and rejects a conflicting component', async () => {
       tokens.aFlow = (await locks.acquireComponentLocks({ jobId: 'a', componentKeys: [FLOW], leaseSeconds: 60 })).lockToken;

@@ -7,7 +7,7 @@ import { createPostgresJobStore, setDefaultJobStore, withJobStore } from './pers
 import { databasePool } from './persistence/database.js';
 import { migrate } from './persistence/migrate.js';
 import { JOB_STATES } from './domain/jobState.js';
-import { processAgentJob } from './services/agent.js';
+import { createProductionAgentDependencies, processAgentJob } from './services/agent.js';
 
 if (config.queueDriver !== 'redis' && process.env.NODE_ENV !== 'test') {
   logger.info('Worker is not needed when QUEUE_DRIVER=memory; jobs run in the API process.');
@@ -24,6 +24,7 @@ export async function startWorker(options = {}) {
   await pool.query('SELECT 1');
   const jobStore = options.jobStore || createPostgresJobStore({ pool });
   setDefaultJobStore(jobStore);
+  const runtime = createWorkerRuntime({ ...options, jobStore });
 
   const worker = new Worker(
     AGENT_QUEUE_NAME,
@@ -34,7 +35,7 @@ export async function startWorker(options = {}) {
     }
 
     try {
-      await processAgentJob(queueJob.data, { jobStore });
+      await runtime.process(queueJob.data);
     } catch (error) {
       await jobStore.appendLog(record.jobId, 'error', error.message);
       const current = await jobStore.get(record.jobId);
@@ -59,6 +60,16 @@ export async function startWorker(options = {}) {
   });
 
   return { worker, pool, jobStore, close: async () => { await worker.close(); await pool.end(); } };
+}
+
+export function createWorkerRuntime(options = {}) {
+  if (!options.jobStore) throw new Error('Worker runtime requires a durable JobStore.');
+  const dependencies = createProductionAgentDependencies(options);
+  return {
+    jobStore: options.jobStore,
+    dependencies,
+    process: (message) => processAgentJob(message, { jobStore: options.jobStore, dependencies })
+  };
 }
 
 if (process.env.NODE_ENV !== 'test') {

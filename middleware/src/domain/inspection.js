@@ -86,7 +86,7 @@ export const INSPECTION_SCHEMA = z.object({
 }).passthrough();
 
 export function canonicalInspectionHash(inspection) {
-  const body = INSPECTION_SCHEMA.parse({ ...inspection, hash: undefined });
+  const body = JSON.parse(JSON.stringify(INSPECTION_SCHEMA.parse({ ...inspection, hash: undefined })));
   delete body.hash;
   body.evidence = body.evidence.map((item) => ({ ...item, observedAt: '' }));
   return stableHash(body);
