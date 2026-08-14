@@ -1,221 +1,356 @@
 import { LightningElement } from 'lwc';
-import createAgentJob from '@salesforce/apex/AgentController.createAgentJob';
+import createJob from '@salesforce/apex/AgentController.createJob';
 import getJobs from '@salesforce/apex/AgentController.getJobs';
-import getAgentJob from '@salesforce/apex/AgentController.getAgentJob';
-import getOrgs from '@salesforce/apex/AgentController.getOrgs';
-import performJobAction from '@salesforce/apex/AgentController.performJobAction';
+import getJob from '@salesforce/apex/AgentController.getJob';
+import sendMessage from '@salesforce/apex/AgentController.sendMessage';
+import performAction from '@salesforce/apex/AgentController.performAction';
 
 const POLL_INTERVAL_MS = 3000;
-const ACTIVE_STATES = new Set(['RECEIVED', 'VERIFYING_ORG', 'ANALYZING_JIRA', 'DISCOVERING_METADATA', 'RETRIEVING_RELEVANT_METADATA', 'ANALYZING_DEPENDENCIES', 'IMPLEMENTING', 'VALIDATING', 'DEPLOYING']);
+const PROCESSING_STATES = new Set([
+    'RECEIVED', 'UNDERSTANDING', 'INSPECTING_ORG', 'PLANNING', 'IMPLEMENTING',
+    'WAITING_FOR_LOCK', 'VALIDATING', 'CORRECTING', 'DEPLOYING'
+]);
+const CLOSED_STATES = new Set(['COMPLETED', 'CANCELLED']);
+const STATUS_LABELS = {
+    RECEIVED: 'Understanding request',
+    UNDERSTANDING: 'Understanding request',
+    AWAITING_CLARIFICATION: 'Awaiting clarification',
+    INSPECTING_ORG: 'Inspecting the Salesforce org',
+    PLANNING: 'Planning',
+    AWAITING_IMPLEMENTATION_APPROVAL: 'Awaiting implementation approval',
+    AWAITING_PLAN_APPROVAL: 'Awaiting implementation approval',
+    IMPLEMENTING: 'Implementing',
+    WAITING_FOR_LOCK: 'Waiting for component access',
+    VALIDATING: 'Validating',
+    CORRECTING: 'Correcting validation findings',
+    AWAITING_DEPLOYMENT_APPROVAL: 'Awaiting deployment approval',
+    DEPLOYING: 'Deploying',
+    COMPLETED: 'Completed',
+    FAILED: 'Failed',
+    CANCELLED: 'Cancelled'
+};
 
 export default class AgentChat extends LightningElement {
-    prompt = '';
-    jiraIssueKey = '';
-    instruction = '';
-    selectedOrgId = '';
     jobs = [];
-    orgs = [];
-    job;
+    selectedJob;
+    messages = [];
+    draftMessage = '';
+    newPrompt = '';
+    actionComments = '';
+    isSending = false;
+    isLoading = false;
+    isSelecting = false;
+    isActing = false;
+    isRefreshing = false;
+    canImplement = false;
+    canDeploy = false;
     errorMessage = '';
-    isBusy = false;
+    requestedJobId = '';
     pollTimer;
+    requestSequence = 0;
 
     connectedCallback() {
-        this.loadConsole();
+        this.loadWorkspace();
     }
 
     disconnectedCallback() {
         this.stopPolling();
+        this.requestSequence += 1;
     }
 
-    get hasJob() { return Boolean(this.job); }
-    get selectedJobId() { return this.job?.jobId || ''; }
-    get plan() { return this.job?.plan; }
-    get validation() { return this.job?.validation; }
-    get orgContext() { return this.job?.orgContext; }
-    get verifiedAt() { return this.orgContext?.verified?.verifiedAt || ''; }
-    get status() { return this.job?.status || 'NO_JOB_SELECTED'; }
-    get isProduction() { return this.orgContext?.environment === 'production'; }
-    get canSelectOrg() { return this.status === 'AWAITING_ORG_SELECTION'; }
-    get canReviewPlan() { return this.status === 'AWAITING_PLAN_APPROVAL'; }
-    get canImplement() { return this.status === 'VALIDATION_FAILED' && !this.job?.implementation; }
-    get canValidate() { return this.status === 'VALIDATION_FAILED' && Boolean(this.job?.implementation); }
-    get canApproveDeployment() { return this.status === 'AWAITING_DEPLOYMENT_APPROVAL' && !this.hasDeploymentApproval; }
-    get hasDataOperations() { return Boolean(this.plan?.dataOperations?.length); }
-    get hasDeleteOperations() { return Boolean(this.plan?.dataOperations?.some((operation) => operation.operation === 'delete')); }
-    get approvalActionLabel() { return this.hasDeleteOperations ? 'Approve Record Deletion' : this.hasDataOperations ? 'Approve Data Execution' : 'Approve Deployment'; }
-    get rejectionActionLabel() { return this.hasDeleteOperations ? 'Reject Record Deletion' : this.hasDataOperations ? 'Reject Data Execution' : 'Reject Deployment'; }
-    get executionActionLabel() { return this.hasDeleteOperations ? 'Delete Approved Record' : this.hasDataOperations ? 'Execute Approved Data Changes' : 'Deploy Approved Package'; }
+    get hasSelectedJob() { return Boolean(this.selectedJob); }
+    get selectedJobId() { return this.selectedJob?.jobId || this.requestedJobId || ''; }
+    get status() { return this.selectedJob?.status || ''; }
+    get statusLabel() { return this.selectedJob?.statusLabel || STATUS_LABELS[this.status] || 'Status unavailable'; }
+    get workspaceTitle() { return this.titleFor(this.selectedJob); }
+    get orgContext() { return this.selectedJob?.orgContext || {}; }
+    get environmentName() { return this.orgContext.environment || 'sandbox'; }
+    get environmentLabel() { return `${this.orgContext.displayName || 'Salesforce org'} · ${this.environmentName}`; }
+    get isProduction() { return String(this.environmentName).toLowerCase() === 'production'; }
+    get isBusy() { return this.isLoading || this.isSelecting || this.isSending || this.isActing || this.isRefreshing; }
+    get createDisabled() { return this.isBusy || !this.newPrompt.trim(); }
+    get messageDisabled() { return this.isSending || this.isActing || !this.hasSelectedJob || CLOSED_STATES.has(this.status); }
+    get sendDisabled() { return this.messageDisabled || !this.draftMessage.trim(); }
+    get canApproveImplementation() {
+        return this.canImplement && ['AWAITING_IMPLEMENTATION_APPROVAL', 'AWAITING_PLAN_APPROVAL'].includes(this.status);
+    }
+    get canApproveDeployment() {
+        return this.canDeploy && this.status === 'AWAITING_DEPLOYMENT_APPROVAL' && !this.hasDeploymentApproval;
+    }
+    get canDeployApprovedChange() {
+        return this.canDeploy && this.status === 'AWAITING_DEPLOYMENT_APPROVAL' && this.hasDeploymentApproval;
+    }
     get hasDeploymentApproval() {
-        if (this.status !== 'AWAITING_DEPLOYMENT_APPROVAL') return false;
-        const latest = [...(this.job?.approvals || [])].reverse().find((item) => item.approvalType === 'DEPLOYMENT' && item.validationId === this.validation?.validationId);
-        return latest?.decision === 'APPROVED';
+        const validationId = this.selectedJob?.validation?.validationId;
+        const approval = [...(this.selectedJob?.approvals || [])].reverse().find((item) =>
+            item.approvalType === 'DEPLOYMENT' && (!validationId || item.validationId === validationId)
+        );
+        return approval?.decision === 'APPROVED';
     }
-    get canRefreshAnalysis() { return ['RECEIVED', 'PLAN_REJECTED', 'ORG_VERIFICATION_FAILED'].includes(this.status); }
-    get canCancel() { return !['COMPLETED', 'FAILED', 'CANCELLED', 'DEPLOYING'].includes(this.status); }
-    get canAddInstruction() { return this.hasJob && this.status !== 'CANCELLED'; }
-    get instructionInputDisabled() { return this.isBusy || !this.canAddInstruction; }
-    get instructionSendDisabled() { return this.instructionInputDisabled || !this.instruction.trim(); }
-    get jobOptions() { return this.jobs.map((item) => ({ label: `${item.jiraIssueKey || 'Manual'} - ${item.status}`, value: item.jobId })); }
-    get orgOptions() {
-        const candidates = this.job?.orgCandidates?.length ? this.job.orgCandidates : this.orgs;
-        return candidates.map((item) => ({ label: `${item.displayName} (${item.environment})`, value: item.orgRegistryId }));
+    get showActionPanel() { return this.canApproveImplementation || this.canApproveDeployment || this.canDeployApprovedChange; }
+    get openClarification() {
+        return (this.selectedJob?.clarifications || []).find((item) => item.status === 'OPEN');
     }
-    get planSummary() { return this.plan?.proposedImplementation || 'The implementation proposal is being prepared.'; }
-    get implementationSteps() { return this.listItems(this.plan?.implementationSteps?.length ? this.plan.implementationSteps : [this.planSummary], 'step'); }
-    get expectedOutcome() { return this.plan?.expectedOutcome || 'The requested Salesforce behavior will be available after validation and separate deployment approval.'; }
-    get businessImpact() { return this.plan?.businessImpact || 'Only the approved requirement is intended to change.'; }
-    get testingItems() { return this.listItems(this.plan?.testingStrategy || [], 'test'); }
-    get riskAndAssumptionItems() { return this.listItems([...(this.plan?.risks || []), ...(this.plan?.assumptions || [])], 'risk'); }
-    get outOfScopeItems() { return this.listItems(this.plan?.outOfScope?.length ? this.plan.outOfScope : ['Unrelated Salesforce behavior and data.'], 'scope'); }
-    get rollbackPlan() { return this.plan?.rollbackPlan || 'Revert the approved change using the captured baseline.'; }
-    get planNotice() {
-        if (this.deploymentNotRequired) return 'Validation completed and no deployment was required because there were no Salesforce source changes.';
-        if (this.deploymentComplete) return `Deployment completed successfully in ${this.orgContext.displayName}.`;
-        if (this.validationFailed) return 'Validation failed. Nothing was deployed, and deployment remains blocked until the implementation is corrected and validated again.';
-        if (this.validationComplete) return 'Validation passed. No deployment will occur until separate deployment approval is granted.';
-        if (this.implementationComplete) return 'Local implementation completed. No Salesforce changes have been deployed yet.';
-        return this.plan?.notice || 'No changes have been made yet.';
+    get hasClarification() { return Boolean(this.openClarification); }
+    get clarificationQuestion() { return this.openClarification?.question || this.openClarification?.materialQuestion || ''; }
+    get hasPlan() { return Boolean(this.selectedJob?.plan); }
+    get planSummary() {
+        const plan = this.selectedJob?.plan || {};
+        return plan.proposedImplementation || plan.summary || plan.safeBehaviorDescription || 'The implementation plan is ready for review.';
     }
-    get implementationComplete() { return Boolean(this.job?.implementation); }
-    get validationComplete() { return this.validation?.status === 'PASSED'; }
-    get validationFailed() { return this.status === 'VALIDATION_FAILED' || this.validation?.status === 'FAILED'; }
-    get validationFailureReason() { return this.validation?.failureReason || 'Salesforce did not accept the proposed change. Review the implementation and run validation again.'; }
-    get deploymentNotRequired() { return this.status === 'COMPLETED' && Boolean(this.job?.deployment?.notRequired); }
-    get deploymentComplete() { return this.status === 'COMPLETED' && Boolean(this.job?.deployment) && !this.deploymentNotRequired; }
-    get hasDeploymentItems() { return this.deploymentItems.length > 0; }
-    get deploymentItems() { return (this.job?.deployment?.components || []).map((item, index) => ({ key: `deployment-${index}`, displayName: item.displayName || 'Deployment item', apiName: item.apiName || '', briefInfo: item.briefInfo || '' })); }
-    get deploymentSummaryText() { return this.job?.deployment?.summary || ''; }
-    get hasSpecialistWorkItems() { return this.specialistWorkItems.length > 0; }
-    get specialistWorkItems() {
-        return (this.job?.workItems || []).map((item) => ({
-            key: item.workItemId,
-            agentName: item.agentName,
-            status: item.status.replaceAll('_', ' '),
-            statusClass: `specialist-status specialist-status--${item.status.toLowerCase().replaceAll('_', '-')}`,
-            responsibility: item.outputs?.analysisSummary || 'Specialist analysis is being prepared.',
-            proposedWork: (item.outputs?.proposedChanges || []).join(' '),
-            preserved: Boolean(item.preservedFromIteration),
-            preservedText: item.preservedFromIteration ? `Preserved from iteration ${item.preservedFromIteration}` : ''
+    get planComponents() {
+        const plan = this.selectedJob?.plan || {};
+        const components = plan.approvedComponents || plan.components || this.selectedJob?.metadataScope?.primaryMetadata || [];
+        return components.map((item, index) => ({
+            key: `component-${index}`,
+            label: typeof item === 'string' ? item : [item.metadataType || item.type, item.apiName || item.fullName].filter(Boolean).join(': ') || 'Approved component',
+            description: typeof item === 'string' ? '' : item.safeBehaviorDescription || item.description || ''
         }));
     }
-    get specialistOverallStatus() { return (this.job?.specialistOverallStatus || 'PENDING').replaceAll('_', ' '); }
-    get orchestrationIteration() { return this.job?.iteration || this.plan?.planVersion || 1; }
-    get deploymentHowItWorks() { return this.job?.deployment?.specialistSummary?.howItWorks || this.expectedOutcome; }
-    get deploymentValidationSummary() { return this.job?.deployment?.specialistSummary?.validationResult || ''; }
-    get implementationMilestoneClass() { return this.milestoneClass(this.implementationComplete, this.status === 'IMPLEMENTING'); }
-    get validationMilestoneClass() { return this.validationFailed ? 'milestone milestone--failed' : this.milestoneClass(this.validationComplete, this.status === 'VALIDATING'); }
-    get deploymentMilestoneClass() { return this.milestoneClass(this.deploymentComplete || this.deploymentNotRequired, this.status === 'DEPLOYING'); }
-    get implementationMilestoneIcon() { return this.milestoneIcon(this.implementationComplete, this.status === 'IMPLEMENTING'); }
-    get validationMilestoneIcon() { return this.validationFailed ? 'utility:error' : this.milestoneIcon(this.validationComplete, this.status === 'VALIDATING'); }
-    get deploymentMilestoneIcon() { return this.milestoneIcon(this.deploymentComplete || this.deploymentNotRequired, this.status === 'DEPLOYING'); }
-    get implementationMilestoneTitle() { return this.implementationComplete ? 'Local implementation completed' : this.status === 'IMPLEMENTING' ? 'Implementation in progress' : 'Implementation pending'; }
-    get validationMilestoneTitle() { return this.validationFailed ? 'Validation failed' : this.validationComplete ? 'Validation passed' : this.status === 'VALIDATING' ? 'Validation in progress' : 'Validation pending'; }
-    get deploymentMilestoneTitle() { return this.deploymentNotRequired ? 'Completed without deployment' : this.deploymentComplete ? 'Deployment completed' : this.status === 'DEPLOYING' ? 'Deployment in progress' : 'Deployment pending'; }
-    get implementationMilestoneMessage() { return this.implementationComplete ? 'The approved changes were created locally and committed.' : 'Waiting for implementation approval and local execution.'; }
-    get validationMilestoneMessage() { return this.validationFailed ? 'Salesforce rejected part of the proposed implementation.' : this.validationComplete ? `Salesforce validation passed for ${this.orgContext.displayName}.` : 'Validation starts after the local implementation is complete.'; }
-    get deploymentMilestoneMessage() {
-        if (this.deploymentNotRequired) return 'The job completed after validation. No deployment was required because there were no Salesforce source changes.';
-        if (this.deploymentComplete) return `Successfully deployed to ${this.orgContext.displayName}. ${this.deploymentSummaryText || `Deployment ID: ${this.job.deployment.deploymentId || 'not returned'}.`}`;
-        if (this.validationFailed) return 'Deployment is blocked until validation passes.';
-        return 'A separate deployment approval is required after validation.';
+    get hasPlanComponents() { return this.planComponents.length > 0; }
+    get showResult() {
+        return Boolean(this.selectedJob?.implementationReport || this.selectedJob?.report || this.selectedJob?.deployment || this.status === 'COMPLETED');
     }
-    get createDisabled() { return this.isBusy || (!this.prompt.trim() && !this.jiraIssueKey.trim()); }
+    get report() { return this.selectedJob?.implementationReport || this.selectedJob?.report || {}; }
+    get reportId() { return this.report.reportId || this.report.identifier || this.selectedJob?.deployment?.deploymentId || ''; }
+    get reportSummary() { return this.report.summary || this.selectedJob?.deployment?.summary || 'The requested work completed.'; }
+    get validationResult() { return this.report.validationResult || this.selectedJob?.validation?.status || ''; }
+    get deploymentResult() { return this.report.deploymentResult || this.selectedJob?.deployment?.status || ''; }
+    get recordEffects() {
+        const explicit = this.report.recordEffects || this.selectedJob?.deployment?.recordEffects;
+        if (explicit) return explicit;
+        const count = this.selectedJob?.deployment?.recordResults?.length || 0;
+        return count ? `${count} approved record operation${count === 1 ? '' : 's'} completed.` : '';
+    }
+    get concurrencyConsiderations() { return this.report.concurrencyConsiderations || this.selectedJob?.plan?.concurrencyConsiderations || ''; }
+    get implementedComponents() {
+        const components = this.report.implementedComponents || this.selectedJob?.deployment?.components || [];
+        return components.map((item, index) => ({
+            key: `result-component-${index}`,
+            label: typeof item === 'string' ? item : [item.metadataType || item.displayName || item.type, item.apiName || item.fullName].filter(Boolean).join(': ') || 'Implemented component'
+        }));
+    }
+    get hasImplementedComponents() { return this.implementedComponents.length > 0; }
+    get isInactiveFlowDeployment() {
+        if (this.status !== 'COMPLETED') return false;
+        const statuses = [
+            this.selectedJob?.flowStatus,
+            this.report.flowStatus,
+            this.selectedJob?.deployment?.flowStatus,
+            ...(this.selectedJob?.deployment?.components || []).map((item) => item.flowStatus || item.status)
+        ];
+        if (statuses.some((value) => String(value || '').toLowerCase() === 'draft')) return true;
+        const flowPlanned = [
+            ...(this.selectedJob?.deployment?.components || []),
+            ...(this.selectedJob?.plan?.approvedComponents || []),
+            ...(this.selectedJob?.plan?.components || [])
+        ].some((item) => String(typeof item === 'string' ? item : item.metadataType || item.displayName || item.type || '').toLowerCase().includes('flow'));
+        return this.selectedJob?.deployment?.activated === false && flowPlanned;
+    }
+    get jobItems() {
+        return this.jobs.map((item) => ({
+            ...item,
+            title: this.titleFor(item),
+            statusText: item.statusLabel || STATUS_LABELS[item.status] || item.status || 'Status unavailable',
+            updatedText: item.updatedAt || item.createdAt || '',
+            ariaCurrent: item.jobId === this.selectedJobId ? 'page' : 'false',
+            buttonClass: `conversation-item${item.jobId === this.selectedJobId ? ' conversation-item--selected' : ''}`
+        }));
+    }
 
-    async loadConsole() {
-        this.isBusy = true;
+    async loadWorkspace() {
+        this.isLoading = true;
+        this.errorMessage = '';
         try {
-            const [jobsResponse, orgsResponse] = await Promise.all([getJobs(), getOrgs()]);
-            this.jobs = this.parse(jobsResponse).jobs || [];
-            this.orgs = this.parse(orgsResponse).orgs || [];
-            if (!this.job && this.jobs.length) await this.selectJob(this.jobs[0].jobId);
+            await this.refreshJobs();
+            if (this.jobs.length) await this.selectJob(this.jobs[0].jobId);
         } catch (error) {
             this.errorMessage = this.normalizeError(error);
         } finally {
-            this.isBusy = false;
+            this.isLoading = false;
         }
     }
 
-    handleValue(event) { this[event.target.dataset.field] = event.detail?.value ?? event.target.value; }
-    async handleJobSelection(event) { await this.selectJob(event.detail.value); }
-
-    async handleCreate() {
-        await this.run(async () => {
-            const response = this.parse(await createAgentJob({ prompt: this.prompt, jiraIssueKey: this.jiraIssueKey }));
-            this.prompt = '';
-            this.jiraIssueKey = '';
-            await this.selectJob(response.jobId);
-            await this.refreshJobs();
-        });
-    }
-
-    async handleSelectOrg() {
-        if (!this.selectedOrgId) return;
-        await this.action('select-org', { orgRegistryId: this.selectedOrgId });
-    }
-    async handleAddInstruction() {
-        if (!this.canAddInstruction || !this.instruction.trim()) return;
-        await this.action('instructions', { instruction: this.instruction });
-        this.instruction = '';
-    }
-    async handleRefreshAnalysis() { await this.action('analyze', {}); }
-    async handleApproveImplementation() { await this.action('approve-implementation', { planVersion: this.plan.planVersion, comments: 'Approved in Salesforce agent console.' }); }
-    async handleRejectPlan() { await this.action('reject-plan', { comments: 'Rejected in Salesforce agent console.' }); }
-    async handleImplement() { await this.action('implement', {}); }
-    async handleValidate() { await this.action('validate', {}); }
-    async handleApproveDeployment() { await this.action('approve-deployment', { validationId: this.validation.validationId, productionSpecificApproval: this.isProduction, comments: this.hasDataOperations ? 'Salesforce data execution explicitly approved in the agent console.' : (this.isProduction ? 'Production deployment explicitly approved in Salesforce agent console.' : 'Deployment approved in Salesforce agent console.') }); }
-    async handleRejectDeployment() { await this.action('reject-deployment', { comments: 'Deployment rejected in Salesforce agent console.' }); }
-    async handleDeploy() { await this.action('deploy', {}); }
-    async handleCancel() { await this.action('cancel', { reason: 'Cancelled in Salesforce agent console.' }); }
-
-    async action(action, payload) {
-        await this.run(async () => {
-            const response = this.parse(await performJobAction({ jobId: this.job.jobId, action, payloadJson: JSON.stringify(payload) }));
-            await this.refreshJob();
-            if (ACTIVE_STATES.has(this.status) || ['IMPLEMENTING', 'AWAITING_DEPLOYMENT_APPROVAL'].includes(this.status)) this.startPolling();
-        });
+    async refreshJobs() {
+        const response = this.parse(await getJobs());
+        this.jobs = (response.jobs || []).map((item) => this.normalizeJob(item, response));
     }
 
     async selectJob(jobId) {
+        if (!jobId) return;
         this.stopPolling();
-        this.job = this.normalizeJob(this.parse(await getAgentJob({ jobId })));
-        this.selectedOrgId = this.orgContext?.orgRegistryId || '';
-        if (ACTIVE_STATES.has(this.status)) this.startPolling();
+        const requestId = ++this.requestSequence;
+        this.requestedJobId = jobId;
+        this.isSelecting = true;
+        this.errorMessage = '';
+        try {
+            const response = this.parse(await getJob({ jobId }));
+            if (requestId !== this.requestSequence || this.requestedJobId !== jobId) return;
+            const value = response.job || response;
+            this.applySelectedJob(this.normalizeJob(value, response));
+        } catch (error) {
+            if (requestId === this.requestSequence) this.errorMessage = this.normalizeError(error);
+        } finally {
+            if (requestId === this.requestSequence) this.isSelecting = false;
+        }
     }
 
-    async refreshJob() {
-        if (!this.job?.jobId) return;
-        this.job = this.normalizeJob(this.parse(await getAgentJob({ jobId: this.job.jobId })));
-        if (!ACTIVE_STATES.has(this.status)) this.stopPolling();
+    async refreshSelectedJob(expectedJobId = this.selectedJobId) {
+        if (!expectedJobId || expectedJobId !== this.selectedJobId) return;
+        await this.selectJob(expectedJobId);
+        await this.refreshJobs();
     }
 
-    async refreshJobs() { this.jobs = this.parse(await getJobs()).jobs || []; }
-    startPolling() { this.stopPolling(); this.pollTimer = window.setInterval(() => this.refreshJob().catch((error) => { this.errorMessage = this.normalizeError(error); this.stopPolling(); }), POLL_INTERVAL_MS); }
-    stopPolling() { if (this.pollTimer) window.clearInterval(this.pollTimer); this.pollTimer = undefined; }
-    async run(callback) { this.isBusy = true; this.errorMessage = ''; try { await callback(); } catch (error) { this.errorMessage = this.normalizeError(error); } finally { this.isBusy = false; } }
-    parse(value) { return typeof value === 'string' ? JSON.parse(value) : value; }
-    normalizeJob(job) {
+    applySelectedJob(job) {
+        this.selectedJob = job;
+        this.requestedJobId = job.jobId;
+        this.canImplement = job.canImplement === true;
+        this.canDeploy = job.canDeploy === true;
+        this.messages = [...(job.conversation || [])]
+            .sort((left, right) => String(left.timestamp || '').localeCompare(String(right.timestamp || '')))
+            .map((entry, index) => this.presentMessage(entry, index));
+        if (PROCESSING_STATES.has(job.status)) this.startPolling();
+        else this.stopPolling();
+    }
+
+    presentMessage(entry, index) {
+        const role = String(entry.role || 'system').toLowerCase();
+        const kind = String(entry.kind || 'message').toLowerCase();
+        const isUser = role === 'user';
+        const isClarification = kind.includes('clarification');
+        const isEvent = ['status', 'event', 'system'].includes(kind) || role === 'system';
         return {
-            ...job,
-            approvals: job?.approvals || [],
-            logs: job?.logs || [],
-            orgCandidates: job?.orgCandidates || [],
-            requirement: job?.requirement || { summary: '', acceptanceCriteria: '' },
-            orgContext: {
-                customerName: '',
-                displayName: '',
-                environment: '',
-                expectedOrgId: '',
-                verified: { verifiedAt: '' },
-                ...(job?.orgContext || {}),
-                verified: { verifiedAt: job?.orgContext?.verified?.verifiedAt || '' }
-            },
-            metadataScope: job?.metadataScope || { primaryMetadata: [], dependencies: [] },
-            workItems: job?.workItems || []
+            ...entry,
+            key: entry.conversationId || `message-${index}`,
+            authorLabel: isUser ? 'You' : isEvent ? 'Status' : isClarification ? 'Clarification' : 'Providus Nexus',
+            messageClass: `message message--${isUser ? 'user' : isEvent ? 'event' : isClarification ? 'clarification' : 'agent'}`
         };
     }
-    listItems(values, prefix) { return values.map((text, index) => ({ key: `${prefix}-${index}`, text })); }
-    milestoneClass(complete, active) { return `milestone${complete ? ' milestone--complete' : active ? ' milestone--active' : ''}`; }
-    milestoneIcon(complete, active) { return complete ? 'utility:success' : active ? 'utility:sync' : 'utility:clock'; }
-    normalizeError(error) { return error?.body?.message || error?.message || 'Unexpected error.'; }
+
+    handleValue(event) {
+        const field = event.target.dataset.field;
+        const value = event.detail?.value ?? event.target.value ?? '';
+        this[field] = field === 'actionComments' ? value.slice(0, 1000) : value;
+    }
+
+    handleJobSelection(event) {
+        this.selectJob(event.currentTarget.dataset.jobId);
+    }
+
+    async handleCreate() {
+        if (this.createDisabled) return;
+        const prompt = this.newPrompt.trim();
+        this.isActing = true;
+        this.errorMessage = '';
+        try {
+            const created = this.parse(await createJob({ prompt }));
+            this.newPrompt = '';
+            await this.refreshJobs();
+            await this.selectJob(created.jobId);
+        } catch (error) {
+            this.errorMessage = this.normalizeError(error);
+        } finally {
+            this.isActing = false;
+        }
+    }
+
+    async handleSend() {
+        if (this.sendDisabled) return;
+        const jobId = this.selectedJobId;
+        const text = this.draftMessage.trim();
+        this.isSending = true;
+        this.errorMessage = '';
+        try {
+            await sendMessage({ jobId, text });
+            if (jobId === this.selectedJobId) this.draftMessage = '';
+            await this.refreshSelectedJob(jobId);
+        } catch (error) {
+            this.errorMessage = this.normalizeError(error);
+        } finally {
+            this.isSending = false;
+        }
+    }
+
+    handleComposerKeydown(event) {
+        if (event.key === 'Enter' && !event.shiftKey && !this.sendDisabled) {
+            event.preventDefault();
+            this.handleSend();
+        }
+    }
+
+    async handleRefresh() {
+        if (!this.selectedJobId || this.isRefreshing) return;
+        this.isRefreshing = true;
+        this.errorMessage = '';
+        try { await this.refreshSelectedJob(); }
+        catch (error) { this.errorMessage = this.normalizeError(error); }
+        finally { this.isRefreshing = false; }
+    }
+
+    handleApproveImplementation() { this.runAction('APPROVE_IMPLEMENTATION'); }
+    handleRejectImplementation() { this.runAction('REJECT_IMPLEMENTATION'); }
+    handleApproveDeployment() { this.runAction('APPROVE_DEPLOYMENT'); }
+    handleRejectDeployment() { this.runAction('REJECT_DEPLOYMENT'); }
+    handleDeploy() { this.runAction('DEPLOY'); }
+
+    async runAction(action) {
+        if (this.isActing || !this.selectedJobId) return;
+        const jobId = this.selectedJobId;
+        this.isActing = true;
+        this.errorMessage = '';
+        try {
+            await performAction({ jobId, action, comments: this.actionComments.trim() });
+            if (jobId === this.selectedJobId) this.actionComments = '';
+            await this.refreshSelectedJob(jobId);
+        } catch (error) {
+            this.errorMessage = this.normalizeError(error);
+        } finally {
+            this.isActing = false;
+        }
+    }
+
+    startPolling() {
+        this.stopPolling();
+        this.pollTimer = window.setInterval(async () => {
+            const jobId = this.selectedJobId;
+            try { await this.refreshSelectedJob(jobId); }
+            catch (error) { this.errorMessage = this.normalizeError(error); this.stopPolling(); }
+        }, POLL_INTERVAL_MS);
+    }
+
+    stopPolling() {
+        if (this.pollTimer) window.clearInterval(this.pollTimer);
+        this.pollTimer = undefined;
+    }
+
+    normalizeJob(value, envelope = {}) {
+        const job = value || {};
+        return {
+            ...job,
+            canImplement: job.canImplement === true || envelope.canImplement === true,
+            canDeploy: job.canDeploy === true || envelope.canDeploy === true,
+            conversation: job.conversation || [],
+            approvals: job.approvals || [],
+            clarifications: job.clarifications || [],
+            orgContext: job.orgContext || {},
+            requirement: job.requirement || {},
+            metadataScope: job.metadataScope || {}
+        };
+    }
+
+    titleFor(job) {
+        const firstUserMessage = (job?.conversation || []).find((entry) => entry.role === 'user');
+        return job?.title || job?.requirement?.summary || job?.plan?.requirement || firstUserMessage?.text || `Conversation ${job?.jobId || ''}`;
+    }
+
+    parse(value) { return typeof value === 'string' ? JSON.parse(value) : (value || {}); }
+
+    normalizeError(error) {
+        const message = String(error?.body?.message || error?.message || 'The request could not be completed.').replace(/[\r\n]+/g, ' ').slice(0, 300);
+        const lowered = message.toLowerCase();
+        if (['authorization', 'bearer', 'token', 'credential', 'stack trace', 'postgres', 'database'].some((term) => lowered.includes(term))) {
+            return 'The request could not be completed safely.';
+        }
+        return message;
+    }
 }

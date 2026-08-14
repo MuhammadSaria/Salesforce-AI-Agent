@@ -12,10 +12,27 @@
 
 ## Current Task
 
-- Task: Phase 1 Task 12
+- Task: Phase 1 Task 13
 - Status: COMPLETE
 
 ## Completed Tasks
+
+- Phase 1 Task 13 — Convert the LWC into the persistent conversation workspace
+  - Verification date: 2026-08-14
+  - Gap analysis: reused the existing `Agent_Middleware` Named Credential, trusted Salesforce org/user/custom-permission headers, safe job path helper, sanitized Apex/LWC errors, persistent middleware/PostgreSQL job and conversation APIs, current approval/rejection routes, bounded polling cleanup, lifecycle/plan/result presentation, and least-privilege user/executor permission sets. Missing were the official Apex method names, `/messages` callout, Apex-derived UI permission projection, Jira-free creation UI, persistent sidebar/timeline, permission-and-lifecycle-gated actions, stale-response fencing, bounded action comments, and explicit Draft Flow wording. No middleware authorization, persistence, route, or lifecycle code changed.
+  - Apex interface: `createJob(String prompt)` posts bounded JSON to `POST /api/jobs`; `getJobs()` loads persistent authorized conversations; `getJob(String jobId)` loads current server state; `sendMessage(String jobId, String text)` posts JSON-serialized bounded text to `POST /api/jobs/:jobId/messages`; and `performAction(String jobId, String action, String comments)` accepts only `APPROVE_IMPLEMENTATION`, `REJECT_IMPLEMENTATION`, `APPROVE_DEPLOYMENT`, `REJECT_DEPLOYMENT`, `DEPLOY`, and `CANCEL`. Approval calls first reload current server bindings, then post only to the mapped route; unknown actions and oversized comments fail before callout.
+  - Trusted callouts retain `callout:Agent_Middleware`, `X-Agent-Org-Id`, `X-Agent-User-Id`, `X-Agent-Source`, `X-Agent-Can-Implement`, `X-Agent-Can-Deploy`, and the existing role header. Job IDs remain restricted to the existing bounded `[A-Za-z0-9_-]` path grammar and URL encoded. Prompt/message/comments are capped at 8000/4000/1000 characters and JSON serialized. Apex derives permission claims with `FeatureManagement.checkPermission`; LWC values are display projections only and middleware remains authoritative.
+  - Persistent UX: the responsive SLDS-oriented workspace now has a fixed Providus Nexus/trusted-org header, persistent conversation sidebar with title/status/timestamp, Jira-independent new-conversation form, server-loaded chronological timeline, normal follow-up/clarification composer, manual refresh, and processing-state-only polling. Page reload calls `getJobs` and `getJob`; no Salesforce-side duplicate store, local storage, Jira field, or browser-authoritative lifecycle state was added.
+  - Permission behavior: an `AI_Agent_User` can load, create, converse, answer clarification, and view progress/results but receives no approval controls. An executor sees implementation controls only in `AWAITING_IMPLEMENTATION_APPROVAL`/legacy `AWAITING_PLAN_APPROVAL` with `canImplement`, and deployment controls only in `AWAITING_DEPLOYMENT_APPROVAL` with `canDeploy`; an approved deployment remains a distinct explicit deploy action. Rejection comments render only as text and are bounded. Existing permission XML required no change: `AI_Agent_User` retains only controller/app/tab access, while `AI_Agent_Executor` alone carries `AI_Agent_Admin` and `AI_Agent_Deploy`; no broad Salesforce system permission was added.
+  - Lifecycle UX: safe clarification questions, readable approved component/behavior plan summaries, truthful status labels, and bounded implementation/report fields render without raw plan JSON, logs, internal traces, prompts, stack traces, or HTML injection. Completed results show implemented components, validation/deployment outcome, record effects, concurrency considerations, and report identifier when present.
+  - Inactive Flow wording: a completed deployment whose top-level job, report, deployment, or Flow component status is `Draft` (or whose durable completed Flow deployment marker is false) renders `Flow deployed inactive (Draft). The automation is not running.` The rendered result does not use the word `activated` or imply execution.
+  - Accessibility and resilience: labeled Lightning inputs/buttons, named regions, live progress/timeline, alert roles, busy spinners/disabled semantics, Enter-to-send with Shift+Enter newline behavior, responsive layout, blank-send disabling, in-flight duplicate-send blocking, failed-input retention, bounded sanitized errors, and text-only rendering are present.
+  - Race/polling safety: monotonic request IDs and selected-job identity checks prevent a late response for one conversation from replacing a newly selected conversation. Polling runs only for nonterminal processing states, is replaced rather than multiplied on refresh, and is cleared on terminal state or component disconnect.
+  - RED Jest verification: the documented root command initially could not start because pinned root dependencies were absent; after `npm.cmd ci`, `npm.cmd run test:unit -- --runTestsByPath force-app/main/default/lwc/agentChat/__tests__/agentChat.test.js` failed as intended with 13 failed, 0 passed because the new Apex imports and workspace controls were absent. Two later persisted-result-schema tests failed before the UI consumed the durable inactive marker, deployment identifier, record results, and concurrency guidance.
+  - Final Jest verification: `npm.cmd run test:unit -- --runTestsByPath force-app/main/default/lwc/agentChat/__tests__/agentChat.test.js` — PASS, 15 tests, 0 failed, 0 skipped. Full `npm.cmd run test:unit` — PASS, 15 tests, 0 failed, 0 skipped.
+  - Apex verification: `PHASE1_SALESFORCE_ALIAS` was configured as `Developer-org`, but read-only `sf.cmd org display --target-org "$env:PHASE1_SALESFORCE_ALIAS" --json` could not be completed: the sandboxed call failed writing the Salesforce CLI log and the approved read-only retry hung without returning org identity and was terminated. The required Task 13 source is uncommitted/undeployed, so `sf apex run test --tests AgentControllerTest --result-format human --wait 10 --target-org "$PHASE1_SALESFORCE_ALIAS"` would not prove the current source and was not run. No real deployment or dry-run was attempted against an unverified alias.
+  - Middleware regression: the first required check passed lint but ended 466/467 when 4,370 accumulated ignored `jobs/` fixture directories caused Windows `EMFILE` in the existing file-store `Promise.all`. The failing approval suite passed 9/9 with a fresh validated temporary `WORKSPACE_ROOT`, confirming retained test state as the cause. The complete rerun with the required `TEST_DATABASE_URL` and a fresh temporary workspace passed lint and 467/467 tests, 0 failed, 0 skipped; existing fixture data was not deleted.
+  - Static security review and `git diff --check`: no hard-coded URL/token/org ID, arbitrary route, unsafe path concatenation, client-authored permission claim, `innerHTML`, local-storage authority, Jira UI dependency, runaway timer, stale-selection overwrite, direct metadata side effect, Flow activation, Task 14 code, or middleware weakening was found. Apex exposes only fixed status/code-allowlisted client errors and always replaces 5xx/callout failures with a generic message; arbitrary middleware text is never forwarded. `git diff --check` passed with line-ending conversion warnings only.
 
 - Phase 1 Task 12 — Enforce validated deployment and data-operation approvals
   - Verification date: 2026-08-14
@@ -453,11 +470,11 @@
 
 ## Blockers
 
-- None.
+- Apex runtime verification is safely blocked until an explicitly verified sandbox contains the Task 13 controller/test source without requiring an unauthorized real deployment.
 
 ## Next Task
 
-Phase 1 Task 13. NOT STARTED.
+Phase 1 Task 14. NOT STARTED.
 
 ## Update Rules
 
