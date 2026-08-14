@@ -25,6 +25,7 @@ import { sameSalesforceId } from './utils/salesforceId.js';
 import { createMemoryJobStore, createPostgresJobStore, setDefaultJobStore } from './persistence/jobStore.js';
 import { databasePool } from './persistence/database.js';
 import { migrate } from './persistence/migrate.js';
+import { assertDataExecutionAuthority, buildDataOperationApproval, buildDeploymentApproval } from './services/phase1Deployment.js';
 
 export function createApp(options = {}) {
   const app = express();
@@ -162,10 +163,31 @@ export function createApp(options = {}) {
 
   app.post('/api/jobs/:jobId/approve-deployment', mutableJobRoute(async (req, res, job) => {
     if (!requireDeploymentPermission(req, res, job)) return;
-    if (job.status !== JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL) return conflict(res, 'Job is not awaiting deployment approval.');
-    if (req.body?.validationId !== job.validation?.validationId) return conflict(res, 'Approval must identify the current validation.');
-    const approval = approvalRecord(job, req, 'DEPLOYMENT', { decision: 'APPROVED', validationId: job.validation.validationId, validatedSourceHash: job.validation.sourceHash, gitCommitHash: job.validation.commitHash || '', deploymentPackageHash: job.validation.packageHash, productionSpecificApproval: req.body?.productionSpecificApproval === true });
-    await req.app.locals.jobStore.update(job.jobId, { approvals: [...job.approvals, approval] });
+    const orgContext = await trustedOrgContextForJob(job, req.actor, sameOrgResolver);
+    const approval = await req.app.locals.jobStore.updateAtomically(job.jobId, (current) => {
+      if (current.status !== JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL) throw Object.assign(new Error('Job is not awaiting deployment approval.'), { statusCode: 409 });
+      if (req.body?.validationId !== current.validation?.validationId) throw Object.assign(new Error('Approval must identify the current validation.'), { statusCode: 409 });
+      if (!sameSalesforceId(current.orgId || current.orgContext?.expectedOrgId, orgContext.expectedOrgId) || !sameSalesforceId(current.validation?.targetOrgId, orgContext.expectedOrgId)) throw Object.assign(new Error('The validated deployment org is no longer current.'), { statusCode: 409, code: 'APPROVAL_REQUIRED' });
+      const created = { ...buildDeploymentApproval(current, { approvalId: nanoid(), actorId: req.actor.id }), comments: sanitizeUntrustedText(req.body?.comments, 1000) };
+      current.approvals = [...(current.approvals || []), created];
+      return created;
+    });
+    res.status(201).json({ approval });
+  }));
+  app.post('/api/jobs/:jobId/approve-data-preview', mutableJobRoute(async (req, res, job) => {
+    if (!requireImplementationPermission(req, res, job)) return;
+    const approval = await req.app.locals.jobStore.updateAtomically(job.jobId, (current) => {
+      const preview = current.dataPreview;
+      if (!preview?.requiresApproval || Number(preview.recordCount) <= 10 || req.body?.previewHash !== preview.previewHash) {
+        throw Object.assign(new Error('Approval must identify the current data preview affecting more than ten records.'), { statusCode: 409, code: 'DATA_APPROVAL_REQUIRED' });
+      }
+      if (!sameSalesforceId(preview.salesforceOrganizationId, current.orgId || current.orgContext?.expectedOrgId) || preview.scopeHash !== current.metadataScope?.hash) {
+        throw Object.assign(new Error('The data preview is no longer current.'), { statusCode: 409, code: 'DATA_PREVIEW_STALE' });
+      }
+      const created = { ...buildDataOperationApproval(current, preview, { approvalId: nanoid(), actorId: req.actor.id }), comments: sanitizeUntrustedText(req.body?.comments, 1000) };
+      current.approvals = [...(current.approvals || []), created];
+      return created;
+    });
     res.status(201).json({ approval });
   }));
   app.post('/api/jobs/:jobId/reject-deployment', mutableJobRoute(async (req, res, job) => {
@@ -176,13 +198,15 @@ export function createApp(options = {}) {
     res.status(201).json({ approval });
   }));
   app.post('/api/jobs/:jobId/deploy', mutableJobRoute(async (req, res, job) => {
-    if (!requireDeploymentPermission(req, res, job)) return;
+    const isDataExecution = Boolean(job.plan?.dataOperations?.length);
+    if (!(isDataExecution ? requireImplementationPermission(req, res, job) : requireDeploymentPermission(req, res, job))) return;
     if (job.status !== JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL) return conflict(res, 'Job is not ready to deploy.');
     const orgContext = await trustedOrgContextForJob(job, req.actor, sameOrgResolver);
-    const approval = orgBoundApproval(job, 'DEPLOYMENT', { orgContext });
-    assertDeploymentApprovalReady(job, approval, orgContext);
+    const approval = orgBoundApproval(job, isDataExecution ? 'IMPLEMENTATION' : 'DEPLOYMENT', { orgContext });
+    const dataAuthority = isDataExecution ? assertDataExecutionAuthority({ job, preview: job.dataPreview, actualPreview: job.dataPreview }) : null;
+    if (!isDataExecution) assertDeploymentApprovalReady(job, approval, orgContext);
     if (job.source === 'salesforce-chat') await req.app.locals.jobStore.update(job.jobId, { orgContext });
-    await req.app.locals.jobStore.transition(job.jobId, JOB_STATES.DEPLOYING, { actor: req.actor.id, reason: 'Deployment requested after explicit approval.', approvalId: approval.approvalId });
+    await req.app.locals.jobStore.transition(job.jobId, JOB_STATES.DEPLOYING, { actor: req.actor.id, reason: isDataExecution ? 'Data execution requested under the exact preview policy.' : 'Deployment requested after explicit approval.', approvalId: dataAuthority?.approvalId || approval.approvalId });
     await enqueue({ jobId: job.jobId, action: 'deploy', actor: req.actor.id }, { jobId: `${job.jobId}:deploy:${Date.now()}` });
     res.status(202).json({ jobId: job.jobId, message: 'Approved deployment queued.' });
   }));
@@ -237,7 +261,7 @@ function assertDeploymentApprovalReady(job, approval, orgContext) {
   if (!validation || validation.status !== 'PASSED' || new Date(validation.expiryTimestamp) <= new Date()) {
     throw Object.assign(new Error('A current deployment approval for this exact plan, scope, and org is required.'), { statusCode: 409, code: 'APPROVAL_REQUIRED' });
   }
-  if (approval.validatedSourceHash !== validation.sourceHash || approval.deploymentPackageHash !== validation.packageHash) {
+  if (approval.sourceHash !== validation.sourceHash || approval.packageHash !== validation.packageHash || approval.commitHash !== validation.commitHash) {
     throw Object.assign(new Error('A current deployment approval for this exact plan, scope, and org is required.'), { statusCode: 409, code: 'APPROVAL_REQUIRED' });
   }
   if (!sameSalesforceId(validation.targetOrgId, orgContext?.expectedOrgId)) {

@@ -37,7 +37,17 @@ export function orgBoundApproval(job, approvalType, options = {}) {
   }
   if (approvalType === 'DEPLOYMENT') {
     if (!validation || approval.validationId !== validation.validationId) throw approvalError();
-    if (approval.validatedSourceHash !== validation.sourceHash || approval.deploymentPackageHash !== validation.packageHash) throw approvalError();
+    if (approval.jobId !== job.jobId
+      || !sameSalesforceId(approval.sourceOrgId, orgContext?.expectedOrgId)
+      || approval.sourceHash !== validation.sourceHash
+      || approval.packageHash !== validation.packageHash
+      || approval.commitHash !== validation.commitHash
+      || approval.baselineCommit !== validation.baselineCommit
+      || approval.inspectionHash !== validation.inspectionHash
+      || Number(approval.planVersion) !== Number(job.plan?.planVersion)
+      || approval.validationTimestamp !== validation.timestamp
+      || approval.expiresAt !== validation.expiryTimestamp
+      || !futureTimestamp(approval.expiresAt)) throw approvalError();
     if (!sameSalesforceId(validation.targetOrgId, orgContext?.expectedOrgId)) throw approvalError();
     if (job.source === 'salesforce-chat' && !sameSalesforceId(validation.targetOrgId, job.orgId)) throw approvalError();
   }
@@ -102,4 +112,9 @@ function implementationApprovalHashesMatch(job, approval) {
   } catch {
     return false;
   }
+}
+
+function futureTimestamp(value) {
+  const timestamp = Date.parse(String(value || ''));
+  return Number.isFinite(timestamp) && timestamp > Date.now();
 }

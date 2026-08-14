@@ -417,7 +417,7 @@ async function invalidateRecord(pool, jobId, selection, actor, orgChanged) {
     const currentPlanVersion = Number(record.plan?.planVersion || record.nextPlanVersion || 0);
     record.revisions = [...(record.revisions || []), ...(record.plan ? [{ revisionNumber: currentPlanVersion, invalidatedAt: now, invalidatedBy: actor, plan: record.plan, approvals: record.approvals, orgContext: record.orgContext, sourceValidation: record.sourceValidation, implementationBaseline: record.implementationBaseline, correctionAttempt: record.correctionAttempt, correctionHistory: record.correctionHistory }] : [])];
     record.stateHistory.push({ previousState: record.status, newState: JOB_STATES.RECEIVED, timestamp: now, actor, reason: orgChanged ? 'Target org changed; artifacts invalidated.' : 'Requirements changed; artifacts invalidated.', approvalId: '', orgId: '' });
-    Object.assign(record, { status: JOB_STATES.RECEIVED, context: { ...record.context, selectedOrgRegistryId: selection }, orgContext: null, metadataScope: null, plan: null, nextPlanVersion: Math.max(1, currentPlanVersion + 1), iteration: Math.max(1, currentPlanVersion + 1), orchestration: null, workItems: [], specialistMessages: [], specialistResults: {}, fileOwnership: [], revisionContext: null, approvals: [], sourceValidation: null, implementationBaseline: null, correctionAttempt: 0, correctionReservation: null, correctionHistory: [], validation: null, deployment: null, implementation: null, diff: '', error: '' });
+    Object.assign(record, { status: JOB_STATES.RECEIVED, context: { ...record.context, selectedOrgRegistryId: selection }, orgContext: null, metadataScope: null, plan: null, nextPlanVersion: Math.max(1, currentPlanVersion + 1), iteration: Math.max(1, currentPlanVersion + 1), orchestration: null, workItems: [], specialistMessages: [], specialistResults: {}, fileOwnership: [], revisionContext: null, approvals: [], sourceValidation: null, implementationBaseline: null, correctionAttempt: 0, correctionReservation: null, correctionHistory: [], validation: null, dataPreview: null, deployment: null, implementation: null, diff: '', error: '' });
   });
 }
 
@@ -471,6 +471,7 @@ function newJobRecord(input) {
     instructions: [],
     approvals: [],
     validation: null,
+    dataPreview: null,
     deployment: null,
     sourceValidation: null,
     implementationBaseline: null,

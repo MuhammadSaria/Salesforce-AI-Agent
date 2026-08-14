@@ -165,6 +165,9 @@ export function createCorrectionService({
         });
         record.sourceValidation = sourceValidation;
         record.validation = null;
+        record.deployment = null;
+        record.dataPreview = null;
+        record.approvals = (record.approvals || []).filter((approval) => !['DEPLOYMENT', 'DATA_OPERATION'].includes(approval.approvalType || approval.type));
         return {
           attempt: reservation.attempt,
           owner: target.owner,

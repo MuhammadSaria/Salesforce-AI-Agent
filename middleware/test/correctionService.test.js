@@ -258,6 +258,7 @@ test('revalidates the complete operation set and persists a new Task 9 source ha
   assert.equal(result.sourceValidation.operationCount, 3);
   assert.notEqual(result.sourceValidation.sourceHash, before.sourceValidation.sourceHash);
   assert.equal(result.sourceValidation.sourceHash, stableHash(validatedOperations));
+  assert.deepEqual((await fixture.jobStore.get(fixture.jobId)).approvals.map((approval) => approval.approvalType || approval.type), ['IMPLEMENTATION']);
 });
 
 test('does not publish a new PASSED source marker when corrected output still fails Task 9', async () => {
@@ -483,7 +484,11 @@ async function correctionFixture({ extraEvidence = [] } = {}) {
   await jobStore.update(jobId, {
     status: 'CORRECTING', orgContext: { expectedOrgId: ORG, orgRegistryId: 'sandbox' },
     plan: input.plan, metadataScope: { hash: input.plan.scopeHash }, inspection: input.inspection,
-    approvals: [{ type: 'IMPLEMENTATION', decision: 'APPROVED', planHash: input.plan.planHash, scopeHash: input.plan.scopeHash }],
+    approvals: [
+      { type: 'IMPLEMENTATION', decision: 'APPROVED', planHash: input.plan.planHash, scopeHash: input.plan.scopeHash },
+      { approvalType: 'DEPLOYMENT', decision: 'APPROVED', validationId: 'stale-validation' },
+      { approvalType: 'DATA_OPERATION', decision: 'APPROVED', previewHash: 'stale-preview' }
+    ],
     specialistResults, sourceValidation, implementationBaseline, validation: { status: 'FAILED' },
     correctionAttempt: 0, correctionReservation: null, correctionHistory: []
   });

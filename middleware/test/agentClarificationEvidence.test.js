@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { architecturePlanHashes } from '../src/domain/architecturePlan.js';
 import { canonicalInspectionHash } from '../src/domain/inspection.js';
-import { processAgentJob, setDirectAnalysisDependenciesForTest, setDirectSpecialistModelRunnerForTest, setImplementationBaselineRunnerForTest, setSameOrgResolverForTest } from '../src/services/agent.js';
+import { processAgentJob, setDirectAnalysisDependenciesForTest, setDirectArtifactRunnerForTest, setDirectSpecialistModelRunnerForTest, setImplementationBaselineRunnerForTest, setSameOrgResolverForTest } from '../src/services/agent.js';
 import { appendConversation, createJobRecord, getJobRecord, updateJob } from '../src/services/jobStore.js';
 
 test.beforeEach(() => {
@@ -22,12 +22,14 @@ test.beforeEach(() => {
     await updateJob(job.jobId, { implementationBaseline: baseline });
     return baseline;
   });
+  setDirectArtifactRunnerForTest(async ({ job, baseline }) => ({ jobId: job.jobId, status: job.status, specialistStatus: 'COMPLETED', sourceWritten: baseline.sourceWritten, sourceEligible: true, sourceValidation: job.sourceValidation, implementationBaseline: baseline }));
 });
 
 test.afterEach(() => {
   setSameOrgResolverForTest();
   setDirectSpecialistModelRunnerForTest();
   setImplementationBaselineRunnerForTest();
+  setDirectArtifactRunnerForTest();
 });
 
 test('direct jobs use createArchitecturePlan and persist no source-generation fields', async (t) => {

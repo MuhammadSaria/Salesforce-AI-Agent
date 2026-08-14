@@ -11,7 +11,7 @@
     "tunnel": "node src/scripts/startNgrok.js",
     "migrate": "node src/persistence/runMigrations.js",
     "lint": "eslint src test",
-    "test": "node --import ./test/setup.js --test",
+    "test": "node --import ./test/setup.js --test --test-concurrency=1",
     "check": "npm run lint && npm test"
   },
   "dependencies": {

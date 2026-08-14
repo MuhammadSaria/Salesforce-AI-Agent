@@ -28,8 +28,15 @@ import { generateObjectFieldSource } from '../specialists/objectFieldSpecialist.
 import { generateSecuritySource } from '../specialists/securitySpecialist.js';
 import { generateFlowSource } from '../specialists/flowSpecialist.js';
 import { validateSpecialistOperations } from '../validation/sourceValidator.js';
-import { componentKeysForPlan, createComponentLockService, withComponentLocks } from './componentLockService.js';
+import { componentKeysForPlan, createComponentLockService, startComponentLockHeartbeat, withComponentLocks } from './componentLockService.js';
 import { createCorrectionRouter } from './correctionRouting.js';
+import {
+  buildDataPreview,
+  executeApprovedDataOperations,
+  executeValidatedDeployment,
+  inspectValidatedArtifact,
+  writeValidatedOperations
+} from './phase1Deployment.js';
 
 let sameOrgResolver = resolveSameOrg;
 let directAnalysisDependencies = {
@@ -40,6 +47,7 @@ let directAnalysisDependencies = {
 let directSpecialistModelRunner = executeSpecialistModel;
 let implementationBaselineRunner = establishImplementationBaseline;
 let correctionRouterOverride = null;
+let directArtifactRunner = prepareAndValidateDirectImplementation;
 
 export function setSameOrgResolverForTest(resolver) {
   sameOrgResolver = resolver || resolveSameOrg;
@@ -63,6 +71,10 @@ export function setImplementationBaselineRunnerForTest(runner = null) {
 
 export function setCorrectionRouterForTest(router = null) {
   correctionRouterOverride = router;
+}
+
+export function setDirectArtifactRunnerForTest(runner = null) {
+  directArtifactRunner = runner || prepareAndValidateDirectImplementation;
 }
 
 export function routeBoundedValidationFailureForJob(input) {
@@ -267,8 +279,8 @@ async function implement(job, actor) {
       await transitionJob(job.jobId, JOB_STATES.FAILED, { actor, reason: safeMessage, error: safeMessage });
       return { jobId: job.jobId, status: JOB_STATES.FAILED };
     }
-    await appendLog(job.jobId, 'info', `Generated and deterministically validated ${validated.operations.length} bounded specialist operations, then captured their immutable exact-org baseline before local source writes. No Salesforce validation ran.`);
-    return { jobId: job.jobId, status: job.status, specialistStatus: 'COMPLETED', sourceWritten: baseline.sourceWritten, sourceEligible: true, sourceValidation, implementationBaseline: baseline };
+    await appendLog(job.jobId, 'info', `Generated and deterministically validated ${validated.operations.length} bounded specialist operations, then captured their immutable exact-org baseline before local source writes.`);
+    return directArtifactRunner({ job: await requiredJob(job.jobId), operations: validated.operations, baseline, actor });
   }
   if (job.status === JOB_STATES.VALIDATION_FAILED) {
     if (job.implementation) return validate(job, actor);
@@ -351,10 +363,12 @@ async function implement(job, actor) {
 async function validate(job, actor) {
   const trustedOrgContext = await resolveDirectOrgContext(job, actor);
   job = { ...job, orgContext: trustedOrgContext };
-  assertState(job, JOB_STATES.IMPLEMENTING, JOB_STATES.VALIDATION_FAILED);
+  assertState(job, JOB_STATES.IMPLEMENTING, JOB_STATES.VALIDATION_FAILED, JOB_STATES.VALIDATING);
   validApproval(job, 'IMPLEMENTATION', { orgContext: trustedOrgContext });
   await persistSafeDirectOrgContext(job, trustedOrgContext);
-  await transitionJob(job.jobId, JOB_STATES.VALIDATING, { actor, reason: 'Validation requested.' });
+  if (job.status !== JOB_STATES.VALIDATING) {
+    await transitionJob(job.jobId, JOB_STATES.VALIDATING, { actor, reason: 'Validation requested.' });
+  }
   await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.TESTING, WORK_ITEM_STATUSES.VALIDATING, 'Independent combined-solution testing started.');
   await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT, WORK_ITEM_STATUSES.VALIDATING, 'Target-org validation and package verification started.');
   try {
@@ -362,11 +376,12 @@ async function validate(job, actor) {
     const paths = await ensureJobWorkspace(current.jobId, current.orgContext.orgRegistryId);
     const implementationProject = resolveImplementationProject(paths, current.implementation);
     await verifySelectedOrg(current.orgContext, auditOptions(current, actor));
+    if (isSourceFreeDirectPlan(current)) return validateDirectMetadataImplementation(current, paths, implementationProject, actor);
     await assertCleanImplementation(implementationProject, current.implementation, current.plan);
     const dataOperations = current.plan.dataOperations || [];
     const hasSourceChanges = Boolean((current.plan.fileOperations || []).length || (current.implementation?.changedFiles || []).length);
     if (hasSourceChanges && dataOperations.length) throw new Error('Metadata and record mutations must be split into separate jobs to prevent partial execution.');
-    const dataValidationCommands = await validatePlannedDataOperations(current, paths, actor);
+    const dataValidationEvidence = await validatePlannedDataOperations(current, paths, actor);
     if (!hasSourceChanges && !dataOperations.length) {
       const now = new Date();
       const validation = { validationId: nanoid(), targetOrgId: current.orgContext.expectedOrgId, status: 'PASSED', outcome: 'NO_CHANGES', sourceHash: current.implementation?.sourceHash || stableHash([]), commitHash: current.implementation?.commitHash || '', planHash: current.plan.planHash, metadataScopeHash: current.metadataScope.hash, packageHash: stableHash([]), commands: [], result: 'No source changes were proposed, so Salesforce deployment validation was not required.', warnings: ['No Salesforce source changes to validate or deploy.'], timestamp: now.toISOString(), expiryTimestamp: new Date(now.getTime() + config.validationExpiryMinutes * 60000).toISOString() };
@@ -382,9 +397,10 @@ async function validate(job, actor) {
     }
     if (dataOperations.length) {
       const now = new Date();
-      const validation = { validationId: nanoid(), targetOrgId: current.orgContext.expectedOrgId, status: 'PASSED', outcome: 'DATA_OPERATIONS_VALIDATED', sourceHash: current.implementation.sourceHash, commitHash: current.implementation.commitHash || '', planHash: current.plan.planHash, metadataScopeHash: current.metadataScope.hash, packageHash: stableHash(dataOperations), commands: dataValidationCommands, result: `${dataOperations.length} structured record operations passed object, field, permission, and target-org validation. No records were changed.`, timestamp: now.toISOString(), expiryTimestamp: new Date(now.getTime() + config.validationExpiryMinutes * 60000).toISOString() };
+      const validation = { validationId: nanoid(), targetOrgId: current.orgContext.expectedOrgId, status: 'PASSED', outcome: 'DATA_OPERATIONS_VALIDATED', sourceHash: current.implementation.sourceHash, commitHash: current.implementation.commitHash || '', planHash: current.plan.planHash, metadataScopeHash: current.metadataScope.hash, packageHash: stableHash(dataOperations), commands: dataValidationEvidence.commands, result: `${dataOperations.length} structured record operations passed object, field, permission, and target-org validation. No records were changed.`, timestamp: now.toISOString(), expiryTimestamp: new Date(now.getTime() + config.validationExpiryMinutes * 60000).toISOString() };
+      const dataPreview = previewForDataOperations(current, dataOperations, validation.expiryTimestamp, dataValidationEvidence.beforeValues);
       await writeFile(join(paths.validation, `${validation.validationId}.json`), JSON.stringify(validation, null, 2), 'utf8');
-      await updateJob(current.jobId, { validation });
+      await updateJob(current.jobId, { validation, dataPreview });
       await completeImplementationWorkItems(current.jobId);
       await transitionAgentWorkItem(current.jobId, SPECIALIST_AGENT_IDS.TESTING, WORK_ITEM_STATUSES.COMPLETED, validation.result);
       await transitionAgentWorkItem(current.jobId, SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT, WORK_ITEM_STATUSES.IMPLEMENTATION_COMPLETE, 'Structured data operations passed read-only validation. Deployment approval is still required.');
@@ -416,6 +432,31 @@ async function validate(job, actor) {
     });
     const failureReason = humanizeValidationFailure(failure.details?.message || error.message);
     await updateJob(job.jobId, { validation: { status: 'FAILED', error: failureReason, failure, failureReason, timestamp: new Date().toISOString() } });
+    const failedJob = await requiredJob(job.jobId);
+    if (isSourceFreeDirectPlan(failedJob)) {
+      const owner = correctionOwner(failedJob, failure);
+      try {
+        const routed = await routeBoundedValidationFailureForJob({
+          job: failedJob,
+          failure,
+          owner,
+          attempt: Number(failedJob.correctionAttempt || 0) + 1,
+          lockToken: failedJob.implementation?.lockToken,
+          actor
+        });
+        if (routed.classification === 'MECHANICAL') {
+          return rewriteAndValidateCorrectedDirectImplementation(job.jobId, actor);
+        }
+        return routed;
+      } catch (routingError) {
+        if (routingError.retryable) throw routingError;
+        const latest = await requiredJob(job.jobId);
+        if ([JOB_STATES.VALIDATING, JOB_STATES.CORRECTING].includes(latest.status)) {
+          await transitionJob(job.jobId, JOB_STATES.FAILED, { actor, reason: 'Validation failed closed because bounded correction authority was unavailable.', error: failureReason });
+        }
+        return { jobId: job.jobId, status: (await requiredJob(job.jobId)).status, validationFailure: failure };
+      }
+    }
     await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.TESTING, WORK_ITEM_STATUSES.CHANGES_REQUIRED, failureReason);
     await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT, WORK_ITEM_STATUSES.CHANGES_REQUIRED, failureReason);
     const current = await requiredJob(job.jobId);
@@ -434,33 +475,48 @@ async function validate(job, actor) {
 }
 
 async function deploy(job, actor) {
+  if (job.deployment?.status === 'SUCCEEDED') {
+    if (job.status === JOB_STATES.DEPLOYING) await finalizePersistedDeployment(job, actor);
+    return { ...job.deployment, alreadyDeployed: true };
+  }
   const trustedOrgContext = await resolveDirectOrgContext(job, actor);
   job = { ...job, orgContext: trustedOrgContext };
   assertState(job, JOB_STATES.DEPLOYING);
-  const approval = validApproval(job, 'DEPLOYMENT', { orgContext: trustedOrgContext });
-  assertDeploymentGuard(job, approval);
+  if (isSourceFreeDirectPlan(job)) return deployDirectMetadata(job, actor);
+  const dataOperations = job.plan.dataOperations || [];
+  const approval = validApproval(job, dataOperations.length ? 'IMPLEMENTATION' : 'DEPLOYMENT', { orgContext: trustedOrgContext });
+  if (dataOperations.length) assertDataOperationGuard(job);
+  else assertDeploymentGuard(job, approval);
   await persistSafeDirectOrgContext(job, trustedOrgContext);
   const paths = await ensureJobWorkspace(job.jobId, job.orgContext.orgRegistryId);
   const implementationProject = resolveImplementationProject(paths, job.implementation);
   await verifySelectedOrg(job.orgContext, auditOptions(job, actor));
   await assertCleanImplementation(implementationProject, job.implementation, job.plan);
   await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT, WORK_ITEM_STATUSES.VALIDATING, 'Approved deployment checks started for the exact validated package.');
-  const dataOperations = job.plan.dataOperations || [];
   let result;
   const recordResults = [];
+  let dataAuthority = { approvalId: '' };
   if (dataOperations.length) {
-    for (const operation of dataOperations) {
-      const command = operation.operation === 'create' ? 'dataCreate' : operation.operation === 'update' ? 'dataUpdate' : 'dataDelete';
-      result = await runSfCommand(command, operation, { ...sfOptions(job, job.orgContext, paths, actor, job.metadataScope, true), cwd: implementationProject });
-      await appendCommand(job.jobId, result);
-      if (result.exitCode !== 0) {
-        await updateJob(job.jobId, { deployment: { status: recordResults.length ? 'PARTIAL_FAILURE' : 'FAILED', targetOrgId: job.orgContext.expectedOrgId, recordResults, error: sfFailureMessage(result), failedAt: new Date().toISOString() } });
-        await transitionJob(job.jobId, JOB_STATES.FAILED, { actor, reason: 'Approved data execution failed.', error: sfFailureMessage(result) });
-        await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT, WORK_ITEM_STATUSES.FAILED, sfFailureMessage(result));
-        return;
+    const dataValidationEvidence = await validatePlannedDataOperations(job, paths, actor);
+    const actualPreview = previewForDataOperations(job, dataOperations, job.validation.expiryTimestamp, dataValidationEvidence.beforeValues);
+    const execution = await executeApprovedDataOperations({
+      job,
+      preview: job.dataPreview,
+      operations: dataOperations,
+      loadPreview: async () => actualPreview,
+      jobStore: currentJobStore(),
+      jobId: job.jobId,
+      actor,
+      mutate: async (operation) => {
+        const command = operation.operation === 'create' ? 'dataCreate' : operation.operation === 'update' ? 'dataUpdate' : 'dataDelete';
+        const commandResult = await runSfCommand(command, operation, { ...sfOptions(job, job.orgContext, paths, actor, job.metadataScope, true), cwd: implementationProject });
+        await appendCommand(job.jobId, commandResult);
+        if (commandResult.exitCode !== 0) throw Object.assign(new Error(sfFailureMessage(commandResult)), { code: 'SALESFORCE_DATA_EXECUTION_FAILED' });
+        return { operation: operation.operation, objectApiName: operation.objectApiName, recordId: extractRecordId(commandResult.stdout) || operation.recordId };
       }
-      recordResults.push({ operation: operation.operation, objectApiName: operation.objectApiName, recordId: extractRecordId(result.stdout) || operation.recordId });
-    }
+    });
+    dataAuthority = execution.authority;
+    recordResults.push(...execution.results);
   } else {
     result = await runSfCommand('deployManifest', { manifest: job.manifest }, { ...sfOptions(job, job.orgContext, paths, actor, job.metadataScope, true), cwd: implementationProject });
     await appendCommand(job.jobId, result);
@@ -470,7 +526,7 @@ async function deploy(job, actor) {
       return;
     }
   }
-  const deployment = { deploymentId: dataOperations.length ? '' : extractDeployId(result.stdout), targetOrgId: job.orgContext.expectedOrgId, sourceHash: job.validation.sourceHash, packageHash: job.validation.packageHash, commitHash: job.validation.commitHash || '', result: dataOperations.length ? JSON.stringify(recordResults) : result.stdout, recordResults, deployedAt: new Date().toISOString() };
+  const deployment = { status: 'SUCCEEDED', deploymentId: dataOperations.length ? '' : extractDeployId(result.stdout), targetOrgId: job.orgContext.expectedOrgId, validationId: job.validation.validationId, sourceHash: job.validation.sourceHash, packageHash: job.validation.packageHash, commitHash: job.validation.commitHash || '', approvalId: dataOperations.length ? dataAuthority.approvalId : approval.approvalId, result: dataOperations.length ? JSON.stringify(recordResults) : result.stdout, recordResults, deployedAt: new Date().toISOString() };
   const componentSummary = dataOperations.length ? summarizeDataDeployment(job, recordResults) : summarizeMetadataDeployment(job, result.stdout);
   const finalDeployment = { ...deployment, summary: componentSummary.summary, components: componentSummary.components, iteration: job.iteration || job.plan.planVersion, specialistSummary: combinedSpecialistSummary(job, componentSummary) };
   await updateJob(job.jobId, { deployment: finalDeployment });
@@ -481,8 +537,180 @@ async function deploy(job, actor) {
   if (await activatePendingJiraRevisionWhenEnabled(job.jobId, actor)) return analyze(await requiredJob(job.jobId), actor);
 }
 
+async function finalizePersistedDeployment(job, actor) {
+  const dataOperations = job.plan?.dataOperations || [];
+  const recordResults = job.deployment?.recordResults || [];
+  const componentSummary = dataOperations.length ? summarizeDataDeployment(job, recordResults) : summarizeMetadataDeployment(job, job.deployment?.result || '');
+  const finalDeployment = {
+    ...job.deployment,
+    summary: componentSummary.summary,
+    components: componentSummary.components,
+    iteration: job.iteration || job.plan?.planVersion,
+    specialistSummary: combinedSpecialistSummary(job, componentSummary),
+    activated: false
+  };
+  await updateJob(job.jobId, { deployment: finalDeployment });
+  await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT, WORK_ITEM_STATUSES.COMPLETED, componentSummary.summary);
+  await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.DOCUMENTATION_EXPLANATION, WORK_ITEM_STATUSES.COMPLETED, 'Persisted deployment success was finalized without repeating the Salesforce side effect.');
+  await transitionJob(job.jobId, JOB_STATES.COMPLETED, { actor, reason: dataOperations.length ? 'Persisted approved record execution was finalized without replay.' : 'Persisted exact validated deployment was finalized without replay.', approvalId: finalDeployment.approvalId });
+  return finalDeployment;
+}
+
 function validApproval(job, type, options = {}) {
   return orgBoundApproval(job, type, options);
+}
+
+function correctionOwner(job, failure) {
+  const component = failure?.details?.component || failure?.component || {};
+  const operation = currentSpecialistOperations(job).find((candidate) =>
+    (component.path && candidate.path === component.path)
+    || (component.metadataType === candidate.metadataType && component.apiName === candidate.apiName)
+  );
+  if (!operation) return '';
+  return Object.values(job.specialistResults || {}).find((result) => (result.operations || []).some((candidate) => candidate.path === operation.path))?.specialistId || '';
+}
+
+async function deployDirectMetadata(job, actor) {
+  await verifySelectedOrg(job.orgContext, auditOptions(job, actor));
+  const paths = await ensureJobWorkspace(job.jobId, job.orgContext.orgRegistryId);
+  const implementationProject = resolveImplementationProject(paths, job.implementation);
+  const locks = createComponentLockService({ jobStore: currentJobStore() });
+  const lockRequest = { jobId: job.jobId, componentKeys: job.implementation.componentKeys, lockToken: job.implementation.lockToken };
+  await locks.assertComponentLocksOwned(lockRequest);
+  await locks.renewComponentLocks({ ...lockRequest, leaseSeconds: config.componentLockLeaseSeconds });
+  let leaseFailure = null;
+  const heartbeat = startComponentLockHeartbeat({
+    locks,
+    ...lockRequest,
+    leaseSeconds: config.componentLockLeaseSeconds,
+    intervalMs: config.componentLockHeartbeatMs,
+    onLeaseLost: (error) => { leaseFailure = error; }
+  });
+  const loadArtifact = async (current) => {
+    let componentLeaseOwned = true;
+    try {
+      if (leaseFailure) throw leaseFailure;
+      await locks.assertComponentLocksOwned(lockRequest);
+    } catch { componentLeaseOwned = false; }
+    const inspected = await inspectValidatedArtifact({
+      projectRoot: implementationProject,
+      manifestPath: current.manifest,
+      operations: currentSpecialistOperations(current),
+      runGitCommand: runGit,
+      baselineCommit: current.implementationBaseline.baselineCommit,
+      componentLeaseOwned
+    });
+    return { ...inspected, orgId: job.orgContext.expectedOrgId };
+  };
+  try {
+    const deployment = await executeValidatedDeployment({
+      jobStore: currentJobStore(), jobId: job.jobId, actor, loadArtifact,
+      deploy: async ({ validationId }) => {
+        if (leaseFailure) throw Object.assign(new Error('Component lock ownership was lost.'), { code: 'COMPONENT_LOCK_LOST', statusCode: 409 });
+        await locks.assertComponentLocksOwned(lockRequest);
+        const result = await runSfCommand('deployValidated', { validationId }, { ...sfOptions(job, job.orgContext, paths, actor, job.metadataScope, true), cwd: implementationProject });
+        await appendCommand(job.jobId, result);
+        if (result.exitCode !== 0) throw Object.assign(new Error(sfFailureMessage(result)), { code: 'SALESFORCE_DEPLOYMENT_FAILED', statusCode: 409 });
+        return { deploymentId: extractDeployId(result.stdout), stdout: result.stdout };
+      }
+    });
+    if (deployment.alreadyDeployed) return deployment;
+    const current = await requiredJob(job.jobId);
+    const componentSummary = summarizeMetadataDeployment(current, deployment.result);
+    const finalDeployment = {
+      ...deployment,
+      validationId: current.validation.validationId,
+      targetOrgId: current.validation.targetOrgId,
+      summary: componentSummary.summary,
+      components: componentSummary.components,
+      iteration: current.iteration || current.plan.planVersion,
+      specialistSummary: combinedSpecialistSummary(current, componentSummary),
+      activated: false
+    };
+    await updateJob(job.jobId, { deployment: finalDeployment });
+    await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT, WORK_ITEM_STATUSES.COMPLETED, 'The exact validated package deployed inactive. No Flow was activated.');
+    await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.DOCUMENTATION_EXPLANATION, WORK_ITEM_STATUSES.COMPLETED, 'Validated inactive deployment evidence was recorded.');
+    await transitionJob(job.jobId, JOB_STATES.COMPLETED, { actor, reason: 'The exact approved validated package deployed inactive.', approvalId: finalDeployment.approvalId });
+    return finalDeployment;
+  } finally {
+    heartbeat.stop();
+    await locks.releaseComponentLocks(lockRequest).catch(() => {});
+  }
+}
+
+async function validateDirectMetadataImplementation(job, paths, implementationProject, actor) {
+  const operations = currentSpecialistOperations(job);
+  const locks = createComponentLockService({ jobStore: currentJobStore() });
+  const lockRequest = { jobId: job.jobId, componentKeys: job.implementation.componentKeys, lockToken: job.implementation.lockToken };
+  await locks.assertComponentLocksOwned(lockRequest);
+  const inspect = async () => inspectValidatedArtifact({
+    projectRoot: implementationProject,
+    manifestPath: job.manifest,
+    operations,
+    runGitCommand: runGit,
+    baselineCommit: job.implementationBaseline.baselineCommit,
+    componentLeaseOwned: true
+  });
+  const before = await inspect();
+  assertPreValidationArtifact(job, before);
+  const result = await runSfCommand('deployDryRun', { manifest: job.manifest, preDestructiveChanges: job.implementation.destructiveManifest || '' }, { ...sfOptions(job, job.orgContext, paths, actor, job.metadataScope), cwd: implementationProject });
+  await appendCommand(job.jobId, result);
+  if (result.exitCode !== 0) throw Object.assign(new Error(sfFailureMessage(result)), { validationFailure: structuredSalesforceValidationFailure(result) });
+  await locks.assertComponentLocksOwned(lockRequest);
+  const after = await inspect();
+  assertPreValidationArtifact(job, after);
+  if (stableHash(before) !== stableHash(after)) throw Object.assign(new Error('The implementation artifact changed during Salesforce validation.'), { code: 'STALE_VALIDATION', statusCode: 409 });
+  const now = new Date();
+  const validationId = extractDeployId(result.stdout);
+  if (!/^[A-Za-z0-9]{15,18}$/.test(validationId)) {
+    throw Object.assign(new Error('Salesforce validation did not return a usable validation identity.'), {
+      validationFailure: { code: 'SALESFORCE_API_UNAVAILABLE', source: 'VALIDATION_INFRASTRUCTURE', details: { message: 'Salesforce validation did not return a usable validation identity.' } }
+    });
+  }
+  const validation = {
+    validationId,
+    targetOrgId: job.orgContext.expectedOrgId,
+    status: 'PASSED',
+    sourceHash: after.sourceHash,
+    packageHash: after.packageHash,
+    commitHash: after.commitHash,
+    baselineCommit: after.baselineCommit,
+    planHash: job.plan.planHash,
+    scopeHash: job.metadataScope.hash,
+    metadataScopeHash: job.metadataScope.hash,
+    inspectionHash: job.inspection.hash,
+    commands: [result.command],
+    result: result.stdout,
+    timestamp: now.toISOString(),
+    expiryTimestamp: new Date(now.getTime() + config.validationExpiryMinutes * 60000).toISOString()
+  };
+  await currentJobStore().updateWithComponentLocks(lockRequest, (record) => {
+    if (record.implementation?.commitHash !== validation.commitHash || record.sourceValidation?.sourceHash !== validation.sourceHash) throw Object.assign(new Error('Artifact authority changed before validation persistence.'), { code: 'STALE_VALIDATION', statusCode: 409 });
+    record.validation = validation;
+    record.approvals = (record.approvals || []).filter((approval) => approval.approvalType !== 'DEPLOYMENT');
+  });
+  await completeImplementationWorkItems(job.jobId);
+  await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.TESTING, WORK_ITEM_STATUSES.COMPLETED, 'The exact committed package passed Salesforce dry-run validation.');
+  await transitionAgentWorkItem(job.jobId, SPECIALIST_AGENT_IDS.VALIDATION_DEPLOYMENT, WORK_ITEM_STATUSES.IMPLEMENTATION_COMPLETE, 'The exact inactive package passed validation; separate deployment approval is required.');
+  await transitionJob(job.jobId, JOB_STATES.AWAITING_DEPLOYMENT_APPROVAL, { actor, reason: 'Exact inactive implementation artifact passed Salesforce validation.' });
+  return validation;
+}
+
+function assertPreValidationArtifact(job, artifact) {
+  if (!artifact.clean) throw Object.assign(new Error('Implementation worktree contains unexpected changes.'), { code: 'DEPLOYMENT_WORKTREE_DIRTY', statusCode: 409 });
+  if (artifact.flowStatuses.some((status) => status !== 'Draft')) throw Object.assign(new Error('Every Flow must remain Draft.'), { code: 'FLOW_MUST_BE_INACTIVE', statusCode: 409 });
+  if (artifact.sourceHash !== job.sourceValidation?.sourceHash
+    || artifact.sourceHash !== job.implementation?.sourceHash
+    || artifact.packageHash !== job.implementation?.packageHash
+    || artifact.commitHash !== job.implementation?.commitHash
+    || artifact.baselineCommit !== job.implementationBaseline?.baselineCommit) {
+    throw Object.assign(new Error('Implementation bytes no longer match the committed Task 9 validated artifact.'), { code: 'STALE_VALIDATION', statusCode: 409 });
+  }
+}
+
+function currentSpecialistOperations(job) {
+  return Object.values(job.specialistResults || {}).flatMap((result) => result?.operations || [])
+    .sort((left, right) => `${left.metadataType}:${left.apiName}`.localeCompare(`${right.metadataType}:${right.apiName}`, 'en-US'));
 }
 
 function safeSpecialistFailureCode(error) {
@@ -557,6 +785,91 @@ async function establishImplementationBaseline({ job, operations, actor }) {
 
     return baseline;
   });
+}
+
+async function prepareAndValidateDirectImplementation({ job, operations, baseline, actor }) {
+  const componentKeys = componentKeysForPlan(job.plan);
+  const locks = createComponentLockService({ jobStore: currentJobStore() });
+  const leaseSeconds = Math.min(3600, Math.max(config.componentLockLeaseSeconds, config.validationExpiryMinutes * 60));
+  const acquisition = await locks.acquireComponentLocks({ jobId: job.jobId, componentKeys, leaseSeconds });
+  let persisted = false;
+  try {
+    const assertLeaseOwned = () => locks.assertComponentLocksOwned({ jobId: job.jobId, componentKeys, lockToken: acquisition.lockToken });
+    const paths = await ensureJobWorkspace(job.jobId, job.orgContext.orgRegistryId);
+    const implementationProject = join(paths.jobRoot, baseline.workspacePath);
+    const manifest = await writeManifest(paths, {
+      primaryMetadata: operations.filter((operation) => operation.operation !== 'delete').map((operation) => ({ type: operation.metadataType, apiName: operation.apiName }))
+    }, {
+      destructiveMetadata: operations.filter((operation) => operation.operation === 'delete').map((operation) => ({ type: operation.metadataType, apiName: operation.apiName }))
+    });
+    const implementation = await writeValidatedOperations({
+      job, operations, projectRoot: implementationProject, manifestPath: manifest,
+      runGitCommand: runGit, assertLeaseOwned
+    });
+    const durableImplementation = {
+      ...implementation,
+      approvalId: validApproval(job, 'IMPLEMENTATION', { orgContext: job.orgContext }).approvalId,
+      workspacePath: baseline.workspacePath,
+      componentKeys,
+      lockToken: acquisition.lockToken,
+      leaseExpiresAt: acquisition.leaseExpiresAt,
+      manifest,
+      destructiveManifest: operations.some((operation) => operation.operation === 'delete') ? join(paths.manifest, 'destructiveChangesPre.xml') : ''
+    };
+    await locks.updateWithComponentLocks({ jobId: job.jobId, componentKeys, lockToken: acquisition.lockToken }, (record) => {
+      if (record.sourceValidation?.sourceHash !== implementation.sourceHash || record.implementationBaseline?.baselineCommit !== implementation.baselineCommit) {
+        throw baselineFailure('STALE_SOURCE_VALIDATION', 'Source authority changed before implementation persistence.');
+      }
+      record.implementation = durableImplementation;
+      record.manifest = manifest;
+      record.validation = null;
+      record.deployment = null;
+      record.dataPreview = null;
+    });
+    persisted = true;
+    await appendLog(job.jobId, 'info', `Wrote and committed ${operations.length} exact Task 9 validated metadata operations in the isolated worktree. No deployment ran.`);
+    await validate(await requiredJob(job.jobId), actor);
+    return { jobId: job.jobId, status: (await requiredJob(job.jobId)).status, specialistStatus: 'COMPLETED', sourceWritten: true, sourceEligible: true, sourceValidation: job.sourceValidation, implementationBaseline: baseline, implementation: durableImplementation };
+  } finally {
+    if (!persisted) await locks.releaseComponentLocks({ jobId: job.jobId, componentKeys, lockToken: acquisition.lockToken }).catch(() => {});
+  }
+}
+
+async function rewriteAndValidateCorrectedDirectImplementation(jobId, actor) {
+  const job = await requiredJob(jobId);
+  const operations = currentSpecialistOperations(job);
+  const paths = await ensureJobWorkspace(job.jobId, job.orgContext.orgRegistryId);
+  const implementationProject = resolveImplementationProject(paths, job.implementation);
+  const componentKeys = componentKeysForPlan(job.plan);
+  const lockRequest = { jobId: job.jobId, componentKeys, lockToken: job.implementation?.lockToken };
+  const locks = createComponentLockService({ jobStore: currentJobStore() });
+  const implementation = await writeValidatedOperations({
+    job,
+    operations,
+    projectRoot: implementationProject,
+    manifestPath: job.manifest,
+    runGitCommand: runGit,
+    assertLeaseOwned: () => locks.assertComponentLocksOwned(lockRequest)
+  });
+  await locks.updateWithComponentLocks(lockRequest, (record) => {
+    if (record.status !== JOB_STATES.VALIDATING
+      || record.sourceValidation?.sourceHash !== implementation.sourceHash
+      || record.implementation?.commitHash !== job.implementation.commitHash
+      || record.implementationBaseline?.baselineCommit !== implementation.baselineCommit) {
+      throw baselineFailure('STALE_SOURCE_VALIDATION', 'Corrected source authority changed before implementation persistence.');
+    }
+    record.implementation = {
+      ...record.implementation,
+      ...implementation,
+      baselineCommit: record.implementationBaseline.baselineCommit
+    };
+    record.validation = null;
+    record.deployment = null;
+    record.dataPreview = null;
+    record.approvals = (record.approvals || []).filter((approval) => !['DEPLOYMENT', 'DATA_OPERATION'].includes(approval.approvalType || approval.type));
+  });
+  await appendLog(job.jobId, 'info', 'Rewrote, recommitted, and rehashed the bounded Task 11 correction. The prior validation and deployment authority remain invalid.');
+  return validate(await requiredJob(job.jobId), actor);
 }
 
 export function assertImplementationBaselineEligibility(job, operations) {
@@ -774,6 +1087,31 @@ async function resolveDirectOrgContext(job, actor) {
   if (!sameSalesforceId(orgContext?.expectedOrgId, job.orgId)) throw Object.assign(new Error('Resolved Salesforce org context does not match the job org.'), { statusCode: 409 });
   return orgContext;
 }
+
+function assertDataOperationGuard(job) {
+  const validation = job.validation;
+  if (!validation || validation.status !== 'PASSED' || validation.outcome !== 'DATA_OPERATIONS_VALIDATED' || new Date(validation.expiryTimestamp) <= new Date()) throw new Error('A current successful data validation is required.');
+  if (!sameSalesforceId(validation.targetOrgId, job.orgContext.expectedOrgId)) throw new Error('Validated data operations do not match the selected org.');
+  if (job.orgContext.dataMutationPermission !== 'allowed') throw new Error('Data mutation is not enabled for the selected org registry entry.');
+  if (job.plan.dataOperations?.some((operation) => operation.operation === 'delete') && job.orgContext.recordDeletionPermission !== 'allowed') throw new Error('Record deletion is not enabled for the selected org registry entry.');
+}
+
+function previewForDataOperations(job, operations, expiresAt, beforeValues = []) {
+  return buildDataPreview({
+    jobId: job.jobId,
+    orgId: job.orgId || job.orgContext.expectedOrgId,
+    scopeHash: job.metadataScope.hash,
+    operationId: stableHash(operations.map(({ operation, objectApiName, recordId }) => ({ operation, objectApiName, recordId: recordId || '' }))),
+    operation: operations.length === 1 ? operations[0].operation : 'batch',
+    objectApiName: operations.length === 1 ? operations[0].objectApiName : 'MULTIPLE_APPROVED_OBJECTS',
+    selectionIdentity: stableHash(operations.map(({ objectApiName, recordId }, index) => ({ objectApiName, recordIdentity: recordId || `create:${index}` }))),
+    recordIds: operations.map((operation, index) => operation.recordId || `create:${index}`),
+    fields: operations.flatMap((operation) => Object.keys(operation.fields || {})),
+    changeSummary: operations.map((operation) => ({ operation: operation.operation, objectApiName: operation.objectApiName, fields: Object.keys(operation.fields || {}).sort() })),
+    beforeValues,
+    expiresAt
+  });
+}
 async function persistSafeDirectOrgContext(job, orgContext) {
   if (job.source === 'salesforce-chat') await updateJob(job.jobId, { orgContext });
 }
@@ -800,7 +1138,8 @@ async function validatePlannedDataOperations(job, paths, actor) {
   if (deleteCount > job.orgContext.maximumDeleteOperations) throw new Error(`Record deletion count exceeds the org limit of ${job.orgContext.maximumDeleteOperations}.`);
   if (deleteCount && job.orgContext.environment === 'production') throw new Error('Direct production record deletion is blocked.');
   const commands = [];
-  for (const operation of operations) {
+  const beforeValues = [];
+  for (const [operationIndex, operation] of operations.entries()) {
     if (!isDataObjectAllowed(job.orgContext, operation.objectApiName)) throw new Error(`Data operations on ${operation.objectApiName} are not allowed for this org.`);
     const requiredPermission = operation.operation === 'create' ? 'data-create' : operation.operation === 'update' ? 'data-update' : 'data-delete';
     if (!job.orgContext.allowedOperations.includes(requiredPermission)) throw new Error(`${requiredPermission} is not allowed for this org.`);
@@ -825,12 +1164,18 @@ async function validatePlannedDataOperations(job, paths, actor) {
       }
     }
     if (['update', 'delete'].includes(operation.operation)) {
-      const query = await runSfCommand('dataQuery', { query: `SELECT Id FROM ${operation.objectApiName} WHERE Id = '${operation.recordId}' LIMIT 1` }, sfOptions(job, job.orgContext, paths, actor, job.metadataScope));
+      const selectedFields = ['Id', ...(operation.operation === 'update' ? Object.keys(operation.fields).sort() : [])];
+      const query = await runSfCommand('dataQuery', { query: `SELECT ${selectedFields.join(', ')} FROM ${operation.objectApiName} WHERE Id = '${operation.recordId}' LIMIT 1` }, sfOptions(job, job.orgContext, paths, actor, job.metadataScope));
       await appendCommand(job.jobId, query); commands.push(query.command);
-      if (query.exitCode !== 0 || Number(JSON.parse(query.stdout)?.result?.totalSize || 0) !== 1) throw new Error(`The approved ${operation.operation} record does not exist in the verified target org.`);
+      const queryResult = JSON.parse(query.stdout)?.result;
+      if (query.exitCode !== 0 || Number(queryResult?.totalSize || 0) !== 1) throw new Error(`The approved ${operation.operation} record does not exist in the verified target org.`);
+      const record = queryResult.records?.[0] || {};
+      beforeValues.push({ operationIndex, objectApiName: operation.objectApiName, recordId: operation.recordId, values: Object.fromEntries(selectedFields.map((field) => [field, record[field] ?? null])) });
+    } else {
+      beforeValues.push({ operationIndex, objectApiName: operation.objectApiName, recordId: `create:${operationIndex}`, values: null });
     }
   }
-  return commands;
+  return { commands, beforeValues };
 }
 async function assertCleanImplementation(implementationProject, implementation, plan) {
   if (!implementation) throw new Error('A completed local implementation record is required.');

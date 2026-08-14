@@ -449,7 +449,7 @@ test('deployment endpoint with missing approval org ID does not transition or qu
     source: 'salesforce-chat',
     prompt: 'Create a Flow'
   });
-  await updateJob(jobId, deploymentReadyPatch({ approvals: [deploymentApproval({ salesforceOrganizationId: '' })] }));
+  await updateJob(jobId, deploymentReadyPatch(jobId, { approvalOverrides: { salesforceOrganizationId: '' } }));
   const before = sideEffectSnapshot(await getJobRecord(jobId), queueCalls);
 
   const response = await postJson(`${base}/api/jobs/${jobId}/deploy`, {}, deployerHeaders('005g5000009ImIlAAK'));
@@ -472,7 +472,7 @@ test('deployment endpoint with mismatched approval org ID does not transition or
     source: 'salesforce-chat',
     prompt: 'Create a Flow'
   });
-  await updateJob(jobId, deploymentReadyPatch({ approvals: [deploymentApproval({ salesforceOrganizationId: '00Dg500000E07fAEAR' })] }));
+  await updateJob(jobId, deploymentReadyPatch(jobId, { approvalOverrides: { salesforceOrganizationId: '00Dg500000E07fAEAR' } }));
   const before = sideEffectSnapshot(await getJobRecord(jobId), queueCalls);
 
   const response = await postJson(`${base}/api/jobs/${jobId}/deploy`, {}, deployerHeaders('005g5000009ImIlAAK'));
@@ -495,7 +495,7 @@ test('deployment endpoint queues correctly org-bound same-org approval', async (
     source: 'salesforce-chat',
     prompt: 'Create a Flow'
   });
-  await updateJob(jobId, deploymentReadyPatch());
+  await updateJob(jobId, deploymentReadyPatch(jobId));
 
   const response = await postJson(`${base}/api/jobs/${jobId}/deploy`, {}, deployerHeaders('005g5000009ImIlAAK'));
 
@@ -503,6 +503,51 @@ test('deployment endpoint queues correctly org-bound same-org approval', async (
   assert.equal((await getJobRecord(jobId)).status, 'DEPLOYING');
   assert.equal(queueCalls.length, 1);
   assert.deepEqual(queueCalls[0].job, { jobId, action: 'deploy', actor: '005g5000009ImIlAAK' });
+});
+
+test('deployment approval is atomically derived from the persisted exact validation artifact', async (t) => {
+  const { base, close } = await testServer(t, { resolveSameOrg: async ({ authenticatedOrgId }) => trustedContext(authenticatedOrgId), enqueue: async () => {} });
+  t.after(close);
+  const jobId = `approve-exact-deploy-${Date.now()}`;
+  await createJobRecord({ jobId, userId: '005g5000009ImIkAAK', orgId: '00Dg500000E07e9EAB', source: 'salesforce-chat', prompt: 'Create a Flow' });
+  await updateJob(jobId, deploymentReadyPatch(jobId, { approvals: [] }));
+
+  const response = await postJson(`${base}/api/jobs/${jobId}/approve-deployment`, {
+    validationId: 'validation-1', packageHash: 'attacker-hash', commitHash: 'attacker-commit'
+  }, deployerHeaders('005g5000009ImIlAAK'));
+
+  assert.equal(response.status, 201);
+  const persisted = (await getJobRecord(jobId)).approvals.at(-1);
+  assert.equal(persisted.approvalType, 'DEPLOYMENT');
+  assert.equal(persisted.packageHash, TASK12_HASHES.package);
+  assert.equal(persisted.commitHash, TASK12_HASHES.commit);
+  assert.equal(persisted.baselineCommit, TASK12_HASHES.baseline);
+  assert.equal(persisted.inspectionHash, TASK12_HASHES.inspection);
+  assert.equal(persisted.expiresAt, (await getJobRecord(jobId)).validation.expiryTimestamp);
+  assert.equal(JSON.stringify(persisted).includes('attacker'), false);
+});
+
+test('data preview approval is separate, exact, and durable', async (t) => {
+  const { base, close } = await testServer(t);
+  t.after(close);
+  const jobId = `approve-data-preview-${Date.now()}`;
+  const preview = {
+    jobId, salesforceOrganizationId: '00Dg500000E07e9EAB', scopeHash: TASK12_HASHES.scope,
+    operationId: 'update:Account:selection', operation: 'update', objectApiName: 'Account',
+    selectionIdentity: 'selection', recordIds: Array.from({ length: 11 }, (_, index) => `0010000000000${String(index + 1).padStart(2, '0')}AAA`),
+    recordCount: 11, fields: ['Status__c'], changeSummary: [{ field: 'Status__c', action: 'set approved value' }],
+    previewHash: TASK12_HASHES.preview, requiresApproval: true, expiresAt: new Date(Date.now() + 60000).toISOString()
+  };
+  await createJobRecord({ jobId, userId: '005g5000009ImIkAAK', orgId: '00Dg500000E07e9EAB', source: 'salesforce-chat', prompt: 'Update approved records' });
+  await updateJob(jobId, { status: 'AWAITING_DEPLOYMENT_APPROVAL', metadataScope: { hash: TASK12_HASHES.scope }, dataPreview: preview, validation: { expiryTimestamp: preview.expiresAt } });
+
+  const response = await postJson(`${base}/api/jobs/${jobId}/approve-data-preview`, { previewHash: TASK12_HASHES.preview, recordCount: 999 }, implementerHeaders('005g5000009ImIkAAK'));
+
+  assert.equal(response.status, 201);
+  const approval = (await getJobRecord(jobId)).approvals.at(-1);
+  assert.equal(approval.approvalType, 'DATA_OPERATION');
+  assert.equal(approval.previewHash, TASK12_HASHES.preview);
+  assert.equal(approval.recordCount, 11);
 });
 
 test('Jira-specific routes remain available when Jira is enabled', async (t) => {
@@ -563,6 +608,18 @@ function deployerHeaders(userId) {
   };
 }
 
+function implementerHeaders(userId) {
+  return {
+    'X-Agent-User-Id': userId,
+    'X-Agent-Source': 'Salesforce-Apex',
+    'X-Agent-Role': 'admin',
+    'X-Agent-Org-Id': '00Dg500000E07e9EAB',
+    'X-Agent-Can-Deploy': 'false',
+    'X-Agent-Can-Implement': 'true',
+    'Content-Type': 'application/json'
+  };
+}
+
 function salesforceChatHeaders(userId) {
   return {
     Authorization: 'Bearer unit-test-token',
@@ -593,11 +650,15 @@ function waitForQueueTick() {
   return new Promise((resolve) => setTimeout(resolve, 25));
 }
 
-function deploymentReadyPatch(overrides = {}) {
-  return {
+function deploymentReadyPatch(jobId, overrides = {}) {
+  const expiryTimestamp = new Date(Date.now() + 60000).toISOString();
+  const validationTimestamp = new Date().toISOString();
+  const { approvalOverrides = {}, ...patchOverrides } = overrides;
+  const patch = {
     status: 'AWAITING_DEPLOYMENT_APPROVAL',
-    plan: { planVersion: 1, planHash: 'plan-hash', materialChangeHash: 'material-hash', fileOperations: [{ path: 'force-app/main/default/flows/Test.flow-meta.xml', operation: 'modify' }], dataOperations: [] },
-    metadataScope: { hash: 'scope-hash' },
+    plan: { planVersion: 1, planHash: TASK12_HASHES.plan, scopeHash: TASK12_HASHES.scope, materialChangeHash: 'material-hash', trustedBinding: { sourceOrgId: '00Dg500000E07e9EAB', inspectionHash: TASK12_HASHES.inspection }, components: [{ metadataType: 'Flow', apiName: 'Test' }], fileOperations: [{ path: 'force-app/main/default/flows/Test.flow-meta.xml', operation: 'modify' }], dataOperations: [] },
+    metadataScope: { hash: TASK12_HASHES.scope },
+    inspection: { hash: TASK12_HASHES.inspection },
     orgContext: {
       orgRegistryId: 'providus_orgfarm_dev',
       expectedOrgId: '00Dg500000E07e9EAB',
@@ -605,21 +666,29 @@ function deploymentReadyPatch(overrides = {}) {
       deploymentPermission: 'allowed',
       allowedOperations: ['read', 'retrieve', 'validate', 'deploy']
     },
-    implementation: { approvalId: 'approval-1', sourceHash: 'source-hash', commitHash: 'commit-hash', changedFiles: ['force-app/main/default/flows/Test.flow-meta.xml'], workspacePath: 'implementation/project' },
+    sourceValidation: { status: 'PASSED', sourceHash: TASK12_HASHES.source, sourceOrgId: '00Dg500000E07e9EAB', planHash: TASK12_HASHES.plan, scopeHash: TASK12_HASHES.scope, inspectionHash: TASK12_HASHES.inspection },
+    implementationBaseline: { status: 'CAPTURED', baselineCommit: TASK12_HASHES.baseline, sourceHash: TASK12_HASHES.source, sourceOrgId: '00Dg500000E07e9EAB', planHash: TASK12_HASHES.plan, scopeHash: TASK12_HASHES.scope, inspectionHash: TASK12_HASHES.inspection, componentKeys: ['Flow:Test'], sourceWritten: true },
+    implementation: { approvalId: 'approval-1', baselineCommit: TASK12_HASHES.baseline, sourceHash: TASK12_HASHES.source, packageHash: TASK12_HASHES.package, commitHash: TASK12_HASHES.commit, componentKeys: ['Flow:Test'], changedFiles: ['force-app/main/default/flows/Test.flow-meta.xml'], workspacePath: 'implementation/project' },
     validation: {
       validationId: 'validation-1',
       targetOrgId: '00Dg500000E07e9EAB',
       status: 'PASSED',
-      sourceHash: 'source-hash',
-      commitHash: 'commit-hash',
-      planHash: 'plan-hash',
-      metadataScopeHash: 'scope-hash',
-      packageHash: 'package-hash',
-      expiryTimestamp: new Date(Date.now() + 60000).toISOString()
+      sourceHash: TASK12_HASHES.source,
+      commitHash: TASK12_HASHES.commit,
+      baselineCommit: TASK12_HASHES.baseline,
+      planHash: TASK12_HASHES.plan,
+      scopeHash: TASK12_HASHES.scope,
+      metadataScopeHash: TASK12_HASHES.scope,
+      inspectionHash: TASK12_HASHES.inspection,
+      packageHash: TASK12_HASHES.package,
+      timestamp: validationTimestamp,
+      expiryTimestamp
     },
-    approvals: [deploymentApproval()],
-    ...overrides
+    approvals: [],
+    ...patchOverrides
   };
+  if (!Object.hasOwn(patchOverrides, 'approvals')) patch.approvals = [deploymentApproval({ jobId, validationTimestamp, expiresAt: expiryTimestamp, ...approvalOverrides })];
+  return patch;
 }
 
 function deploymentApproval(overrides = {}) {
@@ -627,15 +696,30 @@ function deploymentApproval(overrides = {}) {
     approvalId: 'approval-deploy-1',
     approvalType: 'DEPLOYMENT',
     decision: 'APPROVED',
-    planHash: 'plan-hash',
-    metadataScopeHash: 'scope-hash',
+    jobId: '',
+    planVersion: 1,
+    planHash: TASK12_HASHES.plan,
+    metadataScopeHash: TASK12_HASHES.scope,
+    inspectionHash: TASK12_HASHES.inspection,
+    baselineCommit: TASK12_HASHES.baseline,
     validationId: 'validation-1',
-    validatedSourceHash: 'source-hash',
-    deploymentPackageHash: 'package-hash',
+    sourceHash: TASK12_HASHES.source,
+    packageHash: TASK12_HASHES.package,
+    commitHash: TASK12_HASHES.commit,
+    sourceOrgId: '00Dg500000E07e9EAB',
+    validationTimestamp: '',
+    expiresAt: new Date(Date.now() + 60000).toISOString(),
+    validatedSourceHash: TASK12_HASHES.source,
+    deploymentPackageHash: TASK12_HASHES.package,
     salesforceOrganizationId: '00Dg500000E07e9EAB',
     ...overrides
   };
 }
+
+const TASK12_HASHES = Object.freeze({
+  plan: '1'.repeat(64), scope: '2'.repeat(64), inspection: '3'.repeat(64), source: '4'.repeat(64),
+  package: '5'.repeat(64), commit: '6'.repeat(40), baseline: '7'.repeat(40), preview: '8'.repeat(64)
+});
 
 function sideEffectSnapshot(job, queueCalls) {
   return {

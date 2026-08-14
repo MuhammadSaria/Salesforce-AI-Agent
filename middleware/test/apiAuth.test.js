@@ -539,9 +539,20 @@ async function createApprovalReadyJob(jobId, { userId = ORG_A_USER_ID, orgId = O
 
 async function createDeploymentReadyJob(jobId, options = {}) {
   await createApprovalReadyJob(jobId, options);
+  const job = await getJobRecord(jobId);
+  const sourceHash = '4'.repeat(64);
+  const packageHash = '5'.repeat(64);
+  const commitHash = '6'.repeat(40);
+  const baselineCommit = '7'.repeat(40);
+  const timestamp = new Date().toISOString();
+  const expiryTimestamp = new Date(Date.now() + 60000).toISOString();
+  const orgId = options.orgId || ORG_A_ID;
   await updateJob(jobId, {
     status: 'AWAITING_DEPLOYMENT_APPROVAL',
-    validation: { validationId: 'validation-1', targetOrgId: options.orgId || ORG_A_ID, sourceHash: 'source-hash', packageHash: 'package-hash' }
+    sourceValidation: { status: 'PASSED', sourceHash, sourceOrgId: orgId, planHash: job.plan.planHash, scopeHash: job.metadataScope.hash, inspectionHash: job.inspection.hash },
+    implementationBaseline: { status: 'CAPTURED', baselineCommit, sourceHash, sourceOrgId: orgId, planHash: job.plan.planHash, scopeHash: job.metadataScope.hash, inspectionHash: job.inspection.hash },
+    implementation: { baselineCommit, sourceHash, packageHash, commitHash },
+    validation: { validationId: 'validation-1', targetOrgId: orgId, status: 'PASSED', sourceHash, packageHash, commitHash, baselineCommit, planHash: job.plan.planHash, scopeHash: job.metadataScope.hash, inspectionHash: job.inspection.hash, timestamp, expiryTimestamp }
   });
 }
 

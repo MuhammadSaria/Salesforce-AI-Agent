@@ -118,12 +118,16 @@ const COMMANDS = {
   },
   deployDryRun: {
     operation: 'validate',
-    args: ({ manifest, targetOrg, tests }) => {
+    args: ({ manifest, preDestructiveChanges, targetOrg, tests }) => {
       const args = ['project', 'deploy', 'start', '--dry-run', '--manifest', manifest, '--target-org', targetOrg, '--test-level', tests ? 'RunSpecifiedTests' : 'RunLocalTests', '--json'];
+      if (preDestructiveChanges) args.push('--pre-destructive-changes', preDestructiveChanges);
       if (tests) args.push('--tests', tests);
       return args;
     },
-    validate: ({ manifest }) => validateManifestPath(manifest)
+    validate: ({ manifest, preDestructiveChanges }) => {
+      validateManifestPath(manifest);
+      if (preDestructiveChanges) validateManifestPath(preDestructiveChanges);
+    }
   },
   deployManifest: {
     operation: 'deploy',
@@ -134,6 +138,14 @@ const COMMANDS = {
       return args;
     },
     validate: ({ manifest }) => validateManifestPath(manifest)
+  },
+  deployValidated: {
+    operation: 'deploy',
+    requiresApproval: true,
+    args: ({ validationId, targetOrg }) => ['project', 'deploy', 'quick', '--job-id', validationId, '--target-org', targetOrg, '--json'],
+    validate: ({ validationId }) => {
+      if (!/^[A-Za-z0-9]{15,18}$/.test(String(validationId || ''))) throw new Error('A valid Salesforce validation job ID is required.');
+    }
   }
 };
 
